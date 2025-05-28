@@ -86,7 +86,7 @@ export const googlePlacesRouter: Router = (() => {
 
   router.post(
     '/query',
-    validateRequest(GooglePlacesApiRequestBodySchema),
+    validateRequest(z.object({ body: GooglePlacesApiRequestBodySchema })),
     async (req: Request, res: Response) => {
       const requestBody = req.body as z.infer<typeof GooglePlacesApiRequestBodySchema>;
       const apiKeyToUse = requestBody.apiKey;
