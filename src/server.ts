@@ -16,6 +16,7 @@ import { powerpointGeneratorRouter } from './routes/powerpointGenerator/powerpoi
 import { webPageReaderRouter } from './routes/webPageReader/webPageReaderRouter';
 import { wordGeneratorRouter } from './routes/wordGenerator/wordGeneratorRouter';
 import { youtubeTranscriptRouter } from './routes/youtubeTranscript/youtubeTranscriptRouter';
+import { googlePlacesRouter } from './routes/googlePlaces/googlePlacesRouter';
 const logger = pino({ name: 'server start' });
 const app: Express = express();
 
@@ -44,6 +45,7 @@ app.use('/powerpoint-generator', powerpointGeneratorRouter);
 app.use('/word-generator', wordGeneratorRouter);
 app.use('/excel-generator', excelGeneratorRouter);
 app.use('/notion-database', notionDatabaseRouter);
+app.use('/google-places', googlePlacesRouter);
 
 // Swagger UI
 app.use(openAPIRouter);

@@ -7,6 +7,7 @@ import { powerpointGeneratorRegistry } from '@/routes/powerpointGenerator/powerp
 import { articleReaderRegistry } from '@/routes/webPageReader/webPageReaderRouter';
 import { wordGeneratorRegistry } from '@/routes/wordGenerator/wordGeneratorRouter';
 import { youtubeTranscriptRegistry } from '@/routes/youtubeTranscript/youtubeTranscriptRouter';
+import { googlePlacesRegistry } from '@/routes/googlePlaces/googlePlacesRouter';
 
 export function generateOpenAPIDocument() {
   const registry = new OpenAPIRegistry([
@@ -17,6 +18,7 @@ export function generateOpenAPIDocument() {
     wordGeneratorRegistry,
     excelGeneratorRegistry,
     notionDatabaseRegistry,
+    googlePlacesRegistry,
   ]);
   const generator = new OpenApiGeneratorV3(registry.definitions);
 
