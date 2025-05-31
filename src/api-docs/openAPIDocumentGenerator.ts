@@ -8,6 +8,7 @@ import { articleReaderRegistry } from '@/routes/webPageReader/webPageReaderRoute
 import { wordGeneratorRegistry } from '@/routes/wordGenerator/wordGeneratorRouter';
 import { youtubeTranscriptRegistry } from '@/routes/youtubeTranscript/youtubeTranscriptRouter';
 import { googlePlacesRegistry } from '@/routes/googlePlaces/googlePlacesRouter';
+import { tavilyExtractRegistry } from '@/routes/tavilyExtract';
 
 export function generateOpenAPIDocument() {
   const registry = new OpenAPIRegistry([
@@ -19,6 +20,7 @@ export function generateOpenAPIDocument() {
     excelGeneratorRegistry,
     notionDatabaseRegistry,
     googlePlacesRegistry,
+    tavilyExtractRegistry,
   ]);
   const generator = new OpenApiGeneratorV3(registry.definitions);
 

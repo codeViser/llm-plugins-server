@@ -26,3 +26,4 @@ public/images/*
 *.njsproj
 *.sln
 *.sw?
+plans/
