@@ -6,14 +6,15 @@ import { logger } from '@/server';
 import { ServiceResponse, ResponseStatus } from '@/common/models/serviceResponse';
 import { handleServiceResponse } from '@/common/utils/httpHandlers';
 
-interface TavilyExtractRequestBody {
+interface TavilyAdvancedExtractRequestBody {
   urls: string[];
   include_images?: boolean;
   tavilyAPIKey: string;
+  // extract_depth is not received from client for this dedicated advanced endpoint
 }
 
 export const handleAdvancedExtract = async (req: Request, res: Response) => {
-  const { urls, include_images, tavilyAPIKey } = req.body as TavilyExtractRequestBody;
+  const { urls, include_images, tavilyAPIKey } = req.body as TavilyAdvancedExtractRequestBody;
 
   if (!tavilyAPIKey) {
     const serviceResponse = new ServiceResponse(ResponseStatus.Failed, 'Tavily API Key is missing in request body', null, StatusCodes.BAD_REQUEST);
@@ -29,7 +30,7 @@ export const handleAdvancedExtract = async (req: Request, res: Response) => {
   const tavilyRequestBody = {
     urls: urls,
     include_images: include_images || false,
-    extract_depth: "advanced",
+    extract_depth: "advanced", // Server now hardcodes this for advanced extraction
   };
 
   try {
@@ -39,32 +40,29 @@ export const handleAdvancedExtract = async (req: Request, res: Response) => {
         "Authorization": `Bearer ${tavilyAPIKey}`,
       },
       responseType: 'json',
-      throwHttpErrors: false, // We want to handle HTTP errors manually to forward Tavily's response
+      throwHttpErrors: false,
     });
 
-    // Type assertion for the body, as got with responseType: 'json' will parse it.
     const responseData = tavilyResponse.body as any;
 
     if (tavilyResponse.statusCode !== StatusCodes.OK) {
-      logger.error({ data: responseData, statusCode: tavilyResponse.statusCode }, `Tavily API request failed`);
+      logger.error({ data: responseData, statusCode: tavilyResponse.statusCode }, `Tavily API request failed (advanced extract)`);
       const errorMessage = responseData?.message || responseData?.error || JSON.stringify(responseData);
       const serviceResponse = new ServiceResponse(ResponseStatus.Failed, `Tavily API error: ${errorMessage}`, responseData, tavilyResponse.statusCode as StatusCodes);
       return handleServiceResponse(serviceResponse, res);
     }
     
-    // Tavily API was successful, forward the data
     res.status(StatusCodes.OK).json(responseData);
 
   } catch (error: any) {
     logger.error(error, 'Error during advanced Tavily API call');
-    // Check if it's a GotError to potentially extract more details
     let message = 'An unexpected error occurred';
     if (error.response && error.response.body) {
         try {
-            const gotErrorBody = JSON.parse(error.response.body);
-            message = gotErrorBody.message || gotErrorBody.error || error.response.body;
+            const gotErrorBody = JSON.parse(error.response.body as string);
+            message = gotErrorBody.message || gotErrorBody.error || (error.response.body as string);
         } catch (e) {
-            message = error.response.body || error.message;
+            message = (error.response.body as string) || error.message;
         }
     } else if (error.message) {
         message = error.message;
