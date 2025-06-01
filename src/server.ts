@@ -18,6 +18,7 @@ import { wordGeneratorRouter } from './routes/wordGenerator/wordGeneratorRouter'
 import { youtubeTranscriptRouter } from './routes/youtubeTranscript/youtubeTranscriptRouter';
 import { googlePlacesRouter } from './routes/googlePlaces/googlePlacesRouter';
 import { tavilyExtractRouter } from './routes/tavilyExtract';
+import { tavilyCrawlRouter } from './routes/tavilyCrawl';
 const logger = pino({ name: 'server start' });
 const app: Express = express();
 
@@ -48,6 +49,7 @@ app.use('/excel-generator', excelGeneratorRouter);
 app.use('/notion-database', notionDatabaseRouter);
 app.use('/google-places', googlePlacesRouter);
 app.use('/api/tavily/extract', tavilyExtractRouter);
+app.use('/api/tavily/crawl', tavilyCrawlRouter);
 
 // Swagger UI
 app.use(openAPIRouter);
