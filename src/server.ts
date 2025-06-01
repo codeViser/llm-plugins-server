@@ -30,9 +30,36 @@ const app: Express = express();
 // Set the application to trust the reverse proxy
 app.set('trust proxy', true);
 // Middlewares
+const allowedOriginsFromEnv = env.CORS_ORIGIN ? env.CORS_ORIGIN.split(',').map((s) => s.trim()) : [];
+const isWildcard = allowedOriginsFromEnv.includes('*');
+
 app.use(
   cors({
-    origin: env.CORS_ORIGIN.split(','), // Allow multiple origins if specified in env, or reflects request origin if env.CORS_ORIGIN is *
+    origin: (requestOrigin, callback) => {
+      // Allow requests with no origin (like mobile apps or curl requests)
+      if (!requestOrigin) {
+        return callback(null, true);
+      }
+      // If wildcard is specified in env, reflect the current origin
+      if (isWildcard) {
+        return callback(null, true); // True here means reflect the requestOrigin
+      }
+      // If specific origins are listed, check if the requestOrigin is among them
+      if (allowedOriginsFromEnv.includes(requestOrigin)) {
+        return callback(null, true);
+      }
+      // If origin is literally 'null' (often from sandboxed iframes)
+      // and wildcard was intended, we can consider allowing it.
+      // However, be cautious with 'null' origin + credentials.
+      // For TypingMind sandboxed iframes, this might be necessary.
+      if (requestOrigin === 'null' && env.CORS_ORIGIN === '*') {
+        // This condition means CORS_ORIGIN was explicitly set to '*'
+        // allowing null in this specific case for iframe compatibility.
+        return callback(null, true);
+      }
+      // Otherwise, disallow the origin
+      return callback(new Error(`Origin ${requestOrigin} not allowed by CORS`));
+    },
     credentials: true,
   })
 );
