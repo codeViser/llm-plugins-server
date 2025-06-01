@@ -85,7 +85,7 @@ googleWorkspaceRouter.get('/drive/search', async (req: Request, res: Response) =
     const searchParams: any = {
       q: query,
       pageSize: parseInt(req.query.pageSize as string) || 20,
-      fields: 'nextPageToken, files(id, name, mimeType, webViewLink, iconLink, modifiedTime, snippet)',
+      fields: 'nextPageToken, files(id, name, mimeType, webViewLink, iconLink, modifiedTime)',
       corpora: (req.query.corpora as string) || 'user',
       includeItemsFromAllDrives: req.query.includeItemsFromAllDrives === 'true',
       supportsAllDrives: true,
