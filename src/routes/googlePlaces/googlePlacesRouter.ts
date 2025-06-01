@@ -1,18 +1,15 @@
 import { OpenAPIRegistry } from '@asteasolutions/zod-to-openapi';
 import express, { Request, Response, Router } from 'express';
+import got from 'got';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
-import got from 'got';
 
 import { createApiRequestBody } from '@/api-docs/openAPIRequestBuilders';
 import { createApiResponse } from '@/api-docs/openAPIResponseBuilders';
 import { ResponseStatus, ServiceResponse } from '@/common/models/serviceResponse';
 import { handleServiceResponse, validateRequest } from '@/common/utils/httpHandlers';
 
-import {
-  GooglePlacesApiRequestBodySchema,
-  GooglePlacesApiResponseSchema,
-} from './googlePlacesModel';
+import { GooglePlacesApiRequestBodySchema, GooglePlacesApiResponseSchema } from './googlePlacesModel';
 
 export const googlePlacesRegistry = new OpenAPIRegistry();
 googlePlacesRegistry.register('GooglePlacesApi', GooglePlacesApiResponseSchema);
@@ -103,7 +100,12 @@ export const googlePlacesRouter: Router = (() => {
 
       try {
         const result = await fetchFromGooglePlacesApi(requestBody);
-        const serviceResponse = new ServiceResponse(ResponseStatus.Success, 'Data fetched successfully', result, StatusCodes.OK);
+        const serviceResponse = new ServiceResponse(
+          ResponseStatus.Success,
+          'Data fetched successfully',
+          result,
+          StatusCodes.OK
+        );
         return handleServiceResponse(serviceResponse, res);
       } catch (error: any) {
         const errorMessage = error.message || 'An unknown error occurred while fetching from Google Places API.';
@@ -111,7 +113,9 @@ export const googlePlacesRouter: Router = (() => {
           ResponseStatus.Failed,
           errorMessage,
           null,
-          error.message.includes('parameter') || error.message.includes('Invalid searchType') || error.message.includes('API Key')
+          error.message.includes('parameter') ||
+          error.message.includes('Invalid searchType') ||
+          error.message.includes('API Key')
             ? StatusCodes.BAD_REQUEST
             : StatusCodes.INTERNAL_SERVER_ERROR
         );
@@ -121,4 +125,4 @@ export const googlePlacesRouter: Router = (() => {
   );
 
   return router;
-})(); 
+})();

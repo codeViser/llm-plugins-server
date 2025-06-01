@@ -1,4 +1,5 @@
-import express, { Router, Request, Response } from 'express';
+import express, { Request, Response, Router } from 'express';
+
 import passport from './googleAuth.service'; // Adjust path as necessary
 
 export const googleAuthRouter: Router = (() => {
@@ -41,7 +42,9 @@ export const googleAuthRouter: Router = (() => {
   // Logout route
   router.get('/logout', (req: Request, res: Response, next) => {
     req.logout((err) => {
-      if (err) { return next(err); }
+      if (err) {
+        return next(err);
+      }
       req.session.destroy((destroyErr) => {
         if (destroyErr) {
           return res.status(500).send('Failed to destroy session during logout.');
@@ -53,4 +56,4 @@ export const googleAuthRouter: Router = (() => {
   });
 
   return router;
-})(); 
+})();

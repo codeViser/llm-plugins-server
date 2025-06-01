@@ -1,9 +1,9 @@
-import express, { Router } from 'express';
 import { OpenAPIRegistry } from '@asteasolutions/zod-to-openapi';
-import { z } from 'zod';
+import express, { Router } from 'express';
 
-import { createApiResponse } from '@/api-docs/openAPIResponseBuilders';
 import { createApiRequestBody } from '@/api-docs/openAPIRequestBuilders';
+import { createApiResponse } from '@/api-docs/openAPIResponseBuilders';
+
 import { handleAdvancedExtract } from './tavilyExtract.controller';
 import { TavilyExtractServerRequestBodySchema, TavilyExtractServerResponseSchema } from './tavilyExtractModel';
 
@@ -14,7 +14,9 @@ tavilyExtractRegistry.registerPath({
   path: '/api/tavily/extract',
   summary: 'Handles advanced Tavily content extraction via server',
   tags: ['Tavily Extract'],
-  request: createApiRequestBody(TavilyExtractServerRequestBodySchema),
+  request: {
+    body: createApiRequestBody(TavilyExtractServerRequestBodySchema),
+  },
   responses: createApiResponse(TavilyExtractServerResponseSchema, 'Success'),
   // You might want to add other responses, e.g., for 400, 401, 500 errors
   // For example:
@@ -25,4 +27,4 @@ export const tavilyExtractRouter: Router = (() => {
   const router = express.Router();
   router.post('/', handleAdvancedExtract);
   return router;
-})(); 
+})();

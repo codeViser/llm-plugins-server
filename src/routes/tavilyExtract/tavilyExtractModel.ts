@@ -22,4 +22,4 @@ export const TavilyExtractServerResponseSchema = z.object({
 // export const TavilyErrorResponseSchema = z.object({
 //   message: z.string(),
 //   details: z.any().optional()
-// }); 
+// });

@@ -1,8 +1,9 @@
-import express, { Router } from 'express';
 import { OpenAPIRegistry } from '@asteasolutions/zod-to-openapi';
+import express, { Router } from 'express';
 
-import { createApiResponse } from '@/api-docs/openAPIResponseBuilders';
 import { createApiRequestBody } from '@/api-docs/openAPIRequestBuilders';
+import { createApiResponse } from '@/api-docs/openAPIResponseBuilders';
+
 import { handleTavilyCrawlProxy } from './tavilyCrawl.controller';
 import { TavilyCrawlServerRequestBodySchema, TavilyCrawlServerResponseSchema } from './tavilyCrawlModel';
 
@@ -21,4 +22,4 @@ export const tavilyCrawlRouter: Router = (() => {
   const router = express.Router();
   router.post('/', handleTavilyCrawlProxy);
   return router;
-})(); 
+})();

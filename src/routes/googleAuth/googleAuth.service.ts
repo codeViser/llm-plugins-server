@@ -1,5 +1,6 @@
 import passport from 'passport';
 import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+
 import { env } from '@/common/utils/envConfig';
 
 passport.serializeUser((user, done) => {
@@ -33,4 +34,4 @@ passport.use(
   )
 );
 
-export default passport; 
+export default passport;

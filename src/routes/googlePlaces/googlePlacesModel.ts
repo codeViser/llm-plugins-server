@@ -16,13 +16,15 @@ export type GooglePlacesApiResponse = z.infer<typeof GooglePlacesApiResponseSche
 // Schema for the request body sent to our proxy
 export const GooglePlacesApiRequestBodySchema = z.object({
   apiKey: z.string().openapi({
-    description: "The Google Places API Key provided by the client.",
+    description: 'The Google Places API Key provided by the client.',
   }),
   query: z.string().optional().openapi({
-    description: "The text string to search for (e.g., 'restaurants in San Francisco', 'Eiffel Tower'). For nearbysearch, this acts as a keyword or type filter.",
+    description:
+      "The text string to search for (e.g., 'restaurants in San Francisco', 'Eiffel Tower'). For nearbysearch, this acts as a keyword or type filter.",
   }),
   searchType: z.enum(['textsearch', 'nearbysearch', 'details']).openapi({
-    description: "Type of search to perform. 'textsearch' for general queries, 'nearbysearch' for places near a location, 'details' for specific place details.",
+    description:
+      "Type of search to perform. 'textsearch' for general queries, 'nearbysearch' for places near a location, 'details' for specific place details.",
   }),
   location: z.string().optional().openapi({
     description: "Required for 'nearbysearch'. Latitude,longitude string (e.g., '34.0522,-118.2437').",
@@ -38,4 +40,4 @@ export const GooglePlacesApiRequestBodySchema = z.object({
       "Optional. Comma-separated list of fields to return (e.g., 'name,formatted_address,opening_hours/open_now,rating,types'). Helps control data size and API costs. Refer to Google Places API documentation for available fields.",
   }),
 });
-export type GooglePlacesApiRequestBody = z.infer<typeof GooglePlacesApiRequestBodySchema>; 
+export type GooglePlacesApiRequestBody = z.infer<typeof GooglePlacesApiRequestBodySchema>;
