@@ -86,11 +86,17 @@ googleWorkspaceRouter.get('/drive/search', async (req: Request, res: Response) =
       q: query,
       pageSize: parseInt(req.query.pageSize as string) || 20,
       fields: 'nextPageToken, files(id, name, mimeType, webViewLink, iconLink, modifiedTime, snippet)',
-      orderBy: (req.query.orderBy as string) || 'relevance',
       corpora: (req.query.corpora as string) || 'user',
       includeItemsFromAllDrives: req.query.includeItemsFromAllDrives === 'true',
       supportsAllDrives: true,
     };
+
+    // Only add orderBy if it's explicitly provided by the client and is valid,
+    // otherwise, let Google handle relevance-based ordering for search queries.
+    if (req.query.orderBy) {
+      searchParams.orderBy = req.query.orderBy as string;
+    }
+
     if (req.query.pageToken) {
       searchParams.pageToken = req.query.pageToken as string;
     }
@@ -278,7 +284,7 @@ googleWorkspaceRouter.post('/drive/files', async (req: Request, res: Response) =
         body: content || '', // Content can be empty for some file types
       };
       const file = await drive.files.create({
-        resource: fileMetadata,
+        requestBody: fileMetadata,
         media: media,
         fields: 'id, name, mimeType, webViewLink',
       });
