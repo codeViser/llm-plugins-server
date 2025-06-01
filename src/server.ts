@@ -31,33 +31,29 @@ const app: Express = express();
 app.set('trust proxy', true);
 // Middlewares
 const allowedOriginsFromEnv = env.CORS_ORIGIN ? env.CORS_ORIGIN.split(',').map((s) => s.trim()) : [];
-const isWildcard = allowedOriginsFromEnv.includes('*');
+const isWildcardOriginConfig = allowedOriginsFromEnv.includes('*');
 
 app.use(
   cors({
     origin: (requestOrigin, callback) => {
-      // Allow requests with no origin (like mobile apps or curl requests)
+      // If no origin header is present (e.g., server-to-server, curl), allow it.
       if (!requestOrigin) {
         return callback(null, true);
       }
-      // If wildcard is specified in env, reflect the current origin
-      if (isWildcard) {
-        return callback(null, true); // True here means reflect the requestOrigin
-      }
-      // If specific origins are listed, check if the requestOrigin is among them
-      if (allowedOriginsFromEnv.includes(requestOrigin)) {
+
+      // If CORS_ORIGIN is configured as '*' in the environment.
+      if (isWildcardOriginConfig) {
+        // When credentials:true, cors middleware will reflect requestOrigin rather than literal '*'
         return callback(null, true);
       }
-      // If origin is literally 'null' (often from sandboxed iframes)
-      // and wildcard was intended, we can consider allowing it.
-      // However, be cautious with 'null' origin + credentials.
-      // For TypingMind sandboxed iframes, this might be necessary.
-      if (requestOrigin === 'null' && env.CORS_ORIGIN === '*') {
-        // This condition means CORS_ORIGIN was explicitly set to '*'
-        // allowing null in this specific case for iframe compatibility.
+
+      // If CORS_ORIGIN is configured with specific domain(s).
+      // Allow if the requestOrigin matches one of the specified domains OR if the requestOrigin is 'null' (for sandboxed iframes).
+      if (allowedOriginsFromEnv.includes(requestOrigin) || requestOrigin === 'null') {
         return callback(null, true);
       }
-      // Otherwise, disallow the origin
+
+      // Otherwise, disallow the origin.
       return callback(new Error(`Origin ${requestOrigin} not allowed by CORS`));
     },
     credentials: true,
