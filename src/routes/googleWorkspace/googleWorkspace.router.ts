@@ -6,32 +6,45 @@ import { env } from '@/common/utils/envConfig';
 
 export const googleWorkspaceRouter: Router = express.Router();
 
-// Middleware to check authentication and set up OAuth2 client
-export const ensureAuthenticatedAndSetClient = (req: Request, res: Response, next: NextFunction) => {
-  if (!req.isAuthenticated() || !req.user) {
-    return res.status(StatusCodes.UNAUTHORIZED).json({ error: 'User not authenticated' });
+// New Middleware: Expects Google Access Token as Bearer token
+export const verifyGoogleAccessTokenAndSetClient = (req: Request, res: Response, next: NextFunction) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res
+      .status(StatusCodes.UNAUTHORIZED)
+      .json({ error: 'User not authenticated: Missing or invalid Authorization header.' });
   }
 
-  const { accessToken, refreshToken } = req.user as { accessToken: string; refreshToken?: string };
+  const googleAccessToken = authHeader.split(' ')[1];
 
-  if (!accessToken) {
-    return res.status(StatusCodes.UNAUTHORIZED).json({ error: 'Access token not found' });
+  if (!googleAccessToken) {
+    return res.status(StatusCodes.UNAUTHORIZED).json({ error: 'User not authenticated: No access token provided.' });
   }
 
-  const oauth2Client = new google.auth.OAuth2(env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.GOOGLE_CALLBACK_URL);
+  // We still need CLIENT_ID and CLIENT_SECRET to instantiate the OAuth2 client object,
+  // even if this instance is primarily used to set the access token for API calls.
+  // These are used by the library for some internal mechanics or if you were to use it for token refresh (though TM should handle refresh).
+  const oauth2Client = new google.auth.OAuth2(
+    env.GOOGLE_CLIENT_ID,
+    env.GOOGLE_CLIENT_SECRET
+    // No callback URL needed here as we are not initiating auth, just using a token
+  );
 
   oauth2Client.setCredentials({
-    access_token: accessToken,
-    refresh_token: refreshToken,
+    access_token: googleAccessToken,
+    // Note: We don't have the refresh token here. TypingMind is expected to manage token refresh.
+    // If the access token is expired, Google API calls will fail, and TypingMind should ideally re-authenticate the user.
   });
 
-  // Make OAuth2 client available in the request object for subsequent handlers
+  // Make OAuth2 client available in the request object
   (req as any).oauth2Client = oauth2Client;
+  (req as any).googleAccessToken = googleAccessToken; // Also store the raw token if needed
   next();
 };
 
-// Apply this middleware to all routes in this router
-googleWorkspaceRouter.use(ensureAuthenticatedAndSetClient);
+// Apply this new middleware to all routes in this router
+googleWorkspaceRouter.use(verifyGoogleAccessTokenAndSetClient);
 
 // Placeholder for Drive routes (List, Read, Write, Search)
 googleWorkspaceRouter.get('/drive/files', async (req: Request, res: Response) => {
@@ -41,7 +54,7 @@ googleWorkspaceRouter.get('/drive/files', async (req: Request, res: Response) =>
   try {
     const listParams: any = {
       // Type as any for flexibility with query params
-      pageSize: 20,
+      pageSize: parseInt(req.query.pageSize as string) || 20,
       fields:
         'nextPageToken, files(id, name, mimeType, webViewLink, iconLink, modifiedTime, createdTime, owners, shared, capabilities)',
       orderBy: (req.query.orderBy as string) || 'modifiedTime desc',
@@ -59,11 +72,12 @@ googleWorkspaceRouter.get('/drive/files', async (req: Request, res: Response) =>
     res.status(StatusCodes.OK).json(response.data);
   } catch (error: any) {
     console.error('Error listing drive files:', error);
-    // Check for auth errors specifically (e.g., token expired)
-    if (error.response && error.response.status === 401) {
-      return res
-        .status(StatusCodes.UNAUTHORIZED)
-        .json({ error: 'Google API authentication error. Please re-authenticate.', details: error.message });
+    if (error.response && (error.response.status === 401 || error.response.status === 403)) {
+      return res.status(error.response.status).json({
+        error:
+          'Google API authorization error. The token might be expired or invalid. Please re-authenticate via TypingMind.',
+        details: error.message,
+      });
     }
     res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: 'Failed to list files', details: error.message });
   }
@@ -105,10 +119,12 @@ googleWorkspaceRouter.get('/drive/search', async (req: Request, res: Response) =
     res.status(StatusCodes.OK).json(response.data);
   } catch (error: any) {
     console.error('Error searching Drive:', error);
-    if (error.response && error.response.status === 401) {
-      return res
-        .status(StatusCodes.UNAUTHORIZED)
-        .json({ error: 'Google API authentication error. Please re-authenticate.', details: error.message });
+    if (error.response && (error.response.status === 401 || error.response.status === 403)) {
+      return res.status(error.response.status).json({
+        error:
+          'Google API authorization error. The token might be expired or invalid. Please re-authenticate via TypingMind.',
+        details: error.message,
+      });
     }
     res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: 'Failed to search Drive', details: error.message });
   }
@@ -123,7 +139,7 @@ googleWorkspaceRouter.get('/drive/files/:fileId/content', async (req: Request, r
 
   try {
     // Get file metadata to determine type
-    const metadataResponse = await drive.files.get({ fileId: fileId, fields: 'id, name, mimeType' });
+    const metadataResponse = await drive.files.get({ fileId: fileId, fields: 'id, name, mimeType, webViewLink' });
     const mimeType = metadataResponse.data.mimeType;
 
     if (mimeType === 'application/vnd.google-apps.document') {
@@ -159,10 +175,12 @@ googleWorkspaceRouter.get('/drive/files/:fileId/content', async (req: Request, r
     }
   } catch (error: any) {
     console.error(`Error reading file ${fileId}:`, error);
-    if (error.response && error.response.status === 401) {
-      return res
-        .status(StatusCodes.UNAUTHORIZED)
-        .json({ error: 'Google API authentication error. Please re-authenticate.', details: error.message });
+    if (error.response && (error.response.status === 401 || error.response.status === 403)) {
+      return res.status(error.response.status).json({
+        error:
+          'Google API authorization error. The token might be expired or invalid. Please re-authenticate via TypingMind.',
+        details: error.message,
+      });
     }
     res
       .status(StatusCodes.INTERNAL_SERVER_ERROR)
@@ -223,10 +241,12 @@ googleWorkspaceRouter.post('/drive/files/:fileId/content', async (req: Request, 
     }
   } catch (error: any) {
     console.error(`Error writing to file ${fileId}:`, error);
-    if (error.response && error.response.status === 401) {
-      return res
-        .status(StatusCodes.UNAUTHORIZED)
-        .json({ error: 'Google API authentication error. Please re-authenticate.', details: error.message });
+    if (error.response && (error.response.status === 401 || error.response.status === 403)) {
+      return res.status(error.response.status).json({
+        error:
+          'Google API authorization error. The token might be expired or invalid. Please re-authenticate via TypingMind.',
+        details: error.message,
+      });
     }
     res
       .status(StatusCodes.INTERNAL_SERVER_ERROR)
@@ -267,7 +287,12 @@ googleWorkspaceRouter.post('/drive/files', async (req: Request, res: Response) =
           fields: 'id, parents',
         });
       }
-      createdFile = { id: doc.data.documentId, name: name, mimeType: mimeType };
+      createdFile = {
+        id: doc.data.documentId,
+        name: name,
+        mimeType: mimeType,
+        webViewLink: `https://docs.google.com/document/d/${doc.data.documentId}/edit`,
+      };
       // Optionally, add content to the new doc
       if (content && doc.data.documentId && typeof content === 'string') {
         await docs.documents.batchUpdate({
@@ -293,10 +318,12 @@ googleWorkspaceRouter.post('/drive/files', async (req: Request, res: Response) =
     res.status(StatusCodes.CREATED).json(createdFile);
   } catch (error: any) {
     console.error('Error creating file:', error);
-    if (error.response && error.response.status === 401) {
-      return res
-        .status(StatusCodes.UNAUTHORIZED)
-        .json({ error: 'Google API authentication error. Please re-authenticate.', details: error.message });
+    if (error.response && (error.response.status === 401 || error.response.status === 403)) {
+      return res.status(error.response.status).json({
+        error:
+          'Google API authorization error. The token might be expired or invalid. Please re-authenticate via TypingMind.',
+        details: error.message,
+      });
     }
     res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: 'Failed to create file', details: error.message });
   }

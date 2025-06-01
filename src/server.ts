@@ -1,9 +1,7 @@
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import express, { Express } from 'express';
-import session from 'express-session';
 import helmet from 'helmet';
-import passport from 'passport';
 import { pino } from 'pino';
 
 import { openAPIRouter } from '@/api-docs/openAPIRouter';
@@ -14,7 +12,6 @@ import { env } from '@/common/utils/envConfig';
 import { healthCheckRouter } from '@/routes/healthCheck/healthCheckRouter';
 
 import { excelGeneratorRouter } from './routes/excelGenerator/excelGeneratorRouter';
-import { googleAuthRouter } from './routes/googleAuth/googleAuth.router';
 import { googlePlacesRouter } from './routes/googlePlaces/googlePlacesRouter';
 import { googleWorkspaceRouter } from './routes/googleWorkspace/googleWorkspace.router';
 import { notionDatabaseRouter } from './routes/notionDatabase/notionDatabaseRouter';
@@ -30,7 +27,8 @@ const app: Express = express();
 // Set the application to trust the reverse proxy
 app.set('trust proxy', true);
 // Middlewares
-const allowedOriginsFromEnv = env.CORS_ORIGIN ? env.CORS_ORIGIN.split(',').map((s) => s.trim()) : [];
+const corsOriginValue = env.CORS_ORIGIN || '*'; // Default to * if undefined
+const allowedOriginsFromEnv = corsOriginValue.split(',').map((s) => s.trim());
 const isWildcardOriginConfig = allowedOriginsFromEnv.includes('*');
 
 app.use(
@@ -63,26 +61,6 @@ app.use(helmet());
 app.use(rateLimiter);
 app.use(bodyParser.json());
 
-// Session middleware - MUST be configured before passport.session()
-app.use(
-  session({
-    secret: env.SESSION_SECRET,
-    resave: false,
-    saveUninitialized: true, // Save new sessions
-    cookie: {
-      secure: env.isProduction, // True if env.NODE_ENV is 'production'
-      httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000, // 24 hours
-      sameSite: env.isProduction ? 'none' : 'lax', // 'none' for cross-site HTTPS; 'lax' for local HTTP
-      path: '/', // Explicitly set path
-    },
-  })
-);
-
-// Passport middleware
-app.use(passport.initialize());
-app.use(passport.session());
-
 app.use((req, res, next) => {
   res.removeHeader('X-Frame-Options');
   res.removeHeader('Content-Security-Policy');
@@ -92,7 +70,6 @@ app.use((req, res, next) => {
 app.use(requestLogger());
 
 // Routes
-app.use('/auth', googleAuthRouter);
 app.use('/workspace', googleWorkspaceRouter);
 app.use('/health-check', healthCheckRouter);
 app.use('/images', express.static('public/images'));
