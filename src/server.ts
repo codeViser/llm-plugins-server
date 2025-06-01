@@ -3,14 +3,19 @@ import cors from 'cors';
 import express, { Express } from 'express';
 import helmet from 'helmet';
 import { pino } from 'pino';
+import session from 'express-session';
+import passport from 'passport';
 
 import { openAPIRouter } from '@/api-docs/openAPIRouter';
 import errorHandler from '@/common/middleware/errorHandler';
 import rateLimiter from '@/common/middleware/rateLimiter';
 import requestLogger from '@/common/middleware/requestLogger';
+import { env } from '@/common/utils/envConfig';
 import { healthCheckRouter } from '@/routes/healthCheck/healthCheckRouter';
 
 import { excelGeneratorRouter } from './routes/excelGenerator/excelGeneratorRouter';
+import { googleAuthRouter } from './routes/googleAuth/googleAuth.router';
+import { googleWorkspaceRouter } from './routes/googleWorkspace/googleWorkspace.router';
 import { notionDatabaseRouter } from './routes/notionDatabase/notionDatabaseRouter';
 import { powerpointGeneratorRouter } from './routes/powerpointGenerator/powerpointGeneratorRouter';
 import { webPageReaderRouter } from './routes/webPageReader/webPageReaderRouter';
@@ -30,6 +35,25 @@ app.use(cors());
 app.use(helmet());
 app.use(rateLimiter);
 app.use(bodyParser.json());
+
+// Session middleware - MUST be configured before passport.session()
+app.use(
+  session({
+    secret: env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: true, // Save new sessions
+    cookie: {
+      secure: env.isProduction, // Use secure cookies in production
+      httpOnly: true,
+      maxAge: 24 * 60 * 60 * 1000, // Session expiry: 24 hours
+    },
+  })
+);
+
+// Passport middleware
+app.use(passport.initialize());
+app.use(passport.session());
+
 app.use((req, res, next) => {
   res.removeHeader('X-Frame-Options');
   res.removeHeader('Content-Security-Policy');
@@ -39,6 +63,8 @@ app.use((req, res, next) => {
 app.use(requestLogger());
 
 // Routes
+app.use('/auth', googleAuthRouter);
+app.use('/workspace', googleWorkspaceRouter);
 app.use('/health-check', healthCheckRouter);
 app.use('/images', express.static('public/images'));
 app.use('/youtube-transcript', youtubeTranscriptRouter);
