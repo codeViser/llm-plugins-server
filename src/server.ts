@@ -70,9 +70,11 @@ app.use(
     resave: false,
     saveUninitialized: true, // Save new sessions
     cookie: {
-      secure: env.isProduction, // Use secure cookies in production
+      secure: env.isProduction, // True if env.NODE_ENV is 'production'
       httpOnly: true,
-      maxAge: 24 * 60 * 60 * 1000, // Session expiry: 24 hours
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      sameSite: env.isProduction ? 'none' : 'lax', // 'none' for cross-site HTTPS; 'lax' for local HTTP
+      path: '/', // Explicitly set path
     },
   })
 );
