@@ -1,4 +1,6 @@
+import { extendZodWithOpenApi } from '@asteasolutions/zod-to-openapi';
 import { z } from 'zod';
+extendZodWithOpenApi(z); // Ensure Zod is extended before schemas are defined
 
 // Schema for the request body our server will expect for the crawl proxy
 export const TavilyCrawlServerRequestBodySchema = z.object({

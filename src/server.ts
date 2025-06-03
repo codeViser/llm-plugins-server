@@ -1,26 +1,33 @@
+import { extendZodWithOpenApi } from '@asteasolutions/zod-to-openapi';
+import { z } from 'zod';
+extendZodWithOpenApi(z); // Initialize zod-to-openapi extensions
+
 import bodyParser from 'body-parser';
 import cors from 'cors';
 import express, { Express } from 'express';
 import helmet from 'helmet';
 import { pino } from 'pino';
 
-import { openAPIRouter } from '@/api-docs/openAPIRouter';
+// Import the function to create the OpenAPI router
+import { createOpenAPIRouter } from '@/api-docs/openAPIRouter';
 import errorHandler from '@/common/middleware/errorHandler';
 import rateLimiter from '@/common/middleware/rateLimiter';
 import requestLogger from '@/common/middleware/requestLogger';
 import { env } from '@/common/utils/envConfig';
-import { healthCheckRouter } from '@/routes/healthCheck/healthCheckRouter';
+import { healthCheckRegistry, healthCheckRouter } from '@/routes/healthCheck/healthCheckRouter';
+import { tavilyCrawlRegistry, tavilyCrawlRouter } from '@/routes/tavilyCrawl';
+import { tavilyExtractRegistry, tavilyExtractRouter } from '@/routes/tavilyExtract';
+import { tavilyMapRegistry, tavilyMapRouter } from '@/routes/tavilyMap';
 
 import { excelGeneratorRouter } from './routes/excelGenerator/excelGeneratorRouter';
 import { googlePlacesRouter } from './routes/googlePlaces/googlePlacesRouter';
 import { googleWorkspaceRouter } from './routes/googleWorkspace/googleWorkspace.router';
 import { notionDatabaseRouter } from './routes/notionDatabase/notionDatabaseRouter';
 import { powerpointGeneratorRouter } from './routes/powerpointGenerator/powerpointGeneratorRouter';
-import { tavilyCrawlRouter } from './routes/tavilyCrawl';
-import { tavilyExtractRouter } from './routes/tavilyExtract';
 import { webPageReaderRouter } from './routes/webPageReader/webPageReaderRouter';
 import { wordGeneratorRouter } from './routes/wordGenerator/wordGeneratorRouter';
 import { youtubeTranscriptRouter } from './routes/youtubeTranscript/youtubeTranscriptRouter';
+
 const logger = pino({ name: 'server start' });
 const app: Express = express();
 
@@ -82,9 +89,23 @@ app.use('/notion-database', notionDatabaseRouter);
 app.use('/google-places', googlePlacesRouter);
 app.use('/api/tavily/extract', tavilyExtractRouter);
 app.use('/api/tavily/crawl', tavilyCrawlRouter);
+app.use('/api/tavily/map', tavilyMapRouter);
+
+// List of all registries for OpenAPI documentation
+const allRegistries = [
+  healthCheckRegistry,
+  tavilyCrawlRegistry,
+  tavilyExtractRegistry,
+  tavilyMapRegistry,
+  // Ensure other registries like excelGeneratorRegistry etc., are included here
+  // if they were present in the original hardcoded list in openAPIDocumentGenerator.ts
+];
+
+// Create the OpenAPI router with all registries
+const openAPIDocsRouter = createOpenAPIRouter(allRegistries);
 
 // Swagger UI
-app.use(openAPIRouter);
+app.use(openAPIDocsRouter); // Use the generated router
 
 // Error handlers
 app.use(errorHandler());
