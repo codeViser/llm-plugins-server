@@ -19,7 +19,7 @@
     error: null,
   };
   let pingIntervalId = null;
-  let statusButtonContainer = null; 
+  let statusButtonContainer = null;
   let configPanel = null;
   let isConfigPanelOpen = false;
   let currentInjectedToolbar = null; // Keep track of where the button is currently injected
@@ -40,10 +40,10 @@
     configText: '#E2E8F0',
     configInputBorder: '#4A5568',
     indicatorOnline: '#48BB78',
-    indicatorOffline: '#F56565', 
+    indicatorOffline: '#F56565',
     indicatorPending: '#ECC94B',
     indicatorUnconfigured: '#718096',
-    indicatorUnknown: '#A0AEC0'
+    indicatorUnknown: '#A0AEC0',
   };
 
   function addStyles() {
@@ -160,33 +160,48 @@
 
   function ensureUIElementsExist() {
     if (!statusButtonContainer) {
-        statusButtonContainer = document.createElement('div'); statusButtonContainer.id = CONTAINER_ID;
-        const statusBtn = document.createElement('button'); statusBtn.id = STATUS_BUTTON_ID;
-        const indicator = document.createElement('span'); indicator.className = 'status-indicator'; statusBtn.appendChild(indicator);
-        const text = document.createElement('span'); text.className = 'status-text'; statusBtn.appendChild(text);
-        statusBtn.addEventListener('click', () => { if (serverStatus.isReachable === 'unconfigured') { toggleConfigPanel(); return; } pingServer(true); });
-        const settingsBtn = document.createElement('button'); settingsBtn.id = SETTINGS_BUTTON_ID; settingsBtn.title = 'Configure Server Ping';
-        settingsBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17-.59-1.69-.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19-.15-.24-.42-.12-.64l2 3.46c.12.22.39.3.61-.22l2.49-1c.52.4 1.08.73 1.69-.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/></svg>`;
-        settingsBtn.addEventListener('click', toggleConfigPanel);
-        statusButtonContainer.appendChild(statusBtn); statusButtonContainer.appendChild(settingsBtn);
+      statusButtonContainer = document.createElement('div');
+      statusButtonContainer.id = CONTAINER_ID;
+      const statusBtn = document.createElement('button');
+      statusBtn.id = STATUS_BUTTON_ID;
+      const indicator = document.createElement('span');
+      indicator.className = 'status-indicator';
+      statusBtn.appendChild(indicator);
+      const text = document.createElement('span');
+      text.className = 'status-text';
+      statusBtn.appendChild(text);
+      statusBtn.addEventListener('click', () => {
+        if (serverStatus.isReachable === 'unconfigured') {
+          toggleConfigPanel();
+          return;
+        }
+        pingServer(true);
+      });
+      const settingsBtn = document.createElement('button');
+      settingsBtn.id = SETTINGS_BUTTON_ID;
+      settingsBtn.title = 'Configure Server Ping';
+      settingsBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M19.43 12.98c.04-.32.07-.64.07-.98s-.03-.66-.07-.98l2.11-1.65c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.3-.61-.22l-2.49 1c-.52-.4-1.08-.73-1.69-.98l-.38-2.65C14.46 2.18 14.25 2 14 2h-4c-.25 0-.46.18-.49.42l-.38 2.65c-.61.25-1.17-.59-1.69-.98l-2.49-1c-.23-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49.12.64l2.11 1.65c-.04.32-.07.65-.07.98s.03.66.07.98l-2.11 1.65c-.19-.15-.24-.42-.12-.64l2 3.46c.12.22.39.3.61-.22l2.49-1c.52.4 1.08.73 1.69-.98l.38 2.65c.03.24.24.42.49.42h4c.25 0 .46-.18.49-.42l.38-2.65c.61-.25 1.17-.59 1.69-.98l2.49 1c.23.09.49 0 .61.22l2-3.46c.12-.22.07-.49-.12-.64l-2.11-1.65zM12 15.5c-1.93 0-3.5-1.57-3.5-3.5s1.57-3.5 3.5-3.5 3.5 1.57 3.5 3.5-1.57 3.5-3.5 3.5z"/></svg>`;
+      settingsBtn.addEventListener('click', toggleConfigPanel);
+      statusButtonContainer.appendChild(statusBtn);
+      statusButtonContainer.appendChild(settingsBtn);
     }
     if (!configPanel) {
-        configPanel = document.createElement('div'); configPanel.id = CONFIG_PANEL_ID;
-        configPanel.innerHTML = 
-          `<label for="${EXTENSION_ID}-server-url">Server Health Endpoint URL:</label>
+      configPanel = document.createElement('div');
+      configPanel.id = CONFIG_PANEL_ID;
+      configPanel.innerHTML = `<label for="${EXTENSION_ID}-server-url">Server Health Endpoint URL:</label>
           <input type="text" id="${EXTENSION_ID}-server-url" placeholder="e.g., https://host.com/health">
           <label for="${EXTENSION_ID}-ping-interval">Ping Interval (minutes):</label>
           <input type="number" id="${EXTENSION_ID}-ping-interval" min="1">
           <button class="save-btn">Save</button><button class="close-btn">Close</button>
           <p class="config-note">URL for GET request. e.g. https://plugins.onrender.com/health-check</p>`;
-        configPanel.querySelector('.save-btn').addEventListener('click', saveConfig);
-        configPanel.querySelector('.close-btn').addEventListener('click', toggleConfigPanel);
-        document.body.appendChild(configPanel); // Append to body initially, will be hidden
+      configPanel.querySelector('.save-btn').addEventListener('click', saveConfig);
+      configPanel.querySelector('.close-btn').addEventListener('click', toggleConfigPanel);
+      document.body.appendChild(configPanel); // Append to body initially, will be hidden
     }
   }
 
   function toggleConfigPanel() {
-    ensureUIElementsExist(); 
+    ensureUIElementsExist();
     isConfigPanelOpen = !isConfigPanelOpen;
     configPanel.style.display = isConfigPanelOpen ? 'block' : 'none';
     if (isConfigPanelOpen) {
@@ -194,23 +209,32 @@
       document.getElementById(`${EXTENSION_ID}-ping-interval`).value = pingIntervalMinutes;
       // Position config panel relative to the statusButtonContainer
       if (statusButtonContainer && statusButtonContainer.offsetParent) {
-          const containerRect = statusButtonContainer.getBoundingClientRect();
-          if (statusButtonContainer.style.position === 'fixed') {
-            Object.assign(configPanel.style, {
-                position: 'fixed',
-                bottom: `calc(${window.innerHeight - containerRect.top}px + 5px)`,
-                right: `calc(${window.innerWidth - containerRect.right + (containerRect.width / 2) - (configPanel.offsetWidth / 2)}px)`,
-                left: 'auto', top: 'auto', zIndex: '1002'
-            });
-          } else {
-            // If container is not fixed, check if configPanel should be its child
-            if (!statusButtonContainer.contains(configPanel) && configPanel.parentElement !== statusButtonContainer) {
-                statusButtonContainer.appendChild(configPanel); // Make it a child for relative positioning
-            }
-            Object.assign(configPanel.style, {position: 'absolute', bottom: 'calc(100% + 4px)', right: '0px', left:'auto', top:'auto', zIndex: '1000'});
+        const containerRect = statusButtonContainer.getBoundingClientRect();
+        if (statusButtonContainer.style.position === 'fixed') {
+          Object.assign(configPanel.style, {
+            position: 'fixed',
+            bottom: `calc(${window.innerHeight - containerRect.top}px + 5px)`,
+            right: `calc(${window.innerWidth - containerRect.right + containerRect.width / 2 - configPanel.offsetWidth / 2}px)`,
+            left: 'auto',
+            top: 'auto',
+            zIndex: '1002',
+          });
+        } else {
+          // If container is not fixed, check if configPanel should be its child
+          if (!statusButtonContainer.contains(configPanel) && configPanel.parentElement !== statusButtonContainer) {
+            statusButtonContainer.appendChild(configPanel); // Make it a child for relative positioning
           }
+          Object.assign(configPanel.style, {
+            position: 'absolute',
+            bottom: 'calc(100% + 4px)',
+            right: '0px',
+            left: 'auto',
+            top: 'auto',
+            zIndex: '1000',
+          });
+        }
       } else {
-          Object.assign(configPanel.style, {position: 'fixed', bottom: '50px', right: '20px', zIndex: '1002'}); // Fallback if container has no offsetParent
+        Object.assign(configPanel.style, { position: 'fixed', bottom: '50px', right: '20px', zIndex: '1002' }); // Fallback if container has no offsetParent
       }
     }
   }
@@ -219,15 +243,18 @@
     const newUrl = document.getElementById(`${EXTENSION_ID}-server-url`).value.trim();
     const newInterval = parseInt(document.getElementById(`${EXTENSION_ID}-ping-interval`).value, 10);
     if (!newUrl) {
-      alert("Server URL cannot be empty."); return;
+      alert('Server URL cannot be empty.');
+      return;
     }
     try {
       new URL(newUrl);
     } catch (_) {
-      alert("Invalid Server URL. Include http(s)://"); return;
+      alert('Invalid Server URL. Include http(s)://');
+      return;
     }
     if (isNaN(newInterval) || newInterval < 1) {
-      alert("Interval must be >= 1 minute."); return;
+      alert('Interval must be >= 1 minute.');
+      return;
     }
     serverUrl = newUrl;
     pingIntervalMinutes = newInterval;
@@ -236,7 +263,7 @@
     localStorage.setItem(STORAGE_KEY_PING_INTERVAL, pingIntervalMinutes.toString());
     console.log(`[${EXTENSION_ID}] Config saved. URL: ${serverUrl}, Interval: ${pingIntervalMinutes}m`);
     toggleConfigPanel();
-    serverStatus.isReachable = null; 
+    serverStatus.isReachable = null;
     updateStatusButtonUI();
     if (pingIntervalId) clearInterval(pingIntervalId);
     pingServer(true);
@@ -246,51 +273,88 @@
   function attemptInjectUIToToolbar(toolbarElement) {
     ensureUIElementsExist();
     if (statusButtonContainer.parentElement && statusButtonContainer.parentElement !== toolbarElement) {
-        statusButtonContainer.parentElement.removeChild(statusButtonContainer);
+      statusButtonContainer.parentElement.removeChild(statusButtonContainer);
     }
     if (statusButtonContainer.parentElement !== toolbarElement) {
-        toolbarElement.appendChild(statusButtonContainer);
+      toolbarElement.appendChild(statusButtonContainer);
     }
-    toolbarElement.style.position = 'relative'; 
+    toolbarElement.style.position = 'relative';
     Object.assign(statusButtonContainer.style, {
-        position: 'absolute', left: '50%', 
-        bottom: 'calc(50% - ' + (statusButtonContainer.offsetHeight / 2 || 7) + 'px)', 
-        transform: 'translateX(-50%)', zIndex: '100', right: 'auto', top: 'auto'
+      position: 'absolute',
+      left: '50%',
+      bottom: 'calc(50% - ' + (statusButtonContainer.offsetHeight / 2 || 7) + 'px)',
+      transform: 'translateX(-50%)',
+      zIndex: '100',
+      right: 'auto',
+      top: 'auto',
     });
     currentInjectedToolbar = toolbarElement;
-    console.log(`[${EXTENSION_ID}] UI injected into: ${toolbarElement.tagName}${toolbarElement.id ? '#'+toolbarElement.id : ''}${toolbarElement.className ? '.'+toolbarElement.className.trim().replace(/ /g, '.') : ''}`);
+    console.log(
+      `[${EXTENSION_ID}] UI injected into: ${toolbarElement.tagName}${toolbarElement.id ? '#' + toolbarElement.id : ''}${toolbarElement.className ? '.' + toolbarElement.className.trim().replace(/ /g, '.') : ''}`
+    );
   }
 
   function fallbackInjectUI() {
-      ensureUIElementsExist();
-      if (statusButtonContainer.parentElement && statusButtonContainer.parentElement !== document.body) {
-          statusButtonContainer.parentElement.removeChild(statusButtonContainer);
-      }
-      if (statusButtonContainer.parentElement !== document.body) { 
-          document.body.appendChild(statusButtonContainer);
-      }
-      Object.assign(statusButtonContainer.style, { position: 'fixed', bottom: '8px', right: '8px', zIndex: '1001', left:'auto', top:'auto', transform:'none' });
-      currentInjectedToolbar = document.body; 
-      console.warn(`[${EXTENSION_ID}] Chat toolbar not found. UI moved to fallback (bottom-right).`);
+    ensureUIElementsExist();
+    if (statusButtonContainer.parentElement && statusButtonContainer.parentElement !== document.body) {
+      statusButtonContainer.parentElement.removeChild(statusButtonContainer);
+    }
+    if (statusButtonContainer.parentElement !== document.body) {
+      document.body.appendChild(statusButtonContainer);
+    }
+    Object.assign(statusButtonContainer.style, {
+      position: 'fixed',
+      bottom: '8px',
+      right: '8px',
+      zIndex: '1001',
+      left: 'auto',
+      top: 'auto',
+      transform: 'none',
+    });
+    currentInjectedToolbar = document.body;
+    console.warn(`[${EXTENSION_ID}] Chat toolbar not found. UI moved to fallback (bottom-right).`);
   }
 
   function updateStatusButtonUI() {
     ensureUIElementsExist();
     const statusBtn = document.getElementById(STATUS_BUTTON_ID);
-    if (!statusBtn) { /* console.error("[Pinger] Status button not found for UI update"); */ return; }
+    if (!statusBtn) {
+      /* console.error("[Pinger] Status button not found for UI update"); */ return;
+    }
     const indicator = statusBtn.querySelector('.status-indicator');
-    if (!indicator) { /* console.error("[Pinger] Status indicator not found for UI update"); */ return; }
-    
+    if (!indicator) {
+      /* console.error("[Pinger] Status indicator not found for UI update"); */ return;
+    }
+
     indicator.style.animation = '';
     let newIndicatorColor = theme.indicatorUnknown;
     let statusText = 'ps-Unknown';
     let titleText = 'Server status unknown. Click to check.';
 
     switch (serverStatus.isReachable) {
-      case true: newIndicatorColor = theme.indicatorOnline; statusText = 'ps-Online'; titleText = `Online. Last check: ${serverStatus.lastChecked?.toLocaleTimeString()}. Response: ${serverStatus.responseTime}ms. Click to re-ping.`; break;
-      case false: newIndicatorColor = theme.indicatorOffline; statusText = 'ps-Offline'; titleText = `Offline. Last check: ${serverStatus.lastChecked?.toLocaleTimeString()}.`; if(serverStatus.error) titleText += ` Error: ${serverStatus.error}.`; titleText += ` Click to re-ping.`; break;
-      case 'pending': newIndicatorColor = theme.indicatorPending; indicator.style.animation = 'pulse 1.2s infinite alternate'; statusText = 'ps-Pinging'; titleText = 'Pinging server...'; break;
-      case 'unconfigured': newIndicatorColor = theme.indicatorUnconfigured; statusText = 'ps-Not Set'; titleText = 'Server not configured. Click gear icon.'; break;
+      case true:
+        newIndicatorColor = theme.indicatorOnline;
+        statusText = 'ps-Online';
+        titleText = `Online. Last check: ${serverStatus.lastChecked?.toLocaleTimeString()}. Response: ${serverStatus.responseTime}ms. Click to re-ping.`;
+        break;
+      case false:
+        newIndicatorColor = theme.indicatorOffline;
+        statusText = 'ps-Offline';
+        titleText = `Offline. Last check: ${serverStatus.lastChecked?.toLocaleTimeString()}.`;
+        if (serverStatus.error) titleText += ` Error: ${serverStatus.error}.`;
+        titleText += ` Click to re-ping.`;
+        break;
+      case 'pending':
+        newIndicatorColor = theme.indicatorPending;
+        indicator.style.animation = 'pulse 1.2s infinite alternate';
+        statusText = 'ps-Pinging';
+        titleText = 'Pinging server...';
+        break;
+      case 'unconfigured':
+        newIndicatorColor = theme.indicatorUnconfigured;
+        statusText = 'ps-Not Set';
+        titleText = 'Server not configured. Click gear icon.';
+        break;
     }
     indicator.style.backgroundColor = newIndicatorColor;
     const textEl = statusBtn.querySelector('.status-text');
@@ -305,32 +369,35 @@
       return;
     }
     if (serverStatus.isReachable === 'pending' && !isManualTrigger) {
-        console.log(`[${EXTENSION_ID}] Ping in progress.`);
-        return;
+      console.log(`[${EXTENSION_ID}] Ping in progress.`);
+      return;
     }
-    serverStatus.isReachable = 'pending'; 
-    updateStatusButtonUI(); 
+    serverStatus.isReachable = 'pending';
+    updateStatusButtonUI();
 
     console.log(`[${EXTENSION_ID}] Pinging: ${serverUrl}`);
     const startTime = Date.now();
     try {
       const response = await fetch(serverUrl, {
         method: 'GET',
-        headers: { 'Accept': 'application/json' },
-        mode: 'cors', cache: 'no-cache',
+        headers: { Accept: 'application/json' },
+        mode: 'cors',
+        cache: 'no-cache',
       });
       serverStatus.responseTime = Date.now() - startTime;
       serverStatus.lastChecked = new Date();
       serverStatus.isReachable = response.ok;
       serverStatus.error = response.ok ? null : `Status: ${response.status}`;
     } catch (error) {
-      serverStatus.responseTime = Date.now() - startTime; 
+      serverStatus.responseTime = Date.now() - startTime;
       serverStatus.lastChecked = new Date();
       serverStatus.isReachable = false;
       serverStatus.error = error.message;
     }
-    console.log(`[${EXTENSION_ID}] Ping result: ${serverStatus.isReachable ? 'Online' : 'Offline/Error'}, Time: ${serverStatus.responseTime}ms, Error: ${serverStatus.error || 'None'}`);
-    updateStatusButtonUI(); 
+    console.log(
+      `[${EXTENSION_ID}] Ping result: ${serverStatus.isReachable ? 'Online' : 'Offline/Error'}, Time: ${serverStatus.responseTime}ms, Error: ${serverStatus.error || 'None'}`
+    );
+    updateStatusButtonUI();
   }
 
   function startPeriodicPing() {
@@ -341,22 +408,25 @@
     } else if (!serverUrl) {
       console.log(`[${EXTENSION_ID}] Auto-ping not started: URL not set.`);
     } else {
-       console.log(`[${EXTENSION_ID}] Auto-ping disabled: interval <= 0.`);
+      console.log(`[${EXTENSION_ID}] Auto-ping disabled: interval <= 0.`);
     }
   }
-  
+
   const CHAT_TOOLBAR_SELECTORS = [
-      'div[data-element-id="chat-input-actions"]', 
-      'div[class*="chat-input_actions" i]', 'div[class*="chat-input-toolbar" i]', 
-      'div[class*="composer_actions" i]', '.chat-input-actions', '.chat-controls' 
+    'div[data-element-id="chat-input-actions"]',
+    'div[class*="chat-input_actions" i]',
+    'div[class*="chat-input-toolbar" i]',
+    'div[class*="composer_actions" i]',
+    '.chat-input-actions',
+    '.chat-controls',
   ];
 
   function findTargetToolbar() {
-      for (const selector of CHAT_TOOLBAR_SELECTORS) {
-          const element = document.querySelector(selector);
-          if (element && document.body.contains(element)) return element; 
-      }
-      return null;
+    for (const selector of CHAT_TOOLBAR_SELECTORS) {
+      const element = document.querySelector(selector);
+      if (element && document.body.contains(element)) return element;
+    }
+    return null;
   }
 
   let uiSetupRetryTimeout = null;
@@ -367,72 +437,89 @@
     const targetToolbar = findTargetToolbar();
 
     if (targetToolbar) {
-        if (currentInjectedToolbar !== targetToolbar || !targetToolbar.contains(statusButtonContainer)) {
-            console.log(`[${EXTENSION_ID}] Target toolbar found. Attempting to inject/move UI.`);
-            attemptInjectUIToToolbar(targetToolbar);
-        }
+      if (currentInjectedToolbar !== targetToolbar || !targetToolbar.contains(statusButtonContainer)) {
+        console.log(`[${EXTENSION_ID}] Target toolbar found. Attempting to inject/move UI.`);
+        attemptInjectUIToToolbar(targetToolbar);
+      }
     } else {
-        // Only move to fallback if it's not already in fallback OR if the button isn't in the DOM at all.
-        if (currentInjectedToolbar !== document.body || !document.body.contains(statusButtonContainer)) {
-            console.log(`[${EXTENSION_ID}] Target toolbar NOT found. Moving to fallback.`);
-            fallbackInjectUI();
-        }
+      // Only move to fallback if it's not already in fallback OR if the button isn't in the DOM at all.
+      if (currentInjectedToolbar !== document.body || !document.body.contains(statusButtonContainer)) {
+        console.log(`[${EXTENSION_ID}] Target toolbar NOT found. Moving to fallback.`);
+        fallbackInjectUI();
+      }
     }
-    updateStatusButtonUI(); 
+    updateStatusButtonUI();
   }
 
   function initialSetupWithRetries(attemptsLeft) {
     ensureUIElementsExist(); // Ensure elements are created before first check
     const targetToolbar = findTargetToolbar();
     if (targetToolbar) {
-        console.log(`[${EXTENSION_ID}] Initial: Toolbar found. Injecting.`);
-        attemptInjectUIToToolbar(targetToolbar);
-        if (serverUrl) { pingServer(); startPeriodicPing(); }
-        else { updateStatusButtonUI(); console.log(`[${EXTENSION_ID}] Loaded. URL not set.`); }
+      console.log(`[${EXTENSION_ID}] Initial: Toolbar found. Injecting.`);
+      attemptInjectUIToToolbar(targetToolbar);
+      if (serverUrl) {
+        pingServer();
+        startPeriodicPing();
+      } else {
+        updateStatusButtonUI();
+        console.log(`[${EXTENSION_ID}] Loaded. URL not set.`);
+      }
     } else if (attemptsLeft > 0) {
-        console.log(`[${EXTENSION_ID}] Initial: Toolbar not found. Retries left: ${attemptsLeft -1}`);
-        if (uiSetupRetryTimeout) clearTimeout(uiSetupRetryTimeout);
-        uiSetupRetryTimeout = setTimeout(() => initialSetupWithRetries(attemptsLeft - 1), 750);
-        return;
+      console.log(`[${EXTENSION_ID}] Initial: Toolbar not found. Retries left: ${attemptsLeft - 1}`);
+      if (uiSetupRetryTimeout) clearTimeout(uiSetupRetryTimeout);
+      uiSetupRetryTimeout = setTimeout(() => initialSetupWithRetries(attemptsLeft - 1), 750);
+      return;
     } else {
-        console.warn(`[${EXTENSION_ID}] Initial: Max retries for toolbar. Using fallback.`);
-        fallbackInjectUI();
-        if (serverUrl) { pingServer(); startPeriodicPing(); }
-        else { updateStatusButtonUI(); console.log(`[${EXTENSION_ID}] Loaded. URL not set.`); }
+      console.warn(`[${EXTENSION_ID}] Initial: Max retries for toolbar. Using fallback.`);
+      fallbackInjectUI();
+      if (serverUrl) {
+        pingServer();
+        startPeriodicPing();
+      } else {
+        updateStatusButtonUI();
+        console.log(`[${EXTENSION_ID}] Loaded. URL not set.`);
+      }
     }
   }
 
   function init() {
     console.log(`[${EXTENSION_ID}] Initializing v1.1.6...`);
     addStyles();
-    ensureUIElementsExist(); 
+    ensureUIElementsExist();
 
     if (document.readyState === 'complete' || document.readyState === 'interactive') {
-        initialSetupWithRetries(5);
+      initialSetupWithRetries(5);
     } else {
-        document.addEventListener('DOMContentLoaded', () => initialSetupWithRetries(5));
+      document.addEventListener('DOMContentLoaded', () => initialSetupWithRetries(5));
     }
 
     const observer = new MutationObserver((mutationsList) => {
-        let mainUITargetChanged = false;
-        for(const mutation of mutationsList) {
-            if (mutation.type === 'childList') {
-                const targetNow = findTargetToolbar();
-                // Condition to re-evaluate: 
-                // 1. Target toolbar exists AND (our UI isn't there OR it's in the wrong toolbar)
-                // 2. Target toolbar DOESN'T exist AND our UI was previously in a toolbar (not fallback)
-                if (targetNow && (!currentInjectedToolbar || !targetNow.contains(statusButtonContainer) || currentInjectedToolbar !== targetNow )) {
-                    mainUITargetChanged = true; break;
-                }
-                if (!targetNow && currentInjectedToolbar && currentInjectedToolbar !== document.body) {
-                    mainUITargetChanged = true; break;
-                }
-            }
+      let mainUITargetChanged = false;
+      for (const mutation of mutationsList) {
+        if (mutation.type === 'childList') {
+          const targetNow = findTargetToolbar();
+          // Condition to re-evaluate:
+          // 1. Target toolbar exists AND (our UI isn't there OR it's in the wrong toolbar)
+          // 2. Target toolbar DOESN'T exist AND our UI was previously in a toolbar (not fallback)
+          if (
+            targetNow &&
+            (!currentInjectedToolbar ||
+              !targetNow.contains(statusButtonContainer) ||
+              currentInjectedToolbar !== targetNow)
+          ) {
+            mainUITargetChanged = true;
+            break;
+          }
+          if (!targetNow && currentInjectedToolbar && currentInjectedToolbar !== document.body) {
+            mainUITargetChanged = true;
+            break;
+          }
         }
-        if (mainUITargetChanged) {
-            console.log(`[${EXTENSION_ID}] MutationObserver: Relevant DOM change. Re-evaluating UI.`);
-            setupOrRepositionUI();
-        }
+      }
+      if (mainUITargetChanged) {
+        console.log(`[${EXTENSION_ID}] MutationObserver: Relevant DOM change. Re-evaluating UI.`);
+        setupOrRepositionUI();
+      }
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
@@ -443,4 +530,4 @@
     init();
     window.pluginServerPingerInitialized = true;
   }
-})(); 
+})();
