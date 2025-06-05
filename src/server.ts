@@ -11,7 +11,6 @@ import { pino } from 'pino';
 // Import the function to create the OpenAPI router
 import { createOpenAPIRouter } from '@/api-docs/openAPIRouter';
 import errorHandler from '@/common/middleware/errorHandler';
-import rateLimiter from '@/common/middleware/rateLimiter';
 import requestLogger from '@/common/middleware/requestLogger';
 import { env } from '@/common/utils/envConfig';
 import { mcpRouter } from '@/mcp/mcp.router';
@@ -66,7 +65,6 @@ app.use(
   })
 );
 app.use(helmet());
-app.use(rateLimiter);
 app.use(bodyParser.json());
 
 app.use((req, res, next) => {
