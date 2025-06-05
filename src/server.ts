@@ -91,7 +91,7 @@ app.use('/google-places', googlePlacesRouter);
 app.use('/api/tavily/extract', tavilyExtractRouter);
 app.use('/api/tavily/crawl', tavilyCrawlRouter);
 app.use('/api/tavily/map', tavilyMapRouter);
-app.use('/mcp', mcpRouter);
+app.use(mcpRouter);
 
 // List of all registries for OpenAPI documentation
 const allRegistries = [
