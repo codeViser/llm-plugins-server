@@ -15,6 +15,7 @@ export const env = cleanEnv(process.env, {
   // GOOGLE_PLACES_API_KEY: str({ default: '' }), // Removed as client now provides it
   GOOGLE_CLIENT_ID: str({ default: isTest ? 'TEST_GOOGLE_CLIENT_ID' : '' }),
   GOOGLE_CLIENT_SECRET: str({ default: isTest ? 'TEST_GOOGLE_CLIENT_SECRET' : '' }),
+  MCP_AUTH_TOKEN: str({ default: '' }),
   // GOOGLE_CALLBACK_URL: str({
   //   default: isTest ? 'http://localhost:3001/auth/google/callback' : 'http://localhost:3000/auth/google/callback'
   // }), // REMOVED - Handled by TypingMind

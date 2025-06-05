@@ -14,6 +14,7 @@ import errorHandler from '@/common/middleware/errorHandler';
 import rateLimiter from '@/common/middleware/rateLimiter';
 import requestLogger from '@/common/middleware/requestLogger';
 import { env } from '@/common/utils/envConfig';
+import { mcpRouter } from '@/mcp/mcp.router';
 import { healthCheckRegistry, healthCheckRouter } from '@/routes/healthCheck/healthCheckRouter';
 import { tavilyCrawlRegistry, tavilyCrawlRouter } from '@/routes/tavilyCrawl';
 import { tavilyExtractRegistry, tavilyExtractRouter } from '@/routes/tavilyExtract';
@@ -90,6 +91,7 @@ app.use('/google-places', googlePlacesRouter);
 app.use('/api/tavily/extract', tavilyExtractRouter);
 app.use('/api/tavily/crawl', tavilyCrawlRouter);
 app.use('/api/tavily/map', tavilyMapRouter);
+app.use('/mcp', mcpRouter);
 
 // List of all registries for OpenAPI documentation
 const allRegistries = [
