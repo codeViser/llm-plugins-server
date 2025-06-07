@@ -223,13 +223,23 @@
       if (!shortcutsButton) return resolve([]);
       shortcutsButton.click();
       await new Promise((r) => setTimeout(r, 100));
+
+      // Hide the first native menu to make scraping invisible
+      const firstMenu = document.querySelector(SELECTORS.AGENTS_CATEGORY_BUTTON)?.closest('[role="listbox"]');
+      if (firstMenu) firstMenu.style.visibility = 'hidden';
+
       const categoryButton = document.querySelector(categoryButtonSelector);
       if (!categoryButton) {
-        document.body.click();
+        document.body.click(); // Clean up
         return resolve([]);
       }
       categoryButton.click();
       await new Promise((r) => setTimeout(r, 100));
+
+      // Hide the second native menu
+      const secondMenu = document.querySelector(finalItemSelector)?.closest('[role="listbox"]');
+      if (secondMenu) secondMenu.style.visibility = 'hidden';
+
       const items = Array.from(document.querySelectorAll(finalItemSelector)).map((item) => ({
         type: 'listItem',
         namespace: namespace,
@@ -237,7 +247,7 @@
         categoryButtonSelector: categoryButtonSelector,
         finalItemSelector: finalItemSelector,
       }));
-      document.body.click();
+      document.body.click(); // Clean up and close invisible menus
       await new Promise((r) => setTimeout(r, 50));
       resolve(items);
     });
@@ -249,6 +259,11 @@
       if (!shortcutsButton) return resolve([]);
       shortcutsButton.click();
       await new Promise((r) => setTimeout(r, 100));
+
+      // Hide the first native menu
+      const firstMenu = document.querySelector(SELECTORS.AGENTS_CATEGORY_BUTTON)?.closest('[role="listbox"]');
+      if (firstMenu) firstMenu.style.visibility = 'hidden';
+
       const categoryButton = document.querySelector(SELECTORS.OUTPUT_SETTINGS_CATEGORY_BUTTON);
       if (!categoryButton) {
         document.body.click();
@@ -256,6 +271,13 @@
       }
       categoryButton.click();
       await new Promise((r) => setTimeout(r, 100));
+
+      // Hide the settings panel itself
+      const settingsPanel = document
+        .querySelector(SELECTORS.OUTPUT_FORMAT_SELECT)
+        ?.closest('div.space-y-4.my-4')?.parentElement;
+      if (settingsPanel) settingsPanel.style.visibility = 'hidden';
+
       const settings = [];
       const scrapeSelect = (namespace, selector) => {
         const selectEl = document.querySelector(selector);
@@ -276,7 +298,15 @@
       scrapeSelect('Tone', SELECTORS.OUTPUT_TONE_SELECT);
       scrapeSelect('Style', SELECTORS.OUTPUT_WRITING_STYLE_SELECT);
       scrapeSelect('Lang', SELECTORS.OUTPUT_LANGUAGE_SELECT);
-      document.body.click();
+
+      // Click the "Done" button if it exists to properly close the panel, otherwise click body.
+      const doneButton = Array.from(document.querySelectorAll('button')).find((b) => b.textContent === 'Done');
+      if (doneButton) {
+        doneButton.click();
+      } else {
+        document.body.click();
+      }
+
       await new Promise((r) => setTimeout(r, 50));
       resolve(settings);
     });
@@ -320,9 +350,8 @@
     });
     element.onmouseover = () => (element.style.backgroundColor = CONFIG.theme.optionHoverBg);
     element.onmouseout = () => {
-      // Check if it's the active selection before reverting background
-      const isActive = currentOptions[activeSelectionIndex]?.name === element.textContent.split(' ')[1];
-      if (!isActive) {
+      // Revert background only if it's not the currently active item via keyboard selection
+      if (element.style.backgroundColor !== CONFIG.theme.activeSelectionBg) {
         element.style.backgroundColor = 'transparent';
       }
     };
