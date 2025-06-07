@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TypingMind Universal Command Selector
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  Adds a universal, keyboard-navigable command selector for agents, prompts, and settings in TypingMind.
 // @author       AI Assistant & User Collaboration
 // @match        https://*.typingmind.com/*
@@ -50,6 +50,7 @@
   let activeSelectionIndex = 0;
   let currentOptions = [];
   let originalText = '';
+  let allOptionsCache = null; // Cache options to prevent re-scraping on every keystroke.
 
   function waitForElement(selector) {
     return new Promise((resolve) => {
@@ -126,24 +127,38 @@
       styleDropdown(dropdown);
       document.body.appendChild(dropdown);
     }
-    const options = await getAllOptions();
-    currentOptions = filterOptions(options, query);
+
+    // If we don't have the options cached, fetch them.
+    if (!allOptionsCache) {
+      renderLoading(dropdown); // Show a loading indicator
+      positionDropdown(dropdown);
+      dropdown.style.display = 'block';
+      dropdownVisible = true;
+
+      allOptionsCache = await getAllOptions();
+    }
+
+    // Now we have the options, filter and render them.
+    currentOptions = filterOptions(allOptionsCache, query);
     activeSelectionIndex = 0;
 
     if (currentOptions.length > 0) {
       renderOptions(dropdown, currentOptions);
-      positionDropdown(dropdown);
-      dropdown.style.display = 'block';
-      dropdownVisible = true;
     } else {
-      hideDropdown();
+      renderNoResults(dropdown, query);
     }
+
+    // Ensure dropdown is still visible and positioned correctly after async fetch
+    positionDropdown(dropdown);
+    dropdown.style.display = 'block';
+    dropdownVisible = true;
   }
 
   function hideDropdown() {
     const dropdown = document.getElementById(DROPDOWN_ID);
     if (dropdown) dropdown.style.display = 'none';
     dropdownVisible = false;
+    allOptionsCache = null; // Clear the cache when the interaction is over.
   }
 
   function updateDropdownSelection() {
@@ -161,9 +176,7 @@
       // Added specific styles for namespace and name
       optionElement.innerHTML = `<span style="color: ${CONFIG.theme.optionNamespaceText}; margin-right: 8px;">${option.namespace}</span> <span style="color: ${CONFIG.theme.optionText};">${option.name}</span>`;
       styleOptionElement(optionElement);
-      if (index === activeSelectionIndex) {
-        optionElement.style.backgroundColor = CONFIG.theme.activeSelectionBg;
-      }
+
       optionElement.addEventListener('mouseover', () => {
         activeSelectionIndex = index;
         updateDropdownSelection();
@@ -171,6 +184,24 @@
       optionElement.addEventListener('click', () => selectOption(option));
       dropdown.appendChild(optionElement);
     });
+    // After creating all elements, apply the initial selection highlight
+    updateDropdownSelection();
+  }
+
+  function renderLoading(dropdown) {
+    dropdown.innerHTML = '';
+    const loadingElement = document.createElement('div');
+    styleOptionElement(loadingElement); // Use the same base style
+    loadingElement.innerHTML = `<span style="color: ${CONFIG.theme.optionNamespaceText};">Loading options...</span>`;
+    dropdown.appendChild(loadingElement);
+  }
+
+  function renderNoResults(dropdown, query) {
+    dropdown.innerHTML = '';
+    const noResultsElement = document.createElement('div');
+    styleOptionElement(noResultsElement);
+    noResultsElement.innerHTML = `<span style="color: ${CONFIG.theme.optionNamespaceText};">No results for "${query}"</span>`;
+    dropdown.appendChild(noResultsElement);
   }
 
   async function selectOption(option) {
