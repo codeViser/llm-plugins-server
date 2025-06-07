@@ -179,12 +179,14 @@
     const shortcutsButton = document.querySelector(SELECTORS.SHORTCUTS_MENU_BUTTON);
     if (!shortcutsButton) return;
     shortcutsButton.click();
+    document.getElementById(CHAT_INPUT_ID)?.focus();
     await new Promise((r) => setTimeout(r, 100));
 
     if (option.type === 'listItem') {
       const categoryButton = document.querySelector(option.categoryButtonSelector);
       if (categoryButton) {
         categoryButton.click();
+        document.getElementById(CHAT_INPUT_ID)?.focus();
         await new Promise((r) => setTimeout(r, 100));
         const allItems = document.querySelectorAll(option.finalItemSelector);
         const targetItem = Array.from(allItems).find((item) => item.textContent.includes(option.name));
@@ -199,6 +201,7 @@
       const categoryButton = document.querySelector(SELECTORS.OUTPUT_SETTINGS_CATEGORY_BUTTON);
       if (categoryButton) {
         categoryButton.click();
+        document.getElementById(CHAT_INPUT_ID)?.focus();
         await new Promise((r) => setTimeout(r, 100));
         const selectElement = document.querySelector(option.selectSelector);
         if (selectElement) {
@@ -222,6 +225,7 @@
       const shortcutsButton = document.querySelector(SELECTORS.SHORTCUTS_MENU_BUTTON);
       if (!shortcutsButton) return resolve([]);
       shortcutsButton.click();
+      document.getElementById(CHAT_INPUT_ID)?.focus();
       await new Promise((r) => setTimeout(r, 100));
 
       // Hide the first native menu to make scraping invisible
@@ -234,6 +238,7 @@
         return resolve([]);
       }
       categoryButton.click();
+      document.getElementById(CHAT_INPUT_ID)?.focus();
       await new Promise((r) => setTimeout(r, 100));
 
       // Hide the second native menu
@@ -258,6 +263,7 @@
       const shortcutsButton = document.querySelector(SELECTORS.SHORTCUTS_MENU_BUTTON);
       if (!shortcutsButton) return resolve([]);
       shortcutsButton.click();
+      document.getElementById(CHAT_INPUT_ID)?.focus();
       await new Promise((r) => setTimeout(r, 100));
 
       // Hide the first native menu
@@ -270,6 +276,7 @@
         return resolve([]);
       }
       categoryButton.click();
+      document.getElementById(CHAT_INPUT_ID)?.focus();
       await new Promise((r) => setTimeout(r, 100));
 
       // Hide the settings panel itself
