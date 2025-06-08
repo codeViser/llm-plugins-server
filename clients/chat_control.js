@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TypingMind Command & Patch (Final)
 // @namespace    http://tampermonkey.net/
-// @version      4.5
+// @version      4.6
 // @description  Adds '$' command for Output Settings via reliable search-and-replace, and patches native '@' and '/' menus to prevent input clearing and work anywhere in chat. Mobile-friendly with touch support.
 // @author       AI Assistant & User Collaboration
 // @match        https://*.typingmind.com/*
@@ -94,13 +94,44 @@
   async function initialize() {
     const chatInput = await waitForElement(SELECTORS.CHAT_INPUT);
     if (!chatInput) return;
+    
+    // Check if we're in a new window that should restore stored context
+    checkForStoredContextRestore(chatInput);
+    
     chatInput.addEventListener('keydown', handleKeyDown, true);
     chatInput.addEventListener('input', handleInput);
     // Handle both desktop and mobile outside clicks
     document.addEventListener('click', handleClickOutside);
     document.addEventListener('touchstart', handleClickOutside);
     patchNativeMenus(chatInput);
-    console.log('TypingMind Command & Patch Initialized (v4.5)');
+    console.log('TypingMind Command & Patch Initialized (v4.6)');
+  }
+  
+  function checkForStoredContextRestore(chatInput) {
+    // Check localStorage for any stored context from slash command in other window
+    const storedContext = localStorage.getItem('tm_slash_context');
+    if (storedContext) {
+      try {
+        const contextData = JSON.parse(storedContext);
+        const timeDiff = Date.now() - contextData.timestamp;
+        
+        // Only restore if it's recent (within 10 seconds) and input is empty
+        if (timeDiff < 10000 && (!chatInput.value || chatInput.value.length === 0)) {
+          chatInput.value = contextData.text;
+          chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+          chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+          
+          // Clear the stored context after restoration
+          localStorage.removeItem('tm_slash_context');
+        } else if (timeDiff >= 10000) {
+          // Clean up old stored context
+          localStorage.removeItem('tm_slash_context');
+        }
+      } catch (e) {
+        // Invalid JSON, clean up
+        localStorage.removeItem('tm_slash_context');
+      }
+    }
   }
 
   // --- 4. Core Logic ($ Command, / Command & @/# Patch) ---
@@ -136,32 +167,53 @@
                         // Use stored context if available (when / was triggered mid-text)
                         const storedText = window._beforeSlashText || '';
                         
-                        // Small delay to let the native action complete first
-                        setTimeout(() => {
-                            const currentValue = chatInput.value;
-                            
-                            // If we have stored context and current value is different, restore context
-                            if (storedText && currentValue !== storedText) {
-                                // Determine what new content was added
-                                let newContent = currentValue;
+                        if (storedText) {
+                            // Multiple checks to handle different scenarios
+                            const checkAndRestore = () => {
+                                const currentValue = chatInput.value;
                                 
-                                // Check if this opened a new window/tab (value will be empty)
+                                // Case 1: New window opened (empty input or back to original stored text)
                                 if (!currentValue || currentValue.length === 0) {
-                                    // New window case - restore the stored text
                                     chatInput.value = storedText;
-                                } else {
-                                    // Text was added case - combine stored text with new content
-                                    chatInput.value = storedText + (newContent.startsWith(' ') ? newContent : ' ' + newContent);
+                                    chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+                                    chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                    window._beforeSlashText = null;
+                                    localStorage.removeItem('tm_slash_context');
+                                    return true;
                                 }
                                 
-                                // Position cursor at end
-                                chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-                                chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-                            }
+                                // Case 2: Same window with new content inserted (chat was refreshed + new text added)
+                                if (currentValue !== storedText && currentValue.length > 0) {
+                                    // Check if this is a complete replacement (new template text)
+                                    // Put stored text at the beginning, new content follows
+                                    chatInput.value = storedText + '\n\n' + currentValue;
+                                    
+                                    // Move cursor to the very end for continued typing
+                                    setTimeout(() => {
+                                        chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+                                        chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+                                        chatInput.focus();
+                                    }, 10);
+                                    
+                                    window._beforeSlashText = null;
+                                    localStorage.removeItem('tm_slash_context');
+                                    return true;
+                                }
+                                
+                                return false;
+                            };
                             
-                            // Clear the stored context after use
-                            window._beforeSlashText = null;
-                        }, 50);
+                            // Try multiple times with different delays to catch various scenarios
+                            setTimeout(checkAndRestore, 50);
+                            setTimeout(checkAndRestore, 200);
+                            setTimeout(checkAndRestore, 500);
+                            
+                            // Final cleanup after 2 seconds
+                            setTimeout(() => {
+                                window._beforeSlashText = null;
+                                localStorage.removeItem('tm_slash_context');
+                            }, 2000);
+                        }
                     });
                 });
             });
@@ -238,7 +290,14 @@
         e.preventDefault();
         
         // Store the current text for context preservation
-        window._beforeSlashText = chatInput.value;
+        const textToStore = chatInput.value;
+        window._beforeSlashText = textToStore;
+        
+        // Also store in localStorage for new window case
+        localStorage.setItem('tm_slash_context', JSON.stringify({
+          text: textToStore,
+          timestamp: Date.now()
+        }));
         
         // Click the existing search shortcut button to open the native menu
         const searchButton = document.querySelector(SELECTORS.SEARCH_SHORTCUT_BUTTON);
@@ -249,12 +308,14 @@
           setTimeout(() => {
             if (window._beforeSlashText) {
               window._beforeSlashText = null;
+              localStorage.removeItem('tm_slash_context');
             }
           }, 10000); // Clear after 10 seconds
         } else {
           // Fallback: just insert the slash normally if button not found
           document.execCommand('insertText', false, '/');
           window._beforeSlashText = null;
+          localStorage.removeItem('tm_slash_context');
         }
       }
     }
@@ -265,6 +326,7 @@
       setTimeout(() => {
         if (window._beforeSlashText) {
           window._beforeSlashText = null;
+          localStorage.removeItem('tm_slash_context');
         }
       }, 100);
     }
@@ -336,6 +398,7 @@
       setTimeout(() => {
         if (window._beforeSlashText) {
           window._beforeSlashText = null;
+          localStorage.removeItem('tm_slash_context');
         }
       }, 100);
     }
