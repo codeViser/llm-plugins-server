@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TypingMind Command & Patch (Final)
 // @namespace    http://tampermonkey.net/
-// @version      4.2
-// @description  Adds '$' and '/' commands for Output Settings and templates via reliable search-and-replace, and patches native '@' and '/' menus to prevent input clearing. Mobile-friendly with touch support.
+// @version      4.3
+// @description  Adds '$' command for Output Settings via reliable search-and-replace, and patches native '@' and '/' menus to prevent input clearing and work anywhere in chat. Mobile-friendly with touch support.
 // @author       AI Assistant & User Collaboration
 // @match        https://*.typingmind.com/*
 // @grant        none
@@ -14,7 +14,7 @@
 
   // --- 1. Configuration ---
   const CONFIG = {
-    triggerCharacters: ['$', '/'],
+    triggerCharacter: '$',
     theme: {
       dropdownBg: '#2D3748', dropdownBorder: '#4A5568', optionText: '#E2E8F0',
       optionNamespaceText: '#A0AEC0', optionHoverBg: '#4A5568', activeSelectionBg: '#4A5568',
@@ -74,26 +74,7 @@
     }
   };
 
-  // --- 2b. Hardcoded Mappings for Slash Commands (Templates/Actions) ---
-  const SLASH_MAPPINGS = {
-    "Templates": {
-        "Meeting Notes": "# Meeting Notes\n\n**Date:** \n**Attendees:** \n**Agenda:**\n\n## Discussion Points\n\n## Action Items\n\n## Next Steps",
-        "Project Brief": "# Project Brief\n\n**Project Name:** \n**Objective:** \n**Timeline:** \n**Stakeholders:**\n\n## Requirements\n\n## Deliverables\n\n## Success Metrics",
-        "Email Draft": "Subject: \n\nDear [Name],\n\n\n\nBest regards,\n[Your Name]",
-        "Code Review": "## Code Review\n\n**Files Reviewed:** \n**Overall Assessment:** \n\n### Strengths\n\n### Areas for Improvement\n\n### Action Items",
-        "Bug Report": "## Bug Report\n\n**Issue:** \n**Steps to Reproduce:** \n1. \n2. \n3. \n\n**Expected Result:** \n**Actual Result:** \n**Environment:**",
-    },
-    "Actions": {
-        "Summarize": "Please provide a concise summary of the following content:",
-        "Explain": "Please explain the following in simple terms:",
-        "Translate": "Please translate the following text:",
-        "Proofread": "Please proofread and improve the following text:",
-        "Analyze": "Please analyze the following content:",
-        "Expand": "Please expand on the following topic with more details:",
-        "Simplify": "Please simplify the following complex content:",
-        "Compare": "Please compare and contrast the following:",
-    }
-  };
+
 
   // --- 3. Script State and Selectors ---
   const SELECTORS = {
@@ -106,8 +87,7 @@
   let activeSelectionIndex = 0;
   let currentOptions = [];
   let originalText = '';
-  let currentTriggerChar = '';
-  let allOptionsCache = {};
+  let allOptionsCache = null;
 
   async function initialize() {
     const chatInput = await waitForElement(SELECTORS.CHAT_INPUT);
@@ -118,7 +98,7 @@
     document.addEventListener('click', handleClickOutside);
     document.addEventListener('touchstart', handleClickOutside);
     patchNativeMenus(chatInput);
-    console.log('TypingMind Command & Patch Initialized (v4.2)');
+    console.log('TypingMind Command & Patch Initialized (v4.3)');
   }
 
   // --- 4. Core Logic ($ Command, / Command & @/# Patch) ---
@@ -176,19 +156,15 @@
     observer.observe(document.body, { childList: true, subtree: true });
   }
 
-  function getOptionsFromMappings(triggerChar) {
-      const cacheKey = triggerChar;
-      if (allOptionsCache[cacheKey]) return allOptionsCache[cacheKey];
-      
+  function getOptionsFromMappings() {
+      if (allOptionsCache) return allOptionsCache;
       let options = [];
-      const mappingSource = triggerChar === '$' ? MAPPINGS : SLASH_MAPPINGS;
-      
-      for (const namespace in mappingSource) {
-          for (const name in mappingSource[namespace]) {
-              options.push({ namespace, name, value: mappingSource[namespace][name] });
+      for (const namespace in MAPPINGS) {
+          for (const name in MAPPINGS[namespace]) {
+              options.push({ namespace, name, value: MAPPINGS[namespace][name] });
           }
       }
-      allOptionsCache[cacheKey] = options;
+      allOptionsCache = options;
       return options;
   }
 
@@ -198,20 +174,7 @@
     if (!chatInput) return;
 
     // Build the replacement text, including the rest of the user's prompt
-    let replacementText;
-    if (currentTriggerChar === '/') {
-        // For slash commands, we might want to add the content differently
-        // If it's a template, replace entirely. If it's an action, prepend.
-        if (option.namespace === 'Templates') {
-            replacementText = originalText + option.value + " ";
-        } else {
-            // Actions - prepend to existing content
-            replacementText = originalText + option.value + " ";
-        }
-    } else {
-        // For $ commands, append as before
-        replacementText = originalText + option.value + " ";
-    }
+    const replacementText = originalText + option.value + " ";
     
     chatInput.value = replacementText;
     
@@ -227,7 +190,7 @@
   }
 
   function handleKeyDown(e) {
-    if (CONFIG.triggerCharacters.includes(e.key) && !e.repeat) {
+    if (e.key === CONFIG.triggerCharacter && !e.repeat) {
       // Only trigger if this might be a command (not part of normal text)
       const chatInput = e.target;
       const cursorPos = chatInput.selectionStart;
@@ -278,26 +241,21 @@
   function handleInput(e) {
     const text = e.target.value;
     const cursorPos = e.target.selectionStart;
+    const triggerIndex = text.lastIndexOf(CONFIG.triggerCharacter, cursorPos - 1);
     
-    // Check for each trigger character
-    for (const triggerChar of CONFIG.triggerCharacters) {
-      const triggerIndex = text.lastIndexOf(triggerChar, cursorPos - 1);
+    if (triggerIndex !== -1) {
+      // Check if this is a valid trigger context
+      const charBefore = triggerIndex > 0 ? text[triggerIndex - 1] : '';
+      const isValidContext = !charBefore || charBefore === ' ' || charBefore === '\n';
       
-      if (triggerIndex !== -1) {
-        // Check if this is a valid trigger context
-        const charBefore = triggerIndex > 0 ? text[triggerIndex - 1] : '';
-        const isValidContext = !charBefore || charBefore === ' ' || charBefore === '\n';
+      if (isValidContext) {
+        const textAfterTrigger = text.substring(triggerIndex + 1, cursorPos);
+        const hasSpaceAfter = textAfterTrigger.includes(' ') || textAfterTrigger.includes('\n');
         
-        if (isValidContext) {
-          const textAfterTrigger = text.substring(triggerIndex + 1, cursorPos);
-          const hasSpaceAfter = textAfterTrigger.includes(' ') || textAfterTrigger.includes('\n');
-          
-          if (!hasSpaceAfter) {
-            currentTriggerChar = triggerChar;
-            originalText = text.substring(0, triggerIndex);
-            showDropdown(textAfterTrigger);
-            return;
-          }
+        if (!hasSpaceAfter) {
+          originalText = text.substring(0, triggerIndex);
+          showDropdown(textAfterTrigger);
+          return;
         }
       }
     }
@@ -318,7 +276,7 @@
       styleDropdown(dropdown);
       document.body.appendChild(dropdown);
     }
-    const options = getOptionsFromMappings(currentTriggerChar);
+    const options = getOptionsFromMappings();
     currentOptions = filterOptions(options, query);
     activeSelectionIndex = 0;
     if (currentOptions.length > 0) {
@@ -335,7 +293,6 @@
     const dropdown = document.getElementById(DROPDOWN_ID);
     if (dropdown) dropdown.style.display = 'none';
     dropdownVisible = false;
-    currentTriggerChar = '';
   }
 
   function filterOptions(options, query) {
@@ -355,8 +312,7 @@
     dropdown.innerHTML = '';
     options.forEach((option, index) => {
       const optionElement = document.createElement('div');
-      const triggerPrefix = currentTriggerChar === '$' ? '$' : '/';
-      optionElement.innerHTML = `<span style="color: ${CONFIG.theme.optionNamespaceText}; margin-right: 8px;">${triggerPrefix} ${option.namespace}</span> <span style="color: ${CONFIG.theme.optionText};">${option.name}</span>`;
+      optionElement.innerHTML = `<span style="color: ${CONFIG.theme.optionNamespaceText}; margin-right: 8px;">$ ${option.namespace}</span> <span style="color: ${CONFIG.theme.optionText};">${option.name}</span>`;
       styleOptionElement(optionElement);
       
       // Desktop interaction
