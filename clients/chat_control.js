@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TypingMind Command & Patch (Final)
 // @namespace    http://tampermonkey.net/
-// @version      4.8
+// @version      4.9
 // @description  Adds '$' command for Output Settings via reliable search-and-replace, and patches native '@' and '/' menus to prevent input clearing and work anywhere in chat. Mobile-friendly with touch support.
 // @author       AI Assistant & User Collaboration
 // @match        https://*.typingmind.com/*
@@ -155,11 +155,45 @@
          
          chatInput.dispatchEvent(slashEvent);
          console.log('Test slash trigger sent with text:', testText);
+       },
+       
+       simulateSlashSelection: () => {
+         // Manually trigger the slash selection handler
+         if (window._beforeSlashText) {
+           const chatInput = document.querySelector('#chat-input-textbox');
+           const storedText = window._beforeSlashText;
+           const currentValue = chatInput.value;
+           
+           console.log('Manual simulation - stored:', storedText, 'current:', currentValue);
+           
+           if (!currentValue || currentValue.trim().length === 0) {
+             chatInput.value = storedText;
+             chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+             chatInput.focus();
+             chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+             window._beforeSlashText = null;
+             localStorage.removeItem('tm_slash_context');
+             console.log('Manual simulation: Restored empty input');
+           } else if (!currentValue.includes(storedText)) {
+             const finalText = storedText + '\n\n' + currentValue;
+             chatInput.value = finalText;
+             chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+             chatInput.focus();
+             chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+             window._beforeSlashText = null;
+             localStorage.removeItem('tm_slash_context');
+             console.log('Manual simulation: Combined texts');
+           } else {
+             console.log('Manual simulation: Text already includes stored content');
+           }
+         } else {
+           console.log('No stored context found');
+         }
        }
     };
     
-    console.log('TypingMind Command & Patch Initialized (v4.8)');
-    console.log('Debug functions available: tmDebug.testContextRestore(), tmDebug.showStoredContext(), tmDebug.clearStoredContext(), tmDebug.testSlashTrigger()');
+    console.log('TypingMind Command & Patch Initialized (v4.9)');
+    console.log('Debug functions available: tmDebug.testContextRestore(), tmDebug.showStoredContext(), tmDebug.clearStoredContext(), tmDebug.testSlashTrigger(), tmDebug.simulateSlashSelection()');
   }
   
     function checkForStoredContextRestore(chatInput) {
@@ -445,88 +479,72 @@
             });
         }
 
-        // Patch native / menu (slash commands) - only for context preservation
+                        // Patch native / menu (slash commands) - only for context preservation
         const slashOptions = Array.from(document.querySelectorAll(SELECTORS.NATIVE_SLASH_MENU_OPTIONS));
+        console.log('Found slash options for patching:', slashOptions.length);
+        
         if (slashOptions.length > 0) {
-            slashOptions.forEach((optionNode) => {
+            slashOptions.forEach((optionNode, index) => {
+                console.log(`Patching slash option ${index}:`, optionNode);
                 if (optionNode.dataset.patchedSlash) return;
                 optionNode.dataset.patchedSlash = 'true';
                 
-                // Handle both mouse and touch events for mobile compatibility
-                ['mousedown', 'touchstart'].forEach(eventType => {
-                    optionNode.addEventListener(eventType, () => {
+                // Handle multiple events for detection
+                ['click', 'mousedown', 'touchstart'].forEach(eventType => {
+                    optionNode.addEventListener(eventType, (e) => {
                         const storedText = window._beforeSlashText || '';
-                        console.log('Slash option clicked, stored text:', storedText);
+                        console.log(`Slash option ${eventType} detected! Stored text:`, storedText);
                         
                         if (storedText) {
-                            // Set up a comprehensive monitoring system
-                            let attempts = 0;
-                            const maxAttempts = 20;
-                            
-                            const monitorAndRestore = () => {
-                                attempts++;
-                                const currentValue = chatInput.value;
-                                console.log(`Attempt ${attempts}: Current value:`, currentValue);
-                                console.log(`Stored text:`, storedText);
-                                
-                                // Case 1: Input is empty (could be new window or cleared)
-                                if (!currentValue || currentValue.trim().length === 0) {
-                                    console.log('Case 1: Empty input detected, restoring stored text');
-                                    chatInput.value = storedText;
-                                    chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-                                    chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-                                    chatInput.focus();
-                                    cleanupStoredContext();
-                                    return;
-                                }
-                                
-                                // Case 2: New content has appeared that's different from stored text
-                                if (currentValue !== storedText && currentValue.length > 0 && !currentValue.includes(storedText)) {
-                                    console.log('Case 2: New content detected, prepending stored text');
-                                    // New template/content was inserted, prepend our stored text
-                                    chatInput.value = storedText + '\n\n' + currentValue;
-                                    
-                                    // Move cursor to end
-                                    requestAnimationFrame(() => {
-                                        chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-                                        chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-                                        chatInput.focus();
-                                    });
-                                    
-                                    cleanupStoredContext();
-                                    return;
-                                }
-                                
-                                // Case 3: Text already contains our stored content - no action needed
-                                if (currentValue.includes(storedText)) {
-                                    console.log('Case 3: Stored text already present');
-                                    cleanupStoredContext();
-                                    return;
-                                }
-                                
-                                // Continue monitoring if we haven't hit max attempts
-                                if (attempts < maxAttempts) {
-                                    setTimeout(monitorAndRestore, 100);
-                                } else {
-                                    console.log('Max attempts reached, giving up');
-                                    cleanupStoredContext();
-                                }
-                            };
-                            
-                            const cleanupStoredContext = () => {
-                                window._beforeSlashText = null;
-                                localStorage.removeItem('tm_slash_context');
-                                console.log('Stored context cleaned up');
-                            };
-                            
-                            // Start monitoring after a brief delay
-                            setTimeout(monitorAndRestore, 100);
+                            // Use multiple attempts with delays
+                            setTimeout(() => attemptSlashRestore(storedText, chatInput, `${eventType} attempt 1`), 100);
+                            setTimeout(() => attemptSlashRestore(storedText, chatInput, `${eventType} attempt 2`), 300);
+                            setTimeout(() => attemptSlashRestore(storedText, chatInput, `${eventType} attempt 3`), 600);
                         }
-                    });
+                    }, { capture: true });
                 });
             });
+        }
+        
+        // Helper function for slash restoration attempts
+        function attemptSlashRestore(storedText, chatInput, source) {
+            if (!window._beforeSlashText) return; // Already handled
             
-
+            const currentValue = chatInput.value;
+            console.log(`attemptSlashRestore from ${source}:`, { storedText, currentValue });
+            
+            // Case 1: Input is empty - restore stored text
+            if (!currentValue || currentValue.trim().length === 0) {
+                console.log(`${source}: Empty input, restoring`);
+                chatInput.value = storedText;
+                chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+                chatInput.focus();
+                chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+                window._beforeSlashText = null;
+                localStorage.removeItem('tm_slash_context');
+                return;
+            }
+            
+            // Case 2: New content - combine with stored text
+            if (currentValue !== storedText && !currentValue.includes(storedText)) {
+                console.log(`${source}: New content, combining`);
+                const finalText = storedText + '\n\n' + currentValue;
+                chatInput.value = finalText;
+                chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+                chatInput.focus();
+                chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+                window._beforeSlashText = null;
+                localStorage.removeItem('tm_slash_context');
+                return;
+            }
+            
+            // Case 3: Already contains stored text
+            if (currentValue.includes(storedText)) {
+                console.log(`${source}: Already contains stored text, cleanup`);
+                window._beforeSlashText = null;
+                localStorage.removeItem('tm_slash_context');
+                return;
+            }
         }
     });
     observer.observe(document.body, { childList: true, subtree: true });
