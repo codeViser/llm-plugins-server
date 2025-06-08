@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TypingMind Command & Patch (Final)
 // @namespace    http://tampermonkey.net/
-// @version      4.9
-// @description  Adds '$' command for Output Settings via reliable search-and-replace, and patches native '@' and '/' menus to prevent input clearing and work anywhere in chat. Mobile-friendly with touch support.
+// @version      5.0
+// @description  Adds '$' command for Output Settings with context preservation, patches native '@' menu for context preservation, and enables native '/' menu anywhere in chat. Mobile-friendly with touch support.
 // @author       AI Assistant & User Collaboration
 // @match        https://*.typingmind.com/*
 // @grant        none
@@ -130,333 +130,30 @@
       },
       
              clearStoredContext: () => {
+         // Clean up any legacy slash context storage
          localStorage.removeItem('tm_slash_context');
          window._beforeSlashText = null;
-         console.log('All stored context cleared');
-       },
-       
-       testSlashTrigger: (testText = "Test slash trigger") => {
-         const chatInput = document.querySelector('#chat-input-textbox');
-         if (!chatInput) {
-           console.log('Chat input not found');
-           return;
-         }
-         
-         // Set test text and trigger slash
-         chatInput.value = testText;
-         chatInput.focus();
-         
-         // Simulate slash key press
-         const slashEvent = new KeyboardEvent('keydown', {
-           key: '/',
-           bubbles: true,
-           cancelable: true
-         });
-         
-         chatInput.dispatchEvent(slashEvent);
-         console.log('Test slash trigger sent with text:', testText);
-       },
-       
-       simulateSlashSelection: () => {
-         // Manually trigger the slash selection handler
-         if (window._beforeSlashText) {
-           const chatInput = document.querySelector('#chat-input-textbox');
-           const storedText = window._beforeSlashText;
-           const currentValue = chatInput.value;
-           
-           console.log('Manual simulation - stored:', storedText, 'current:', currentValue);
-           
-           if (!currentValue || currentValue.trim().length === 0) {
-             chatInput.value = storedText;
-             chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-             chatInput.focus();
-             chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-             window._beforeSlashText = null;
-             localStorage.removeItem('tm_slash_context');
-             console.log('Manual simulation: Restored empty input');
-           } else if (!currentValue.includes(storedText)) {
-             const finalText = storedText + '\n\n' + currentValue;
-             chatInput.value = finalText;
-             chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-             chatInput.focus();
-             chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-             window._beforeSlashText = null;
-             localStorage.removeItem('tm_slash_context');
-             console.log('Manual simulation: Combined texts');
-           } else {
-             console.log('Manual simulation: Text already includes stored content');
-           }
-         } else {
-           console.log('No stored context found');
-         }
+         console.log('All stored context cleared (slash context preservation disabled)');
        }
     };
     
-    console.log('TypingMind Command & Patch Initialized (v4.9)');
-    console.log('Debug functions available: tmDebug.testContextRestore(), tmDebug.showStoredContext(), tmDebug.clearStoredContext(), tmDebug.testSlashTrigger(), tmDebug.simulateSlashSelection()');
+    console.log('TypingMind Command & Patch Initialized (v5.0)');
+    console.log('Features: $-command (with context), @-menu (with context), /-menu (anywhere, no context preservation)');
   }
   
     function checkForStoredContextRestore(chatInput) {
-    // Multiple aggressive checks for stored context
-    const performRestore = (contextData, source) => {
-      console.log(`Restoring context from ${source}:`, contextData.text);
-      
-      const restoredText = contextData.text;
-      
-      // Use multiple restoration methods
-      chatInput.value = restoredText;
-      chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-      chatInput.dispatchEvent(new Event('change', { bubbles: true }));
-      
-      // React-specific updates
-      if (chatInput._valueTracker && chatInput._valueTracker.setValue) {
-        chatInput._valueTracker.setValue(restoredText);
-      }
-      
-      const reactFiber = chatInput._reactInternalFiber || chatInput._reactInternalInstance;
-      if (reactFiber && reactFiber.memoizedProps && reactFiber.memoizedProps.onChange) {
-        reactFiber.memoizedProps.onChange({ target: chatInput });
-      }
-      
-      chatInput.focus();
-      chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-      
-      console.log('New window context restored. Final value:', chatInput.value);
-      localStorage.removeItem('tm_slash_context');
-    };
-    
-    // Immediate check
+    // Slash context preservation disabled - clean up any existing storage
     const storedContext = localStorage.getItem('tm_slash_context');
-    console.log('Checking for stored context on page load:', storedContext);
-    
     if (storedContext) {
-      try {
-        const contextData = JSON.parse(storedContext);
-        const timeDiff = Date.now() - contextData.timestamp;
-        console.log('Context data found, age:', timeDiff + 'ms');
-        
-        if (timeDiff < 20000) { // Extended time window
-          performRestore(contextData, 'immediate check');
-          return;
-        } else {
-          localStorage.removeItem('tm_slash_context');
-          console.log('Old context cleaned up');
-        }
-      } catch (e) {
-        console.log('Error parsing stored context:', e);
-        localStorage.removeItem('tm_slash_context');
-      }
+      localStorage.removeItem('tm_slash_context');
+      console.log('Cleaned up existing slash context storage (feature disabled)');
     }
-    
-    // Aggressive continuous monitoring for new windows
-    let checkCount = 0;
-    const maxChecks = 100; // Check for 10 seconds
-    
-    const continuousCheck = () => {
-      checkCount++;
-      const lateContext = localStorage.getItem('tm_slash_context');
-      
-      if (lateContext) {
-        try {
-          const contextData = JSON.parse(lateContext);
-          const timeDiff = Date.now() - contextData.timestamp;
-          
-          if (timeDiff < 20000) {
-            console.log(`Late context found on attempt ${checkCount}`);
-            performRestore(contextData, `continuous check #${checkCount}`);
-            return; // Stop checking
-          } else {
-            localStorage.removeItem('tm_slash_context');
-            console.log('Late context expired, cleaned up');
-          }
-        } catch (e) {
-          console.log('Error in late context check:', e);
-          localStorage.removeItem('tm_slash_context');
-        }
-      }
-      
-      if (checkCount < maxChecks) {
-        setTimeout(continuousCheck, 100);
-      } else {
-        console.log('Continuous context check completed after', maxChecks, 'attempts');
-      }
-    };
-    
-    // Start continuous checking
-    setTimeout(continuousCheck, 100);
-    
-    // Also listen for storage events (cross-window communication)
-    const storageListener = (e) => {
-      if (e.key === 'tm_slash_context' && e.newValue) {
-        try {
-          const contextData = JSON.parse(e.newValue);
-          const timeDiff = Date.now() - contextData.timestamp;
-          
-          if (timeDiff < 5000) { // Very recent
-            console.log('Storage event triggered context restore');
-            performRestore(contextData, 'storage event');
-            window.removeEventListener('storage', storageListener);
-          }
-        } catch (e) {
-          console.log('Error in storage event handler:', e);
-        }
-      }
-    };
-    
-    window.addEventListener('storage', storageListener);
-    
-    // Remove listener after 15 seconds
-    setTimeout(() => {
-      window.removeEventListener('storage', storageListener);
-    }, 15000);
   }
   
-  function setupInputMonitoring(chatInput) {
-    let lastValue = chatInput.value;
-    let monitoringActive = false;
-    
-    const monitorChanges = () => {
-      const currentValue = chatInput.value;
-      const storedContext = window._beforeSlashText || '';
-      
-      // If we have stored context and the input has changed
-      if (storedContext && currentValue !== lastValue) {
-        console.log('Input changed during monitoring:', {
-          lastValue,
-          currentValue,
-          storedContext
-        });
-        
-                 // Check if this is a case where we need to restore context
-         if (currentValue.length > 0 && !currentValue.includes(storedContext)) {
-           console.log('Restoring context via input monitoring');
-           
-           // Stop monitoring while we make changes
-           monitoringActive = false;
-           
-           // More robust restoration with multiple methods
-           const restoredText = storedContext + '\n\n' + currentValue;
-           console.log('Setting restored text:', restoredText);
-           
-           // Method 1: Direct value assignment
-           chatInput.value = restoredText;
-           
-           // Method 2: Force React/Vue to update via multiple events
-           chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-           chatInput.dispatchEvent(new Event('change', { bubbles: true }));
-           
-           // Method 3: Use the native setValue if available
-           if (chatInput._valueTracker && chatInput._valueTracker.setValue) {
-             chatInput._valueTracker.setValue(restoredText);
-           }
-           
-           // Method 4: Focus and trigger events
-           chatInput.focus();
-           chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-           
-           // Method 5: Force re-render with React fiber updates
-           const reactFiber = chatInput._reactInternalFiber || chatInput._reactInternalInstance;
-           if (reactFiber && reactFiber.memoizedProps && reactFiber.memoizedProps.onChange) {
-             reactFiber.memoizedProps.onChange({ target: chatInput });
-           }
-           
-           // Method 6: React 18+ approach using Object.getOwnPropertyDescriptor
-           try {
-             const descriptor = Object.getOwnPropertyDescriptor(chatInput, 'value') || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(chatInput), 'value');
-             if (descriptor && descriptor.set) {
-               descriptor.set.call(chatInput, restoredText);
-             }
-           } catch (e) {
-             console.log('Method 6 failed:', e);
-           }
-           
-           console.log('Final input value after restoration:', chatInput.value);
-           
-           // Clear stored context
-           window._beforeSlashText = null;
-           localStorage.removeItem('tm_slash_context');
-           
-           return;
-         }
-      }
-      
-      lastValue = currentValue;
-      
-      // Continue monitoring if active
-      if (monitoringActive) {
-        requestAnimationFrame(monitorChanges);
-      }
-    };
-    
-    // Start monitoring when slash context is stored
-    const originalBeforeSlashSetter = Object.getOwnPropertyDescriptor(window, '_beforeSlashText') || {};
-    Object.defineProperty(window, '_beforeSlashText', {
-      get: () => originalBeforeSlashSetter.value,
-      set: (value) => {
-        originalBeforeSlashSetter.value = value;
-        if (value && !monitoringActive) {
-          console.log('Starting input monitoring for context restoration');
-          monitoringActive = true;
-          lastValue = chatInput.value;
-          requestAnimationFrame(monitorChanges);
-          
-          // Auto-stop monitoring after 10 seconds
-          setTimeout(() => {
-            monitoringActive = false;
-            console.log('Input monitoring timed out');
-          }, 10000);
-        } else if (!value) {
-          monitoringActive = false;
-          console.log('Stopping input monitoring');
-        }
-      },
-      configurable: true
-    });
-    
-    // Also monitor via MutationObserver for DOM changes
-    const observer = new MutationObserver(() => {
-      if (window._beforeSlashText && !monitoringActive) {
-        console.log('DOM change detected, checking for context restoration need');
-        const currentValue = chatInput.value;
-        const storedContext = window._beforeSlashText;
-        
-                 if (currentValue && !currentValue.includes(storedContext)) {
-           console.log('Restoring context via DOM observer');
-           
-           const restoredText = storedContext + '\n\n' + currentValue;
-           console.log('DOM observer setting restored text:', restoredText);
-           
-           // Use same robust restoration methods
-           chatInput.value = restoredText;
-           chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-           chatInput.dispatchEvent(new Event('change', { bubbles: true }));
-           
-           if (chatInput._valueTracker && chatInput._valueTracker.setValue) {
-             chatInput._valueTracker.setValue(restoredText);
-           }
-           
-           const reactFiber = chatInput._reactInternalFiber || chatInput._reactInternalInstance;
-           if (reactFiber && reactFiber.memoizedProps && reactFiber.memoizedProps.onChange) {
-             reactFiber.memoizedProps.onChange({ target: chatInput });
-           }
-           
-           chatInput.focus();
-           chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-           
-           console.log('DOM observer final value:', chatInput.value);
-           
-           window._beforeSlashText = null;
-           localStorage.removeItem('tm_slash_context');
-         }
-      }
-    });
-    
-    observer.observe(chatInput, {
-      attributes: true,
-      attributeFilter: ['value'],
-      characterData: true,
-      subtree: true
-    });
+    function setupInputMonitoring(chatInput) {
+    // Input monitoring for slash context restoration disabled
+    // This function is kept for compatibility but does nothing
+    console.log('Input monitoring disabled (slash context preservation disabled)');
   }
 
   // --- 4. Core Logic ($ Command, / Command & @/# Patch) ---
@@ -479,72 +176,14 @@
             });
         }
 
-                        // Patch native / menu (slash commands) - only for context preservation
+                        // Patch native / menu (slash commands) - DISABLED for now due to event interception issues
+        // The native TypingMind slash menu intercepts our event listeners
+        console.log('Slash context preservation temporarily disabled - TypingMind event conflicts');
+        
+        // Simple logging to show the slash menu is detected but not patched
         const slashOptions = Array.from(document.querySelectorAll(SELECTORS.NATIVE_SLASH_MENU_OPTIONS));
-        console.log('Found slash options for patching:', slashOptions.length);
-        
         if (slashOptions.length > 0) {
-            slashOptions.forEach((optionNode, index) => {
-                console.log(`Patching slash option ${index}:`, optionNode);
-                if (optionNode.dataset.patchedSlash) return;
-                optionNode.dataset.patchedSlash = 'true';
-                
-                // Handle multiple events for detection
-                ['click', 'mousedown', 'touchstart'].forEach(eventType => {
-                    optionNode.addEventListener(eventType, (e) => {
-                        const storedText = window._beforeSlashText || '';
-                        console.log(`Slash option ${eventType} detected! Stored text:`, storedText);
-                        
-                        if (storedText) {
-                            // Use multiple attempts with delays
-                            setTimeout(() => attemptSlashRestore(storedText, chatInput, `${eventType} attempt 1`), 100);
-                            setTimeout(() => attemptSlashRestore(storedText, chatInput, `${eventType} attempt 2`), 300);
-                            setTimeout(() => attemptSlashRestore(storedText, chatInput, `${eventType} attempt 3`), 600);
-                        }
-                    }, { capture: true });
-                });
-            });
-        }
-        
-        // Helper function for slash restoration attempts
-        function attemptSlashRestore(storedText, chatInput, source) {
-            if (!window._beforeSlashText) return; // Already handled
-            
-            const currentValue = chatInput.value;
-            console.log(`attemptSlashRestore from ${source}:`, { storedText, currentValue });
-            
-            // Case 1: Input is empty - restore stored text
-            if (!currentValue || currentValue.trim().length === 0) {
-                console.log(`${source}: Empty input, restoring`);
-                chatInput.value = storedText;
-                chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-                chatInput.focus();
-                chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-                window._beforeSlashText = null;
-                localStorage.removeItem('tm_slash_context');
-                return;
-            }
-            
-            // Case 2: New content - combine with stored text
-            if (currentValue !== storedText && !currentValue.includes(storedText)) {
-                console.log(`${source}: New content, combining`);
-                const finalText = storedText + '\n\n' + currentValue;
-                chatInput.value = finalText;
-                chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-                chatInput.focus();
-                chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-                window._beforeSlashText = null;
-                localStorage.removeItem('tm_slash_context');
-                return;
-            }
-            
-            // Case 3: Already contains stored text
-            if (currentValue.includes(storedText)) {
-                console.log(`${source}: Already contains stored text, cleanup`);
-                window._beforeSlashText = null;
-                localStorage.removeItem('tm_slash_context');
-                return;
-            }
+            console.log(`Found ${slashOptions.length} slash options but skipping patch due to event conflicts`);
         }
     });
     observer.observe(document.body, { childList: true, subtree: true });
@@ -602,7 +241,7 @@
       }
     }
     
-    // Handle / trigger - click existing search button to open native menu
+    // Handle / trigger - click existing search button to open native menu (NO context preservation)
     if (e.key === CONFIG.slashTriggerCharacter && !e.repeat) {
       const chatInput = e.target;
       const cursorPos = chatInput.selectionStart;
@@ -615,60 +254,22 @@
       if (shouldTrigger) {
         e.preventDefault();
         
-        // Store the current text for context preservation
-        const textToStore = chatInput.value;
-        window._beforeSlashText = textToStore;
-        
-        console.log('Storing context for slash command:', textToStore);
-        
-        // Also store in localStorage for new window case
-        localStorage.setItem('tm_slash_context', JSON.stringify({
-          text: textToStore,
-          timestamp: Date.now(),
-          url: window.location.href
-        }));
-        
-        // Visual feedback - briefly flash the input border
-        const originalBorder = chatInput.style.border;
-        chatInput.style.border = '2px solid #10B981';
-        setTimeout(() => {
-          chatInput.style.border = originalBorder;
-        }, 300);
+        console.log('Slash trigger detected - opening native menu (no context preservation)');
         
         // Click the existing search shortcut button to open the native menu
         const searchButton = document.querySelector(SELECTORS.SEARCH_SHORTCUT_BUTTON);
         if (searchButton) {
           console.log('Clicking search button to open native menu');
           searchButton.click();
-          
-          // Safety timeout to clear stored context if nothing happens
-          setTimeout(() => {
-            if (window._beforeSlashText) {
-              console.log('Safety cleanup of stored context');
-              window._beforeSlashText = null;
-              localStorage.removeItem('tm_slash_context');
-            }
-          }, 15000); // Clear after 15 seconds
         } else {
           console.log('Search button not found, fallback to normal slash');
           // Fallback: just insert the slash normally if button not found
           document.execCommand('insertText', false, '/');
-          window._beforeSlashText = null;
-          localStorage.removeItem('tm_slash_context');
         }
       }
     }
     
-    // Handle Escape key for native slash menu dismissal
-    if (e.key === 'Escape' && window._beforeSlashText) {
-      // Clear stored context if user dismisses native menu with Escape
-      setTimeout(() => {
-        if (window._beforeSlashText) {
-          window._beforeSlashText = null;
-          localStorage.removeItem('tm_slash_context');
-        }
-      }, 100);
-    }
+    // Note: Escape key handling for slash menu not needed (no context preservation)
     
     if (!dropdownVisible) return;
     const keyMap = {
@@ -730,17 +331,7 @@
     const dropdown = document.getElementById(DROPDOWN_ID);
     if (dropdown && !dropdown.contains(e.target)) hideDropdown();
     
-    // Also check for native slash menu dismissal
-    const nativeSlashMenu = document.querySelector('[role="listbox"]');
-    if (nativeSlashMenu && !nativeSlashMenu.contains(e.target) && window._beforeSlashText) {
-      // Menu was dismissed without selection, clear stored context
-      setTimeout(() => {
-        if (window._beforeSlashText) {
-          window._beforeSlashText = null;
-          localStorage.removeItem('tm_slash_context');
-        }
-      }, 100);
-    }
+    // Note: Slash menu dismissal handling not needed (no context preservation)
   }
 
   function showDropdown(query) {
