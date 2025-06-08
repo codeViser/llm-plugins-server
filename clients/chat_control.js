@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TypingMind Command & Patch (Final)
 // @namespace    http://tampermonkey.net/
-// @version      4.3
+// @version      4.4
 // @description  Adds '$' command for Output Settings via reliable search-and-replace, and patches native '@' and '/' menus to prevent input clearing and work anywhere in chat. Mobile-friendly with touch support.
 // @author       AI Assistant & User Collaboration
 // @match        https://*.typingmind.com/*
@@ -15,6 +15,7 @@
   // --- 1. Configuration ---
   const CONFIG = {
     triggerCharacter: '$',
+    slashTriggerCharacter: '/',
     theme: {
       dropdownBg: '#2D3748', dropdownBorder: '#4A5568', optionText: '#E2E8F0',
       optionNamespaceText: '#A0AEC0', optionHoverBg: '#4A5568', activeSelectionBg: '#4A5568',
@@ -98,7 +99,7 @@
     document.addEventListener('click', handleClickOutside);
     document.addEventListener('touchstart', handleClickOutside);
     patchNativeMenus(chatInput);
-    console.log('TypingMind Command & Patch Initialized (v4.3)');
+    console.log('TypingMind Command & Patch Initialized (v4.4)');
   }
 
   // --- 4. Core Logic ($ Command, / Command & @/# Patch) ---
@@ -131,26 +132,36 @@
                 // Handle both mouse and touch events for mobile compatibility
                 ['mousedown', 'touchstart'].forEach(eventType => {
                     optionNode.addEventListener(eventType, () => {
-                        const textToPreserve = chatInput.value;
-                        const slashIndex = textToPreserve.lastIndexOf('/');
+                        // Use stored context if available (when / was triggered mid-text)
+                        const beforeSlashText = window._beforeSlashText || '';
                         
-                        if (slashIndex !== -1) {
-                            const beforeSlash = textToPreserve.substring(0, slashIndex);
+                        requestAnimationFrame(() => {
+                            const currentValue = chatInput.value;
                             
-                            requestAnimationFrame(() => {
-                                // Preserve text before slash and append any new content from the selection
-                                if (chatInput.value !== textToPreserve) {
-                                    const newContent = chatInput.value;
-                                    // If the new content doesn't start with our preserved text, prepend it
-                                    if (!newContent.startsWith(beforeSlash)) {
-                                        chatInput.value = beforeSlash + (newContent.startsWith(' ') ? newContent : ' ' + newContent);
-                                    }
-                                }
-                            });
-                        }
+                            // If we have stored context, prepend it to the new content
+                            if (beforeSlashText && !currentValue.startsWith(beforeSlashText)) {
+                                const newContent = currentValue;
+                                chatInput.value = beforeSlashText + (newContent.startsWith(' ') ? newContent : ' ' + newContent);
+                                
+                                // Clear the stored context after use
+                                window._beforeSlashText = null;
+                            }
+                        });
                     });
                 });
             });
+            
+            // Clear stored context when menu disappears without selection
+            const menuContainer = document.querySelector('[role="listbox"]');
+            if (menuContainer && !menuContainer.dataset.observingSlash) {
+                menuContainer.dataset.observingSlash = 'true';
+                const menuObserver = new MutationObserver(() => {
+                    if (!document.querySelector(SELECTORS.NATIVE_SLASH_MENU_OPTIONS)) {
+                        window._beforeSlashText = null;
+                    }
+                });
+                menuObserver.observe(document.body, { childList: true, subtree: true });
+            }
         }
     });
     observer.observe(document.body, { childList: true, subtree: true });
@@ -190,6 +201,7 @@
   }
 
   function handleKeyDown(e) {
+    // Handle $ trigger
     if (e.key === CONFIG.triggerCharacter && !e.repeat) {
       // Only trigger if this might be a command (not part of normal text)
       const chatInput = e.target;
@@ -204,6 +216,36 @@
       if (shouldTrigger) {
         e.preventDefault();
         document.execCommand('insertText', false, e.key);
+      }
+    }
+    
+    // Handle / trigger - simulate native menu anywhere in chat
+    if (e.key === CONFIG.slashTriggerCharacter && !e.repeat) {
+      const chatInput = e.target;
+      const cursorPos = chatInput.selectionStart;
+      const textBefore = chatInput.value.substring(0, cursorPos);
+      
+      // Check if this might be a command trigger
+      const charBefore = textBefore[textBefore.length - 1];
+      const shouldTrigger = !charBefore || charBefore === ' ' || charBefore === '\n';
+      
+      if (shouldTrigger) {
+        e.preventDefault();
+        // Store the text before the slash for context preservation
+        window._beforeSlashText = textBefore;
+        
+        // Simulate the native menu by temporarily clearing input and adding slash
+        const originalValue = chatInput.value;
+        chatInput.value = '/';
+        chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+        
+        // Restore original value after a brief delay if no menu appears
+        setTimeout(() => {
+          if (chatInput.value === '/' && !document.querySelector(SELECTORS.NATIVE_SLASH_MENU_OPTIONS.replace('[data-element-id^="search-action-"]', '[data-element-id*="search-action"]'))) {
+            chatInput.value = originalValue + '/';
+            chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+          }
+        }, 100);
       }
     }
     
@@ -315,24 +357,35 @@
       optionElement.innerHTML = `<span style="color: ${CONFIG.theme.optionNamespaceText}; margin-right: 8px;">$ ${option.namespace}</span> <span style="color: ${CONFIG.theme.optionText};">${option.name}</span>`;
       styleOptionElement(optionElement);
       
-      // Desktop interaction
+      // Store option data on element for easy access
+      optionElement._optionData = option;
+      optionElement._optionIndex = index;
+      
+      // Desktop hover interaction
       optionElement.addEventListener('mouseover', () => {
         activeSelectionIndex = index;
         updateDropdownSelection();
       });
       
-      // Both desktop and mobile interaction
-      ['click', 'touchend'].forEach(eventType => {
-        optionElement.addEventListener(eventType, (e) => {
-          e.preventDefault();
-          selectOption(option);
-        });
+      // Click handling - simplified approach
+      optionElement.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        activeSelectionIndex = index;
+        selectOption(option);
       });
       
-      // Touch feedback for mobile
-      optionElement.addEventListener('touchstart', () => {
+      // Touch handling for mobile
+      optionElement.addEventListener('touchstart', (e) => {
+        e.preventDefault();
         activeSelectionIndex = index;
         updateDropdownSelection();
+      });
+      
+      optionElement.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        selectOption(option);
       });
       
       dropdown.appendChild(optionElement);
@@ -406,6 +459,5 @@
     }
   }
 
-  initialize();
-})();
- 
+    initialize();
+})(); 
