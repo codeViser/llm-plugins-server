@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TypingMind Command & Patch (Final)
 // @namespace    http://tampermonkey.net/
-// @version      5.1
+// @version      5.0
 // @description  Adds '$' command for Output Settings with context preservation, patches native '@' menu for context preservation, and enables native '/' menu anywhere in chat. Mobile-friendly with touch support.
 // @author       AI Assistant & User Collaboration
 // @match        https://*.typingmind.com/*
@@ -137,7 +137,7 @@
        }
     };
     
-    console.log('TypingMind Command & Patch Initialized (v5.1)');
+    console.log('TypingMind Command & Patch Initialized (v5.0)');
     console.log('Features: $-command (with context), @-menu (with context), /-menu (anywhere, no context preservation)');
   }
   
@@ -209,68 +209,17 @@
     // Build the replacement text, including the rest of the user's prompt
     const replacementText = originalText + option.value + " ";
     
-    console.log('selectOption: Setting value to:', replacementText);
-    
-    // Method 1: Direct value assignment
     chatInput.value = replacementText;
     
-    // Method 2: Trigger multiple events for React compatibility
-    chatInput.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-    chatInput.dispatchEvent(new Event('change', { bubbles: true, cancelable: true }));
-    
-    // Method 3: React-specific state updates
-    if (chatInput._valueTracker && chatInput._valueTracker.setValue) {
-      chatInput._valueTracker.setValue(replacementText);
-    }
-    
-    // Method 4: Modern React approach using property descriptors
-    try {
-      const descriptor = Object.getOwnPropertyDescriptor(chatInput, 'value') || 
-                        Object.getOwnPropertyDescriptor(Object.getPrototypeOf(chatInput), 'value');
-      if (descriptor && descriptor.set) {
-        descriptor.set.call(chatInput, replacementText);
-      }
-    } catch (e) {
-      console.log('React descriptor method failed:', e);
-    }
-    
-    // Method 5: Force React fiber updates if available
-    const reactFiber = chatInput._reactInternalFiber || chatInput._reactInternalInstance;
-    if (reactFiber && reactFiber.memoizedProps && reactFiber.memoizedProps.onChange) {
-      const syntheticEvent = {
-        target: chatInput,
-        currentTarget: chatInput,
-        type: 'change',
-        bubbles: true,
-        cancelable: true
-      };
-      reactFiber.memoizedProps.onChange(syntheticEvent);
-    }
-    
-    // Focus and cursor positioning
+    // Manually trigger input event to ensure UI updates, then focus.
+    chatInput.dispatchEvent(new Event('input', { bubbles: true }));
     chatInput.focus();
-    
-    // Hide dropdown first to prevent interference
-    hideDropdown();
-    
-    // Ensure state is committed before allowing further interaction
+    // Move cursor to the end of the newly inserted text.
     requestAnimationFrame(() => {
-      // Final verification and cursor positioning
-      if (chatInput.value === replacementText) {
-        console.log('selectOption: Value successfully committed');
-      } else {
-        console.log('selectOption: Value not committed, retrying...', chatInput.value);
-        chatInput.value = replacementText;
-        chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-      
-      // Set cursor to end
-      chatInput.setSelectionRange(replacementText.length, replacementText.length);
-      
-      // Force a final state sync
-      chatInput.dispatchEvent(new Event('blur', { bubbles: true }));
-      chatInput.dispatchEvent(new Event('focus', { bubbles: true }));
+        chatInput.setSelectionRange(replacementText.length, replacementText.length);
     });
+
+    hideDropdown();
   }
 
   function handleKeyDown(e) {
