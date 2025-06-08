@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TypingMind Command & Patch (Final)
 // @namespace    http://tampermonkey.net/
-// @version      4.4
+// @version      4.5
 // @description  Adds '$' command for Output Settings via reliable search-and-replace, and patches native '@' and '/' menus to prevent input clearing and work anywhere in chat. Mobile-friendly with touch support.
 // @author       AI Assistant & User Collaboration
 // @match        https://*.typingmind.com/*
@@ -82,6 +82,7 @@
     CHAT_INPUT: '#chat-input-textbox',
     NATIVE_AT_MENU_OPTIONS: '[id^="headlessui-combobox-option-"]',
     NATIVE_SLASH_MENU_OPTIONS: '[data-element-id^="search-action-"]', // Native slash menu options
+    SEARCH_SHORTCUT_BUTTON: '[data-element-id="search-shortcut-button"]', // The existing search button
   };
   const DROPDOWN_ID = 'tm-patch-dropdown';
   let dropdownVisible = false;
@@ -99,7 +100,7 @@
     document.addEventListener('click', handleClickOutside);
     document.addEventListener('touchstart', handleClickOutside);
     patchNativeMenus(chatInput);
-    console.log('TypingMind Command & Patch Initialized (v4.4)');
+    console.log('TypingMind Command & Patch Initialized (v4.5)');
   }
 
   // --- 4. Core Logic ($ Command, / Command & @/# Patch) ---
@@ -133,35 +134,39 @@
                 ['mousedown', 'touchstart'].forEach(eventType => {
                     optionNode.addEventListener(eventType, () => {
                         // Use stored context if available (when / was triggered mid-text)
-                        const beforeSlashText = window._beforeSlashText || '';
+                        const storedText = window._beforeSlashText || '';
                         
-                        requestAnimationFrame(() => {
+                        // Small delay to let the native action complete first
+                        setTimeout(() => {
                             const currentValue = chatInput.value;
                             
-                            // If we have stored context, prepend it to the new content
-                            if (beforeSlashText && !currentValue.startsWith(beforeSlashText)) {
-                                const newContent = currentValue;
-                                chatInput.value = beforeSlashText + (newContent.startsWith(' ') ? newContent : ' ' + newContent);
+                            // If we have stored context and current value is different, restore context
+                            if (storedText && currentValue !== storedText) {
+                                // Determine what new content was added
+                                let newContent = currentValue;
                                 
-                                // Clear the stored context after use
-                                window._beforeSlashText = null;
+                                // Check if this opened a new window/tab (value will be empty)
+                                if (!currentValue || currentValue.length === 0) {
+                                    // New window case - restore the stored text
+                                    chatInput.value = storedText;
+                                } else {
+                                    // Text was added case - combine stored text with new content
+                                    chatInput.value = storedText + (newContent.startsWith(' ') ? newContent : ' ' + newContent);
+                                }
+                                
+                                // Position cursor at end
+                                chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+                                chatInput.dispatchEvent(new Event('input', { bubbles: true }));
                             }
-                        });
+                            
+                            // Clear the stored context after use
+                            window._beforeSlashText = null;
+                        }, 50);
                     });
                 });
             });
             
-            // Clear stored context when menu disappears without selection
-            const menuContainer = document.querySelector('[role="listbox"]');
-            if (menuContainer && !menuContainer.dataset.observingSlash) {
-                menuContainer.dataset.observingSlash = 'true';
-                const menuObserver = new MutationObserver(() => {
-                    if (!document.querySelector(SELECTORS.NATIVE_SLASH_MENU_OPTIONS)) {
-                        window._beforeSlashText = null;
-                    }
-                });
-                menuObserver.observe(document.body, { childList: true, subtree: true });
-            }
+
         }
     });
     observer.observe(document.body, { childList: true, subtree: true });
@@ -219,7 +224,7 @@
       }
     }
     
-    // Handle / trigger - simulate native menu anywhere in chat
+    // Handle / trigger - click existing search button to open native menu
     if (e.key === CONFIG.slashTriggerCharacter && !e.repeat) {
       const chatInput = e.target;
       const cursorPos = chatInput.selectionStart;
@@ -231,22 +236,37 @@
       
       if (shouldTrigger) {
         e.preventDefault();
-        // Store the text before the slash for context preservation
-        window._beforeSlashText = textBefore;
         
-        // Simulate the native menu by temporarily clearing input and adding slash
-        const originalValue = chatInput.value;
-        chatInput.value = '/';
-        chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+        // Store the current text for context preservation
+        window._beforeSlashText = chatInput.value;
         
-        // Restore original value after a brief delay if no menu appears
-        setTimeout(() => {
-          if (chatInput.value === '/' && !document.querySelector(SELECTORS.NATIVE_SLASH_MENU_OPTIONS.replace('[data-element-id^="search-action-"]', '[data-element-id*="search-action"]'))) {
-            chatInput.value = originalValue + '/';
-            chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-          }
-        }, 100);
+        // Click the existing search shortcut button to open the native menu
+        const searchButton = document.querySelector(SELECTORS.SEARCH_SHORTCUT_BUTTON);
+        if (searchButton) {
+          searchButton.click();
+          
+          // Safety timeout to clear stored context if nothing happens
+          setTimeout(() => {
+            if (window._beforeSlashText) {
+              window._beforeSlashText = null;
+            }
+          }, 10000); // Clear after 10 seconds
+        } else {
+          // Fallback: just insert the slash normally if button not found
+          document.execCommand('insertText', false, '/');
+          window._beforeSlashText = null;
+        }
       }
+    }
+    
+    // Handle Escape key for native slash menu dismissal
+    if (e.key === 'Escape' && window._beforeSlashText) {
+      // Clear stored context if user dismisses native menu with Escape
+      setTimeout(() => {
+        if (window._beforeSlashText) {
+          window._beforeSlashText = null;
+        }
+      }, 100);
     }
     
     if (!dropdownVisible) return;
@@ -308,6 +328,17 @@
   function handleClickOutside(e) {
     const dropdown = document.getElementById(DROPDOWN_ID);
     if (dropdown && !dropdown.contains(e.target)) hideDropdown();
+    
+    // Also check for native slash menu dismissal
+    const nativeSlashMenu = document.querySelector('[role="listbox"]');
+    if (nativeSlashMenu && !nativeSlashMenu.contains(e.target) && window._beforeSlashText) {
+      // Menu was dismissed without selection, clear stored context
+      setTimeout(() => {
+        if (window._beforeSlashText) {
+          window._beforeSlashText = null;
+        }
+      }, 100);
+    }
   }
 
   function showDropdown(query) {
