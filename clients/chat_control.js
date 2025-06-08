@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TypingMind Command & Patch (Final)
 // @namespace    http://tampermonkey.net/
-// @version      4.7
+// @version      4.8
 // @description  Adds '$' command for Output Settings via reliable search-and-replace, and patches native '@' and '/' menus to prevent input clearing and work anywhere in chat. Mobile-friendly with touch support.
 // @author       AI Assistant & User Collaboration
 // @match        https://*.typingmind.com/*
@@ -129,19 +129,69 @@
         return stored;
       },
       
-      clearStoredContext: () => {
-        localStorage.removeItem('tm_slash_context');
-        window._beforeSlashText = null;
-        console.log('All stored context cleared');
-      }
+             clearStoredContext: () => {
+         localStorage.removeItem('tm_slash_context');
+         window._beforeSlashText = null;
+         console.log('All stored context cleared');
+       },
+       
+       testSlashTrigger: (testText = "Test slash trigger") => {
+         const chatInput = document.querySelector('#chat-input-textbox');
+         if (!chatInput) {
+           console.log('Chat input not found');
+           return;
+         }
+         
+         // Set test text and trigger slash
+         chatInput.value = testText;
+         chatInput.focus();
+         
+         // Simulate slash key press
+         const slashEvent = new KeyboardEvent('keydown', {
+           key: '/',
+           bubbles: true,
+           cancelable: true
+         });
+         
+         chatInput.dispatchEvent(slashEvent);
+         console.log('Test slash trigger sent with text:', testText);
+       }
     };
     
-    console.log('TypingMind Command & Patch Initialized (v4.7)');
-    console.log('Debug functions available: tmDebug.testContextRestore(), tmDebug.showStoredContext(), tmDebug.clearStoredContext()');
+    console.log('TypingMind Command & Patch Initialized (v4.8)');
+    console.log('Debug functions available: tmDebug.testContextRestore(), tmDebug.showStoredContext(), tmDebug.clearStoredContext(), tmDebug.testSlashTrigger()');
   }
   
-  function checkForStoredContextRestore(chatInput) {
-    // Check localStorage for any stored context from slash command in other window
+    function checkForStoredContextRestore(chatInput) {
+    // Multiple aggressive checks for stored context
+    const performRestore = (contextData, source) => {
+      console.log(`Restoring context from ${source}:`, contextData.text);
+      
+      const restoredText = contextData.text;
+      
+      // Use multiple restoration methods
+      chatInput.value = restoredText;
+      chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+      chatInput.dispatchEvent(new Event('change', { bubbles: true }));
+      
+      // React-specific updates
+      if (chatInput._valueTracker && chatInput._valueTracker.setValue) {
+        chatInput._valueTracker.setValue(restoredText);
+      }
+      
+      const reactFiber = chatInput._reactInternalFiber || chatInput._reactInternalInstance;
+      if (reactFiber && reactFiber.memoizedProps && reactFiber.memoizedProps.onChange) {
+        reactFiber.memoizedProps.onChange({ target: chatInput });
+      }
+      
+      chatInput.focus();
+      chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+      
+      console.log('New window context restored. Final value:', chatInput.value);
+      localStorage.removeItem('tm_slash_context');
+    };
+    
+    // Immediate check
     const storedContext = localStorage.getItem('tm_slash_context');
     console.log('Checking for stored context on page load:', storedContext);
     
@@ -151,68 +201,80 @@
         const timeDiff = Date.now() - contextData.timestamp;
         console.log('Context data found, age:', timeDiff + 'ms');
         
-        // More aggressive restoration - restore if recent even if input has content
-        if (timeDiff < 15000) {
-          console.log('Restoring context on new page/window');
-          
-          // If input is empty, just restore
-          if (!chatInput.value || chatInput.value.trim().length === 0) {
-            chatInput.value = contextData.text;
-          } else {
-            // If input has content, prepend stored text
-            chatInput.value = contextData.text + '\n\n' + chatInput.value;
-          }
-          
-          chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-          chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-          chatInput.focus();
-          
-          // Clear the stored context after restoration
-          localStorage.removeItem('tm_slash_context');
-          console.log('Context restored and cleared');
+        if (timeDiff < 20000) { // Extended time window
+          performRestore(contextData, 'immediate check');
+          return;
         } else {
-          // Clean up old stored context
           localStorage.removeItem('tm_slash_context');
           console.log('Old context cleaned up');
         }
       } catch (e) {
         console.log('Error parsing stored context:', e);
-        // Invalid JSON, clean up
         localStorage.removeItem('tm_slash_context');
       }
     }
     
-    // Also set up a continuous monitoring for late arrivals
+    // Aggressive continuous monitoring for new windows
     let checkCount = 0;
+    const maxChecks = 100; // Check for 10 seconds
+    
     const continuousCheck = () => {
       checkCount++;
       const lateContext = localStorage.getItem('tm_slash_context');
       
-      if (lateContext && checkCount < 30) { // Check for 3 seconds
+      if (lateContext) {
         try {
           const contextData = JSON.parse(lateContext);
           const timeDiff = Date.now() - contextData.timestamp;
           
-          if (timeDiff < 15000 && (!chatInput.value || chatInput.value.trim().length === 0)) {
-            console.log('Late context restoration:', contextData.text);
-            chatInput.value = contextData.text;
-            chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-            chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-            chatInput.focus();
-            localStorage.removeItem('tm_slash_context');
+          if (timeDiff < 20000) {
+            console.log(`Late context found on attempt ${checkCount}`);
+            performRestore(contextData, `continuous check #${checkCount}`);
             return; // Stop checking
+          } else {
+            localStorage.removeItem('tm_slash_context');
+            console.log('Late context expired, cleaned up');
           }
         } catch (e) {
           console.log('Error in late context check:', e);
+          localStorage.removeItem('tm_slash_context');
         }
       }
       
-      if (checkCount < 30) {
+      if (checkCount < maxChecks) {
         setTimeout(continuousCheck, 100);
+      } else {
+        console.log('Continuous context check completed after', maxChecks, 'attempts');
       }
     };
     
-         setTimeout(continuousCheck, 200);
+    // Start continuous checking
+    setTimeout(continuousCheck, 100);
+    
+    // Also listen for storage events (cross-window communication)
+    const storageListener = (e) => {
+      if (e.key === 'tm_slash_context' && e.newValue) {
+        try {
+          const contextData = JSON.parse(e.newValue);
+          const timeDiff = Date.now() - contextData.timestamp;
+          
+          if (timeDiff < 5000) { // Very recent
+            console.log('Storage event triggered context restore');
+            performRestore(contextData, 'storage event');
+            window.removeEventListener('storage', storageListener);
+          }
+        } catch (e) {
+          console.log('Error in storage event handler:', e);
+        }
+      }
+    };
+    
+    window.addEventListener('storage', storageListener);
+    
+    // Remove listener after 15 seconds
+    setTimeout(() => {
+      window.removeEventListener('storage', storageListener);
+    }, 15000);
   }
   
   function setupInputMonitoring(chatInput) {
@@ -231,24 +293,57 @@
           storedContext
         });
         
-        // Check if this is a case where we need to restore context
-        if (currentValue.length > 0 && !currentValue.includes(storedContext)) {
-          console.log('Restoring context via input monitoring');
-          
-          // Stop monitoring while we make changes
-          monitoringActive = false;
-          
-          // Restore context
-          chatInput.value = storedContext + '\n\n' + currentValue;
-          chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-          chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-          
-          // Clear stored context
-          window._beforeSlashText = null;
-          localStorage.removeItem('tm_slash_context');
-          
-          return;
-        }
+                 // Check if this is a case where we need to restore context
+         if (currentValue.length > 0 && !currentValue.includes(storedContext)) {
+           console.log('Restoring context via input monitoring');
+           
+           // Stop monitoring while we make changes
+           monitoringActive = false;
+           
+           // More robust restoration with multiple methods
+           const restoredText = storedContext + '\n\n' + currentValue;
+           console.log('Setting restored text:', restoredText);
+           
+           // Method 1: Direct value assignment
+           chatInput.value = restoredText;
+           
+           // Method 2: Force React/Vue to update via multiple events
+           chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+           chatInput.dispatchEvent(new Event('change', { bubbles: true }));
+           
+           // Method 3: Use the native setValue if available
+           if (chatInput._valueTracker && chatInput._valueTracker.setValue) {
+             chatInput._valueTracker.setValue(restoredText);
+           }
+           
+           // Method 4: Focus and trigger events
+           chatInput.focus();
+           chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+           
+           // Method 5: Force re-render with React fiber updates
+           const reactFiber = chatInput._reactInternalFiber || chatInput._reactInternalInstance;
+           if (reactFiber && reactFiber.memoizedProps && reactFiber.memoizedProps.onChange) {
+             reactFiber.memoizedProps.onChange({ target: chatInput });
+           }
+           
+           // Method 6: React 18+ approach using Object.getOwnPropertyDescriptor
+           try {
+             const descriptor = Object.getOwnPropertyDescriptor(chatInput, 'value') || Object.getOwnPropertyDescriptor(Object.getPrototypeOf(chatInput), 'value');
+             if (descriptor && descriptor.set) {
+               descriptor.set.call(chatInput, restoredText);
+             }
+           } catch (e) {
+             console.log('Method 6 failed:', e);
+           }
+           
+           console.log('Final input value after restoration:', chatInput.value);
+           
+           // Clear stored context
+           window._beforeSlashText = null;
+           localStorage.removeItem('tm_slash_context');
+           
+           return;
+         }
       }
       
       lastValue = currentValue;
@@ -291,15 +386,34 @@
         const currentValue = chatInput.value;
         const storedContext = window._beforeSlashText;
         
-        if (currentValue && !currentValue.includes(storedContext)) {
-          console.log('Restoring context via DOM observer');
-          chatInput.value = storedContext + '\n\n' + currentValue;
-          chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
-          chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-          
-          window._beforeSlashText = null;
-          localStorage.removeItem('tm_slash_context');
-        }
+                 if (currentValue && !currentValue.includes(storedContext)) {
+           console.log('Restoring context via DOM observer');
+           
+           const restoredText = storedContext + '\n\n' + currentValue;
+           console.log('DOM observer setting restored text:', restoredText);
+           
+           // Use same robust restoration methods
+           chatInput.value = restoredText;
+           chatInput.dispatchEvent(new Event('input', { bubbles: true }));
+           chatInput.dispatchEvent(new Event('change', { bubbles: true }));
+           
+           if (chatInput._valueTracker && chatInput._valueTracker.setValue) {
+             chatInput._valueTracker.setValue(restoredText);
+           }
+           
+           const reactFiber = chatInput._reactInternalFiber || chatInput._reactInternalInstance;
+           if (reactFiber && reactFiber.memoizedProps && reactFiber.memoizedProps.onChange) {
+             reactFiber.memoizedProps.onChange({ target: chatInput });
+           }
+           
+           chatInput.focus();
+           chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+           
+           console.log('DOM observer final value:', chatInput.value);
+           
+           window._beforeSlashText = null;
+           localStorage.removeItem('tm_slash_context');
+         }
       }
     });
     
@@ -760,5 +874,5 @@
     }
   }
 
-    initialize();
+      initialize();
 })(); 
