@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TypingMind Command & Patch (Final)
 // @namespace    http://tampermonkey.net/
-// @version      5.2
+// @version      5.1
 // @description  Adds '$' command for Output Settings with context preservation, patches native '@' menu for context preservation, and enables native '/' menu anywhere in chat. Mobile-friendly with touch support.
 // @author       AI Assistant & User Collaboration
 // @match        https://*.typingmind.com/*
@@ -137,7 +137,7 @@
        }
     };
     
-    console.log('TypingMind Command & Patch Initialized (v5.2)');
+    console.log('TypingMind Command & Patch Initialized (v5.1)');
     console.log('Features: $-command (with context), @-menu (with context), /-menu (anywhere, no context preservation)');
   }
   
@@ -211,10 +211,6 @@
     
     console.log('selectOption: Setting value to:', replacementText);
     
-    // Store the committed value globally for form submission interception
-    window._tmCommittedValue = replacementText;
-    window._tmValueCommitTime = Date.now();
-    
     // Method 1: Direct value assignment
     chatInput.value = replacementText;
     
@@ -257,9 +253,6 @@
     // Hide dropdown first to prevent interference
     hideDropdown();
     
-    // Set up form submission interception for immediate Enter presses
-    setupFormSubmissionInterception(chatInput, replacementText);
-    
     // Ensure state is committed before allowing further interaction
     requestAnimationFrame(() => {
       // Final verification and cursor positioning
@@ -277,70 +270,7 @@
       // Force a final state sync
       chatInput.dispatchEvent(new Event('blur', { bubbles: true }));
       chatInput.dispatchEvent(new Event('focus', { bubbles: true }));
-      
-      // Clear the committed value after a short delay
-      setTimeout(() => {
-        window._tmCommittedValue = null;
-        window._tmValueCommitTime = null;
-      }, 5000);
     });
-  }
-  
-  function setupFormSubmissionInterception(chatInput, expectedValue) {
-    // Intercept Enter key presses to ensure correct value is submitted
-    const enterInterceptor = (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
-        const timeSinceCommit = Date.now() - (window._tmValueCommitTime || 0);
-        
-        // If this Enter press is within 2 seconds of our value commit
-        if (timeSinceCommit < 2000 && window._tmCommittedValue) {
-          console.log('Intercepting Enter press after $ selection');
-          console.log('Current input value:', chatInput.value);
-          console.log('Expected committed value:', window._tmCommittedValue);
-          
-          // Force the committed value before submission
-          if (chatInput.value !== window._tmCommittedValue) {
-            console.log('Correcting value before submission');
-            e.preventDefault();
-            e.stopPropagation();
-            
-            // Set the correct value
-            chatInput.value = window._tmCommittedValue;
-            chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-            
-            // Re-trigger the Enter press after a brief delay
-            setTimeout(() => {
-              const newEnterEvent = new KeyboardEvent('keydown', {
-                key: 'Enter',
-                code: 'Enter',
-                keyCode: 13,
-                which: 13,
-                bubbles: true,
-                cancelable: true
-              });
-              chatInput.dispatchEvent(newEnterEvent);
-            }, 50);
-            
-            return;
-          }
-        }
-      }
-      
-      // Clean up the interceptor after use
-      if (e.key === 'Enter') {
-        chatInput.removeEventListener('keydown', enterInterceptor, true);
-        window._tmCommittedValue = null;
-        window._tmValueCommitTime = null;
-      }
-    };
-    
-    // Add the interceptor with capture=true to catch it before TypingMind
-    chatInput.addEventListener('keydown', enterInterceptor, true);
-    
-    // Clean up after 5 seconds if no Enter was pressed
-    setTimeout(() => {
-      chatInput.removeEventListener('keydown', enterInterceptor, true);
-    }, 5000);
   }
 
   function handleKeyDown(e) {
