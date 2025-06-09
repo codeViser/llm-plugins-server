@@ -562,7 +562,7 @@ googleWorkspaceRouter.post('/drive/files/:fileId/content', async (req: Request, 
   const drive = google.drive({ version: 'v3', auth: oauth2Client });
   const docs = google.docs({ version: 'v1', auth: oauth2Client });
   const fileId = req.params.fileId;
-  const { content, mimeType: newMimeType, useFormatting, category, replaceContent } = req.body;
+  const { content, mimeType: newMimeType, useFormatting, category, replaceContent, addHeaders } = req.body;
 
   if (typeof content !== 'string') {
     return res.status(StatusCodes.BAD_REQUEST).json({ error: 'Content must be a string.' });
@@ -604,7 +604,7 @@ googleWorkspaceRouter.post('/drive/files/:fileId/content', async (req: Request, 
             await docs.documents.batchUpdate({ documentId: fileId, requestBody: { requests } });
           } else {
             // Append formatted content to existing document
-            await updateFormattedGoogleDoc(docs, fileId, content, category || 'Update');
+            await updateFormattedGoogleDoc(docs, fileId, content, category || 'Update', addHeaders !== false);
           }
           res.status(StatusCodes.OK).json({ message: 'Google Doc updated with formatting successfully.' });
         } catch (formattingError: any) {
@@ -703,7 +703,7 @@ googleWorkspaceRouter.post('/drive/files', async (req: Request, res: Response) =
   const oauth2Client = (req as any).oauth2Client;
   const drive = google.drive({ version: 'v3', auth: oauth2Client });
   const docs = google.docs({ version: 'v1', auth: oauth2Client });
-  const { name, mimeType, content, folderId, useFormatting, category } = req.body;
+  const { name, mimeType, content, folderId, useFormatting, category, addHeaders } = req.body;
 
   if (!name || !mimeType) {
     return res.status(StatusCodes.BAD_REQUEST).json({ error: 'File name and mimeType are required.' });
@@ -724,7 +724,15 @@ googleWorkspaceRouter.post('/drive/files', async (req: Request, res: Response) =
       if (useFormatting && content && typeof content === 'string') {
         console.log(`Creating formatted Google Doc: ${name}`);
         try {
-          createdFile = await createFormattedGoogleDoc(docs, drive, name, content, folderId, category || 'Document');
+          createdFile = await createFormattedGoogleDoc(
+            docs,
+            drive,
+            name,
+            content,
+            folderId,
+            category || 'Document',
+            addHeaders !== false
+          );
         } catch (formattingError: any) {
           console.warn(`Formatted creation failed, falling back to basic creation:`, formattingError.message);
           // Fall back to basic creation if formatting fails

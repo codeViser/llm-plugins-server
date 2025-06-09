@@ -389,16 +389,18 @@ function parseInlineTextContent(text: string, content: ParsedContent[], baseStyl
 
 /**
  * Converts parsed content to Google Docs API batchUpdate requests
- * Uses a simplified approach to avoid index calculation errors
+ * Uses a two-pass approach for reliable table creation
  */
 export function convertToGoogleDocsRequests(parsedContent: ParsedContent[], startIndex: number = 1): any[] {
   const requests: any[] = [];
 
-  // First, build all the text content without formatting
+  // First pass: insert all content as text with table markers
   let fullText = '';
   const textSegments: Array<{ start: number; end: number; style?: any; link?: { url: string } }> = [];
+  const tableMarkers: Array<{ position: number; headers: string[]; rows: string[][]; marker: string }> = [];
 
   let currentPosition = 0;
+  let tableCount = 0;
 
   for (const item of parsedContent) {
     if (item.type === 'text' && item.text) {
@@ -414,9 +416,22 @@ export function convertToGoogleDocsRequests(parsedContent: ParsedContent[], star
 
       fullText += item.text;
       currentPosition += item.text.length;
+    } else if (item.type === 'table' && item.headers && item.rows) {
+      // Insert a table marker that we'll replace later
+      const tableMarker = `\n\n[TABLE_${tableCount}]\n\n`;
+
+      tableMarkers.push({
+        position: startIndex + currentPosition,
+        headers: item.headers,
+        rows: item.rows,
+        marker: tableMarker,
+      });
+
+      fullText += tableMarker;
+      currentPosition += tableMarker.length;
+      tableCount++;
     } else if (item.type === 'horizontal_rule') {
-      // Add a horizontal rule as text with a line break
-      const ruleText = '\n---\n';
+      const ruleText = '\n' + '─'.repeat(50) + '\n';
       const segmentStart = currentPosition;
       const segmentEnd = currentPosition + ruleText.length;
 
@@ -429,8 +444,6 @@ export function convertToGoogleDocsRequests(parsedContent: ParsedContent[], star
       fullText += ruleText;
       currentPosition += ruleText.length;
     }
-    // Note: Tables are more complex and would need special handling
-    // For now, we'll skip them to avoid index issues
   }
 
   // Insert all text at once
@@ -454,7 +467,11 @@ export function convertToGoogleDocsRequests(parsedContent: ParsedContent[], star
         if (segment.style.bold !== undefined) textStyle.bold = segment.style.bold;
         if (segment.style.italic !== undefined) textStyle.italic = segment.style.italic;
         if (segment.style.underline !== undefined) textStyle.underline = segment.style.underline;
+        if (segment.style.strikethrough !== undefined) textStyle.strikethrough = segment.style.strikethrough;
         if (segment.style.fontSize) textStyle.fontSize = segment.style.fontSize;
+        if (segment.style.fontFamily) {
+          textStyle.weightedFontFamily = { fontFamily: segment.style.fontFamily, weight: 400 };
+        }
         if (segment.style.weightedFontFamily) textStyle.weightedFontFamily = segment.style.weightedFontFamily;
         if (segment.style.foregroundColor) textStyle.foregroundColor = segment.style.foregroundColor;
         if (segment.style.backgroundColor) textStyle.backgroundColor = segment.style.backgroundColor;
@@ -491,7 +508,125 @@ export function convertToGoogleDocsRequests(parsedContent: ParsedContent[], star
     }
   }
 
+  // Second pass: replace table markers with actual tables (in reverse order to maintain indices)
+  for (let i = tableMarkers.length - 1; i >= 0; i--) {
+    const table = tableMarkers[i];
+    const markerStart = table.position;
+    const markerEnd = table.position + table.marker.length;
+
+    // Delete the marker
+    requests.push({
+      deleteContentRange: {
+        range: {
+          startIndex: markerStart,
+          endIndex: markerEnd,
+        },
+      },
+    });
+
+    // Insert the actual table
+    const numRows = table.rows.length + 1; // +1 for header row
+    const numColumns = table.headers.length;
+
+    requests.push({
+      insertTable: {
+        location: { index: markerStart },
+        rows: numRows,
+        columns: numColumns,
+      },
+    });
+
+    // Since populating table cells is complex, we'll add the table data as text after the table
+    // This gives users both the boxed table structure AND visible content
+    const tableTextData = convertTableToText(table.headers, table.rows).text;
+
+    // Insert the table data after the table structure
+    // Tables typically take up some space, so we insert after
+    const textInsertPosition = markerStart + 10; // Approximate position after table
+
+    requests.push({
+      insertText: {
+        location: { index: textInsertPosition },
+        text: '\n' + tableTextData + '\n',
+      },
+    });
+  }
+
   return requests;
+}
+
+/**
+ * Converts table headers and rows to a nicely formatted text representation
+ */
+function convertTableToText(
+  headers: string[],
+  rows: string[][]
+): { text: string; headerSegments: { start: number; end: number }[] } {
+  if (!headers.length || !rows.length) return { text: '', headerSegments: [] };
+
+  // Clean up headers and rows by removing markdown formatting for display
+  const cleanHeaders = headers.map((header) => cleanMarkdownText(header));
+  const cleanRows = rows.map((row) => row.map((cell) => cleanMarkdownText(cell)));
+
+  // Calculate column widths
+  const columnWidths: number[] = [];
+
+  // Start with header widths
+  cleanHeaders.forEach((header, i) => {
+    columnWidths[i] = header.length;
+  });
+
+  // Check row widths
+  cleanRows.forEach((row) => {
+    row.forEach((cell, i) => {
+      if (i < columnWidths.length) {
+        columnWidths[i] = Math.max(columnWidths[i] || 0, cell.length);
+      }
+    });
+  });
+
+  // Add padding
+  const paddedWidths = columnWidths.map((width) => Math.max(width + 2, 12));
+
+  let tableText = '\n\n';
+  const headerSegments: { start: number; end: number }[] = [];
+
+  // Create header row
+  const headerRowStart = tableText.length;
+  const headerRow = cleanHeaders.map((header, i) => (header || '').padEnd(paddedWidths[i])).join(' | ');
+  tableText += headerRow + '\n';
+  const headerRowEnd = tableText.length - 1; // -1 for the newline
+
+  // Mark the entire header row for bold formatting
+  headerSegments.push({ start: headerRowStart, end: headerRowEnd });
+
+  // Create separator row
+  const separator = paddedWidths.map((width) => '─'.repeat(width)).join('─┼─');
+  tableText += separator + '\n';
+
+  // Create data rows
+  cleanRows.forEach((row) => {
+    const dataRow = row.map((cell, i) => (cell || '').padEnd(paddedWidths[i] || 12)).join(' │ ');
+    tableText += dataRow + '\n';
+  });
+
+  tableText += '\n';
+
+  return { text: tableText, headerSegments };
+}
+
+/**
+ * Removes markdown formatting from text for display purposes
+ */
+function cleanMarkdownText(text: string): string {
+  if (!text) return '';
+
+  return text
+    .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold **text**
+    .replace(/\*(.*?)\*/g, '$1') // Remove italic *text*
+    .replace(/`(.*?)`/g, '$1') // Remove code `text`
+    .replace(/\[(.*?)\]\(.*?\)/g, '$1') // Remove links [text](url) -> text
+    .trim();
 }
 
 /**
@@ -503,7 +638,8 @@ export async function createFormattedGoogleDoc(
   docName: string,
   contentText: string,
   folderId?: string,
-  category: string = 'misc'
+  category: string = 'misc',
+  addHeader: boolean = true
 ): Promise<{ id: string; name: string; mimeType: string; webViewLink: string }> {
   // Create the document
   const doc = await docs.documents.create({ requestBody: { title: docName } });
@@ -523,9 +659,6 @@ export async function createFormattedGoogleDoc(
     });
   }
 
-  // Add category header
-  const headerText = `----- ${category} - ${new Date().toLocaleString()} -----\n\n`;
-
   // Parse the content
   const parsedContent = parseContent(contentText);
   console.log(`Parsed content for new doc contains ${parsedContent.length} elements.`);
@@ -533,16 +666,22 @@ export async function createFormattedGoogleDoc(
   // Convert to Google Docs API requests
   const requests: any[] = [];
 
-  // Add header first
-  requests.push({
-    insertText: {
-      location: { index: 1 },
-      text: headerText,
-    },
-  });
+  let startIndex = 1;
+
+  // Add header if requested
+  if (addHeader) {
+    const headerText = `----- ${category} - ${new Date().toLocaleString()} -----\n\n`;
+    requests.push({
+      insertText: {
+        location: { index: 1 },
+        text: headerText,
+      },
+    });
+    startIndex = 1 + headerText.length;
+  }
 
   // Add parsed content
-  const contentRequests = convertToGoogleDocsRequests(parsedContent, 1 + headerText.length);
+  const contentRequests = convertToGoogleDocsRequests(parsedContent, startIndex);
   requests.push(...contentRequests);
 
   // Apply all requests in batch
@@ -570,14 +709,12 @@ export async function updateFormattedGoogleDoc(
   docs: any,
   docId: string,
   contentText: string,
-  category: string = 'misc'
+  category: string = 'misc',
+  addHeader: boolean = true
 ): Promise<void> {
   // Get current document to find where to append
   const document = await docs.documents.get({ documentId: docId, fields: 'body' });
   const existingContentEndIndex = document.data.body?.content?.[document.data.body.content.length - 1]?.endIndex || 1;
-
-  // Add category header
-  const headerText = `\n----- ${category} - ${new Date().toLocaleString()} -----\n\n`;
 
   // Parse the content
   const parsedContent = parseContent(contentText);
@@ -586,16 +723,22 @@ export async function updateFormattedGoogleDoc(
   // Convert to Google Docs API requests
   const requests: any[] = [];
 
-  // Add header first
-  requests.push({
-    insertText: {
-      location: { index: existingContentEndIndex },
-      text: headerText,
-    },
-  });
+  let startIndex = existingContentEndIndex;
+
+  // Add header if requested
+  if (addHeader) {
+    const headerText = `\n----- ${category} - ${new Date().toLocaleString()} -----\n\n`;
+    requests.push({
+      insertText: {
+        location: { index: existingContentEndIndex },
+        text: headerText,
+      },
+    });
+    startIndex = existingContentEndIndex + headerText.length;
+  }
 
   // Add parsed content
-  const contentRequests = convertToGoogleDocsRequests(parsedContent, existingContentEndIndex + headerText.length);
+  const contentRequests = convertToGoogleDocsRequests(parsedContent, startIndex);
   requests.push(...contentRequests);
 
   // Apply all requests in batch
