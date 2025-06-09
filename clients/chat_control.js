@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TypingMind Command & Patch (Final)
 // @namespace    http://tampermonkey.net/
-// @version      5.0
+// @version      5.1
 // @description  Adds '$' command for Output Settings with context preservation, patches native '@' menu for context preservation, and enables native '/' menu anywhere in chat. Mobile-friendly with touch support.
 // @author       AI Assistant & User Collaboration
 // @match        https://*.typingmind.com/*
@@ -90,23 +90,21 @@
   let currentOptions = [];
   let originalText = '';
   let allOptionsCache = null;
+  let currentChatInput = null; // Track current chat input element
+  let chatInputObserver = null; // Observer for chat input monitoring
 
   async function initialize() {
-    const chatInput = await waitForElement(SELECTORS.CHAT_INPUT);
-    if (!chatInput) return;
+    console.log('TypingMind Command & Patch Initializing (v5.1)...');
     
-    // Check if we're in a new window that should restore stored context
-    checkForStoredContextRestore(chatInput);
-    
-    // Set up comprehensive input monitoring for context restoration
-    setupInputMonitoring(chatInput);
-    
-    chatInput.addEventListener('keydown', handleKeyDown, true);
-    chatInput.addEventListener('input', handleInput);
-    // Handle both desktop and mobile outside clicks
+    // Set up global event listeners that don't depend on specific elements
     document.addEventListener('click', handleClickOutside);
     document.addEventListener('touchstart', handleClickOutside);
-    patchNativeMenus(chatInput);
+    
+    // Start monitoring for chat input element
+    startChatInputMonitoring();
+    
+    // Set up native menu patching
+    patchNativeMenus();
     
     // Add global test functions for debugging
     window.tmDebug = {
@@ -119,7 +117,7 @@
         }));
         console.log('Test context stored:', testText);
         setTimeout(() => {
-          checkForStoredContextRestore(chatInput);
+          checkForStoredContextRestore(currentChatInput);
         }, 100);
       },
       
@@ -129,19 +127,91 @@
         return stored;
       },
       
-             clearStoredContext: () => {
+      clearStoredContext: () => {
          // Clean up any legacy slash context storage
          localStorage.removeItem('tm_slash_context');
          window._beforeSlashText = null;
          console.log('All stored context cleared (slash context preservation disabled)');
-       }
+       },
+       
+      getCurrentChatInput: () => {
+        console.log('Current chat input:', currentChatInput);
+        return currentChatInput;
+      },
+      
+      recheckChatInput: () => {
+        console.log('Manually rechecking chat input...');
+        attachToCurrentChatInput();
+      }
     };
     
-    console.log('TypingMind Command & Patch Initialized (v5.0)');
+    console.log('TypingMind Command & Patch Initialized (v5.1)');
     console.log('Features: $-command (with context), @-menu (with context), /-menu (anywhere, no context preservation)');
+    console.log('Now using resilient event listener system');
+  }
+
+  function startChatInputMonitoring() {
+    // Initial attachment
+    attachToCurrentChatInput();
+    
+    // Set up observer to watch for chat input changes
+    if (chatInputObserver) {
+      chatInputObserver.disconnect();
+    }
+    
+    chatInputObserver = new MutationObserver(() => {
+      // Check if chat input has changed or been recreated
+      const newChatInput = document.querySelector(SELECTORS.CHAT_INPUT);
+      if (newChatInput && newChatInput !== currentChatInput) {
+        console.log('Chat input element changed, re-attaching event listeners');
+        attachToCurrentChatInput();
+      }
+    });
+    
+    // Observe the entire document for changes
+    chatInputObserver.observe(document.body, { 
+      childList: true, 
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['id'] // Watch for id changes
+    });
+  }
+
+  function attachToCurrentChatInput() {
+    const chatInput = document.querySelector(SELECTORS.CHAT_INPUT);
+    
+    if (!chatInput) {
+      console.log('Chat input not found, will retry when DOM changes');
+      currentChatInput = null;
+      return;
+    }
+    
+    if (chatInput === currentChatInput) {
+      // Already attached to this element
+      return;
+    }
+    
+    // Remove old listeners if they exist
+    if (currentChatInput) {
+      console.log('Removing old event listeners');
+      currentChatInput.removeEventListener('keydown', handleKeyDown, true);
+      currentChatInput.removeEventListener('input', handleInput);
+    }
+    
+    // Attach new listeners
+    console.log('Attaching event listeners to chat input');
+    currentChatInput = chatInput;
+    chatInput.addEventListener('keydown', handleKeyDown, true);
+    chatInput.addEventListener('input', handleInput);
+    
+    // Check for stored context restore
+    checkForStoredContextRestore(chatInput);
+    
+    // Set up input monitoring
+    setupInputMonitoring(chatInput);
   }
   
-    function checkForStoredContextRestore(chatInput) {
+  function checkForStoredContextRestore(chatInput) {
     // Slash context preservation disabled - clean up any existing storage
     const storedContext = localStorage.getItem('tm_slash_context');
     if (storedContext) {
@@ -150,7 +220,7 @@
     }
   }
   
-    function setupInputMonitoring(chatInput) {
+  function setupInputMonitoring(chatInput) {
     // Input monitoring for slash context restoration disabled
     // This function is kept for compatibility but does nothing
     console.log('Input monitoring disabled (slash context preservation disabled)');
@@ -158,7 +228,7 @@
 
   // --- 4. Core Logic ($ Command, / Command & @/# Patch) ---
 
-  function patchNativeMenus(chatInput) {
+  function patchNativeMenus() {
     const observer = new MutationObserver(() => {
         // Patch @ menu (agent selector)
         const agentOptions = Array.from(document.querySelectorAll(SELECTORS.NATIVE_AT_MENU_OPTIONS));
@@ -168,15 +238,17 @@
                 if (optionNode.dataset.patchedAgent) return;
                 optionNode.dataset.patchedAgent = 'true';
                 optionNode.addEventListener('mousedown', () => {
-                    const textToPreserve = chatInput.value;
+                    const textToPreserve = currentChatInput ? currentChatInput.value : '';
                     requestAnimationFrame(() => {
-                        if (chatInput.value !== textToPreserve) chatInput.value = textToPreserve;
+                        if (currentChatInput && currentChatInput.value !== textToPreserve) {
+                            currentChatInput.value = textToPreserve;
+                        }
                     });
                 });
             });
         }
 
-                        // Patch native / menu (slash commands) - DISABLED for now due to event interception issues
+        // Patch native / menu (slash commands) - DISABLED for now due to event interception issues
         // The native TypingMind slash menu intercepts our event listeners
         console.log('Slash context preservation temporarily disabled - TypingMind event conflicts');
         
@@ -203,26 +275,40 @@
 
   function selectOption(option) {
     if (!option) return;
-    const chatInput = document.querySelector(SELECTORS.CHAT_INPUT);
-    if (!chatInput) return;
+    if (!currentChatInput) {
+      console.warn('No chat input available for option selection');
+      return;
+    }
 
     // Build the replacement text, including the rest of the user's prompt
     const replacementText = originalText + option.value + " ";
     
-    chatInput.value = replacementText;
+    currentChatInput.value = replacementText;
     
     // Manually trigger input event to ensure UI updates, then focus.
-    chatInput.dispatchEvent(new Event('input', { bubbles: true }));
-    chatInput.focus();
+    currentChatInput.dispatchEvent(new Event('input', { bubbles: true }));
+    currentChatInput.focus();
     // Move cursor to the end of the newly inserted text.
     requestAnimationFrame(() => {
-        chatInput.setSelectionRange(replacementText.length, replacementText.length);
+        currentChatInput.setSelectionRange(replacementText.length, replacementText.length);
     });
 
     hideDropdown();
   }
 
+  function ensureChatInputValid() {
+    // Check if current chat input is still in the DOM
+    if (currentChatInput && !document.contains(currentChatInput)) {
+      console.log('Current chat input is no longer in DOM, re-attaching...');
+      currentChatInput = null;
+      attachToCurrentChatInput();
+    }
+  }
+
   function handleKeyDown(e) {
+    // Ensure we have a valid chat input
+    ensureChatInputValid();
+    
     // Handle $ trigger
     if (e.key === CONFIG.triggerCharacter && !e.repeat) {
       // Only trigger if this might be a command (not part of normal text)
@@ -287,22 +373,11 @@
   }
 
   // --- 5. Standard Helper & UI Functions ---
-  function waitForElement(selector) {
-    return new Promise((resolve) => {
-      const el = document.querySelector(selector);
-      if (el) return resolve(el);
-      const observer = new MutationObserver(() => {
-        const el = document.querySelector(selector);
-        if (el) {
-          observer.disconnect();
-          resolve(el);
-        }
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-    });
-  }
 
   function handleInput(e) {
+    // Ensure we have a valid chat input
+    ensureChatInputValid();
+    
     const text = e.target.value;
     const cursorPos = e.target.selectionStart;
     const triggerIndex = text.lastIndexOf(CONFIG.triggerCharacter, cursorPos - 1);
@@ -452,9 +527,8 @@
   }
 
   function positionDropdown(dropdown) {
-    const chatInput = document.querySelector(SELECTORS.CHAT_INPUT);
-    if (!chatInput) return;
-    const rect = chatInput.getBoundingClientRect();
+    if (!currentChatInput) return;
+    const rect = currentChatInput.getBoundingClientRect();
     const viewportHeight = window.innerHeight;
     const viewportWidth = window.innerWidth;
     
