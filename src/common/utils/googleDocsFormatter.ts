@@ -393,29 +393,89 @@ function parseInlineTextContent(text: string, content: ParsedContent[], baseStyl
  */
 export function convertToGoogleDocsRequests(parsedContent: ParsedContent[], startIndex: number = 1): any[] {
   const requests: any[] = [];
-  let currentIndex = startIndex;
 
-  // This function will handle flushing text segments into requests
-  const flushTextSegments = (
-    text: string,
-    segments: Array<{ start: number; end: number; style?: any; link?: { url: string } }>
-  ) => {
-    if (text.length === 0) return;
+  // Single pass: convert all content to formatted text
+  let fullText = '';
+  const textSegments: Array<{ start: number; end: number; style?: any; link?: { url: string } }> = [];
 
+  let currentPosition = 0;
+
+  for (const item of parsedContent) {
+    if (item.type === 'text' && item.text) {
+      const segmentStart = currentPosition;
+      const segmentEnd = currentPosition + item.text.length;
+
+      textSegments.push({
+        start: segmentStart,
+        end: segmentEnd,
+        style: item.style,
+        link: item.link,
+      });
+
+      fullText += item.text;
+      currentPosition += item.text.length;
+    } else if (item.type === 'table' && item.headers && item.rows) {
+      // Convert table to beautifully formatted text with excellent spacing
+      const tableResult = convertTableToText(item.headers, item.rows);
+      const tableText = tableResult.text;
+
+      const segmentStart = currentPosition;
+      const segmentEnd = currentPosition + tableText.length;
+
+      // Add the table text
+      textSegments.push({
+        start: segmentStart,
+        end: segmentEnd,
+        style: {},
+      });
+
+      // Add bold formatting for header segments
+      for (const headerSegment of tableResult.headerSegments) {
+        textSegments.push({
+          start: segmentStart + headerSegment.start,
+          end: segmentStart + headerSegment.end,
+          style: textStyles.tableHeader,
+        });
+      }
+
+      fullText += tableText;
+      currentPosition += tableText.length;
+    } else if (item.type === 'horizontal_rule') {
+      const ruleText = '\n' + '─'.repeat(50) + '\n';
+      const segmentStart = currentPosition;
+      const segmentEnd = currentPosition + ruleText.length;
+
+      textSegments.push({
+        start: segmentStart,
+        end: segmentEnd,
+        style: {},
+      });
+
+      fullText += ruleText;
+      currentPosition += ruleText.length;
+    }
+  }
+
+  // Insert all text at once
+  if (fullText) {
     requests.push({
       insertText: {
-        location: { index: currentIndex },
-        text,
+        location: { index: startIndex },
+        text: fullText,
       },
     });
 
-    const sortedSegments = segments.sort((a, b) => a.start - b.start);
-    for (const segment of sortedSegments) {
-      const actualStart = currentIndex + segment.start;
-      const actualEnd = currentIndex + segment.end;
+    // Apply formatting to text segments (sort by start position to handle overlapping styles)
+    const sortedSegments = textSegments.sort((a, b) => a.start - b.start);
 
+    for (const segment of sortedSegments) {
+      const actualStart = startIndex + segment.start;
+      const actualEnd = startIndex + segment.end;
+
+      // Apply text styling if present
       if (segment.style && Object.keys(segment.style).length > 0) {
         const textStyle: any = {};
+
         if (segment.style.bold !== undefined) textStyle.bold = segment.style.bold;
         if (segment.style.italic !== undefined) textStyle.italic = segment.style.italic;
         if (segment.style.underline !== undefined) textStyle.underline = segment.style.underline;
@@ -431,118 +491,122 @@ export function convertToGoogleDocsRequests(parsedContent: ParsedContent[], star
         if (Object.keys(textStyle).length > 0) {
           requests.push({
             updateTextStyle: {
-              range: { startIndex: actualStart, endIndex: actualEnd },
-              textStyle,
+              range: {
+                startIndex: actualStart,
+                endIndex: actualEnd,
+              },
+              textStyle: textStyle,
               fields: Object.keys(textStyle).join(','),
             },
           });
         }
       }
 
+      // Apply link if present
       if (segment.link && segment.link.url) {
         requests.push({
           updateTextStyle: {
-            range: { startIndex: actualStart, endIndex: actualEnd },
-            textStyle: { link: { url: segment.link.url } },
+            range: {
+              startIndex: actualStart,
+              endIndex: actualEnd,
+            },
+            textStyle: {
+              link: { url: segment.link.url },
+            },
             fields: 'link',
           },
         });
       }
     }
-    currentIndex += text.length;
-  };
-
-  let accumulatedText = '';
-  let accumulatedSegments: Array<{ start: number; end: number; style?: any; link?: { url: string } }> = [];
-
-  for (const item of parsedContent) {
-    if (item.type === 'text' && item.text) {
-      const segmentStart = accumulatedText.length;
-      accumulatedText += item.text;
-      const segmentEnd = accumulatedText.length;
-      accumulatedSegments.push({
-        start: segmentStart,
-        end: segmentEnd,
-        style: item.style,
-        link: item.link,
-      });
-    } else {
-      // Flush any pending text before handling non-text elements
-      flushTextSegments(accumulatedText, accumulatedSegments);
-      accumulatedText = '';
-      accumulatedSegments = [];
-
-      if (item.type === 'table' && item.headers && item.rows && item.rows.length > 0) {
-        const numRows = item.rows.length + 1;
-        const numCols = item.headers.length;
-
-        if (numCols > 0) {
-          requests.push({
-            insertTable: {
-              location: { index: currentIndex },
-              rows: numRows,
-              columns: numCols,
-            },
-          });
-
-          let tableCellContentIndex = currentIndex + 4; // Start index for content in the first cell
-          const allRows = [item.headers, ...item.rows];
-
-          for (let r = 0; r < allRows.length; r++) {
-            const row = allRows[r];
-            for (let c = 0; c < numCols; c++) {
-              const cellText = cleanMarkdownText(row[c] || '');
-              if (cellText) {
-                requests.push({
-                  insertText: {
-                    location: { index: tableCellContentIndex },
-                    text: cellText,
-                  },
-                });
-
-                if (r === 0) {
-                  // Bold header text
-                  requests.push({
-                    updateTextStyle: {
-                      range: {
-                        startIndex: tableCellContentIndex,
-                        endIndex: tableCellContentIndex + cellText.length,
-                      },
-                      textStyle: textStyles.tableHeader,
-                      fields: 'bold',
-                    },
-                  });
-                }
-                tableCellContentIndex += cellText.length;
-              }
-              tableCellContentIndex += 2; // Move to the start of the next cell's content
-            }
-          }
-          // The total size of the table structure in the document
-          const tableStructuralLength = 1 + numRows + numRows * numCols;
-          currentIndex += tableStructuralLength;
-        }
-      } else if (item.type === 'horizontal_rule') {
-        requests.push({
-          insertText: {
-            location: { index: currentIndex },
-            text: '\n',
-          },
-        });
-        requests.push({
-          insertHorizontalRule: {
-            location: { index: currentIndex + 1 },
-          },
-        });
-        currentIndex += 2;
-      }
-    }
   }
 
-  // Flush any remaining text at the end
-  flushTextSegments(accumulatedText, accumulatedSegments);
-
   return requests;
+}
+
+/**
+ * Converts table headers and rows to a beautifully formatted text representation
+ * Supports multi-line content and excellent spacing like professional tables
+ */
+function convertTableToText(
+  headers: string[],
+  rows: string[][]
+): { text: string; headerSegments: { start: number; end: number }[] } {
+  if (!headers.length || !rows.length) return { text: '', headerSegments: [] };
+
+  // Clean up headers and rows by removing markdown formatting for display
+  const cleanHeaders = headers.map((header) => cleanMarkdownText(header).replace(/\n/g, ' '));
+  const cleanRows = rows.map((row) => row.map((cell) => cleanMarkdownText(cell).replace(/\n/g, ' ')));
+
+  // Calculate column widths with better spacing
+  const columnWidths: number[] = [];
+
+  // Start with header widths
+  cleanHeaders.forEach((header, i) => {
+    columnWidths[i] = Math.max(header.length, 8); // Minimum 8 chars per column
+  });
+
+  // Check row widths
+  cleanRows.forEach((row) => {
+    row.forEach((cell, i) => {
+      if (i < columnWidths.length) {
+        columnWidths[i] = Math.max(columnWidths[i] || 8, cell.length);
+      }
+    });
+  });
+
+  // Add generous padding for readability
+  const paddedWidths = columnWidths.map((width) => Math.max(width + 4, 12));
+
+  let tableText = '\n\n'; // Extra spacing before table
+  const headerSegments: { start: number; end: number }[] = [];
+
+  // Create top border
+  const topBorder = paddedWidths.map((width) => '═'.repeat(width)).join('═╤═');
+  tableText += '╔═' + topBorder + '═╗\n';
+
+  // Create header row with padding
+  const headerCells = cleanHeaders.map((header, i) => {
+    const padding = paddedWidths[i] - header.length;
+    const leftPad = Math.floor(padding / 2);
+    const rightPad = padding - leftPad;
+    return ' '.repeat(leftPad) + header + ' '.repeat(rightPad);
+  });
+  const headerRow = '║ ' + headerCells.join(' │ ') + ' ║';
+
+  // Calculate header content positions (excluding border characters)
+  const headerRowStart = tableText.length + 2; // After '║ '
+  const headerContentLength = headerCells.join(' │ ').length;
+  const headerRowEnd = headerRowStart + headerContentLength;
+
+  tableText += headerRow + '\n';
+
+  // Mark the header content for bold formatting (excluding borders)
+  headerSegments.push({ start: headerRowStart, end: headerRowEnd });
+
+  // Create separator row
+  const separator = paddedWidths.map((width) => '═'.repeat(width)).join('═╪═');
+  tableText += '╠═' + separator + '═╣\n';
+
+  // Create data rows with borders
+  cleanRows.forEach((row) => {
+    const dataCells = row.map((cell, i) => {
+      const width = paddedWidths[i] || 12;
+      const padding = width - cell.length;
+      const leftPad = Math.floor(padding / 2);
+      const rightPad = padding - leftPad;
+      return ' '.repeat(leftPad) + cell + ' '.repeat(rightPad);
+    });
+    const dataRow = '║ ' + dataCells.join(' │ ') + ' ║';
+    tableText += dataRow + '\n';
+  });
+
+  // Create bottom border
+  const bottomBorder = paddedWidths.map((width) => '═'.repeat(width)).join('═╧═');
+  tableText += '╚═' + bottomBorder + '═╝\n';
+
+  tableText += '\n'; // Extra spacing after table
+
+  return { text: tableText, headerSegments };
 }
 
 /**
