@@ -4,6 +4,10 @@ import { StatusCodes } from 'http-status-codes';
 
 import { env } from '@/common/utils/envConfig';
 
+// Import PDF parsing library for PDF text extraction
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const pdfParse = require('pdf-parse');
+
 export const googleWorkspaceRouter: Router = express.Router();
 
 // New Middleware: Expects Google Access Token as Bearer token
@@ -143,6 +147,7 @@ googleWorkspaceRouter.get('/drive/files/:fileId/content', async (req: Request, r
     const mimeType = metadataResponse.data.mimeType;
 
     if (mimeType === 'application/vnd.google-apps.document') {
+      // Handle Google Docs using the Docs API
       const docResponse = await docs.documents.get({ documentId: fileId });
       // Basic text extraction from Google Doc
       let content = '';
@@ -154,6 +159,93 @@ googleWorkspaceRouter.get('/drive/files/:fileId/content', async (req: Request, r
       res
         .status(StatusCodes.OK)
         .json({ id: fileId, name: metadataResponse.data.name, mimeType, content, fullDoc: docResponse.data });
+    } else if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      // Handle .docx files using Drive API export method
+      console.log(`Attempting to export .docx file (${fileId}) as text`);
+      try {
+        const exportResponse = await drive.files.export(
+          { fileId: fileId, mimeType: 'text/plain' },
+          { responseType: 'text' }
+        );
+        console.log(`Successfully exported .docx file (${fileId}) as text`);
+        res.status(StatusCodes.OK).json({
+          id: fileId,
+          name: metadataResponse.data.name,
+          mimeType,
+          content: exportResponse.data,
+          webViewLink: metadataResponse.data.webViewLink,
+          message: 'Content extracted from .docx file',
+        });
+      } catch (exportError: any) {
+        // If export fails (e.g., for non-Google Workspace files), try direct download
+        console.warn(`Export failed for .docx file ${fileId}, attempting direct download:`, exportError.message);
+        try {
+          const fileContentResponse = await drive.files.get({ fileId: fileId, alt: 'media' }, { responseType: 'text' });
+          res.status(StatusCodes.OK).json({
+            id: fileId,
+            name: metadataResponse.data.name,
+            mimeType,
+            content: fileContentResponse.data,
+            message: 'Content extracted via direct download (may contain formatting artifacts)',
+          });
+        } catch (directError: any) {
+          console.error(`Both export and direct download failed for .docx file ${fileId}`);
+          res.status(StatusCodes.OK).json({
+            id: fileId,
+            name: metadataResponse.data.name,
+            mimeType,
+            message:
+              'This .docx file content cannot be directly displayed as text. The file may need to be converted to Google Docs format first, or downloaded for local processing.',
+            webViewLink: metadataResponse.data.webViewLink,
+            error: `Export failed: ${exportError.message}, Direct download failed: ${directError.message}`,
+            recommendation: 'Try uploading this file as a Google Doc for better text extraction support',
+          });
+        }
+      }
+    } else if (
+      mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || // .xlsx
+      mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' || // .pptx
+      mimeType === 'application/msword' || // .doc
+      mimeType === 'application/vnd.ms-excel' || // .xls
+      mimeType === 'application/vnd.ms-powerpoint' || // .ppt
+      mimeType === 'application/vnd.ms-word.document.macroEnabled.12' || // .docm
+      mimeType === 'application/vnd.ms-excel.sheet.macroEnabled.12' || // .xlsm
+      mimeType === 'application/vnd.ms-powerpoint.presentation.macroEnabled.12' || // .pptm
+      mimeType === 'application/rtf' || // Rich Text Format
+      mimeType === 'application/vnd.oasis.opendocument.text' || // .odt
+      mimeType === 'application/vnd.oasis.opendocument.spreadsheet' || // .ods
+      mimeType === 'application/vnd.oasis.opendocument.presentation' // .odp
+    ) {
+      // Handle Microsoft Office and other document files using Drive API export method
+      console.log(`Attempting to export ${mimeType} file (${fileId}) as text`);
+      try {
+        const exportResponse = await drive.files.export(
+          { fileId: fileId, mimeType: 'text/plain' },
+          { responseType: 'text' }
+        );
+        console.log(`Successfully exported ${mimeType} file (${fileId}) as text`);
+        res.status(StatusCodes.OK).json({
+          id: fileId,
+          name: metadataResponse.data.name,
+          mimeType,
+          content: exportResponse.data,
+          webViewLink: metadataResponse.data.webViewLink,
+          message: 'Content extracted from document file',
+        });
+      } catch (exportError: any) {
+        // If export fails, provide metadata and download link
+        console.warn(`Export failed for document file ${fileId} (${mimeType}):`, exportError.message);
+        res.status(StatusCodes.OK).json({
+          id: fileId,
+          name: metadataResponse.data.name,
+          mimeType,
+          message:
+            'This document file content cannot be directly displayed as text. The file may need to be converted to Google Workspace format first, or downloaded for local processing.',
+          webViewLink: metadataResponse.data.webViewLink,
+          error: `Export to text failed: ${exportError.message}`,
+          supportedFormats: 'This file type may be readable if uploaded as a Google Workspace document',
+        });
+      }
     } else if (
       mimeType &&
       (mimeType.startsWith('text/') || mimeType === 'application/json' || mimeType === 'application/xml')
@@ -163,6 +255,42 @@ googleWorkspaceRouter.get('/drive/files/:fileId/content', async (req: Request, r
       res
         .status(StatusCodes.OK)
         .json({ id: fileId, name: metadataResponse.data.name, mimeType, content: fileContentResponse.data });
+    } else if (mimeType === 'application/pdf') {
+      // Handle PDF files using pdf-parse library
+      console.log(`Attempting to extract text from PDF file (${fileId})`);
+      try {
+        // Download PDF binary data from Google Drive
+        const pdfResponse = await drive.files.get({ fileId: fileId, alt: 'media' }, { responseType: 'arraybuffer' });
+
+        // Parse PDF content to extract text
+        const pdfData = await pdfParse(Buffer.from(pdfResponse.data as ArrayBuffer));
+
+        console.log(`Successfully extracted text from PDF file (${fileId}), ${pdfData.numpages} pages`);
+        res.status(StatusCodes.OK).json({
+          id: fileId,
+          name: metadataResponse.data.name,
+          mimeType,
+          content: pdfData.text,
+          webViewLink: metadataResponse.data.webViewLink,
+          message: 'Text content extracted from PDF file',
+          pdfInfo: {
+            pages: pdfData.numpages,
+            info: pdfData.info,
+          },
+        });
+      } catch (pdfError: any) {
+        console.warn(`PDF text extraction failed for file ${fileId}:`, pdfError.message);
+        res.status(StatusCodes.OK).json({
+          id: fileId,
+          name: metadataResponse.data.name,
+          mimeType,
+          message:
+            'PDF text extraction failed. This may be an image-based PDF or corrupted file. Download the file directly for manual processing.',
+          webViewLink: metadataResponse.data.webViewLink,
+          error: `PDF parsing failed: ${pdfError.message}`,
+          recommendation: 'For image-based PDFs, consider using OCR tools or converting to text format',
+        });
+      }
     } else {
       // For binary files or other Google Workspace types, provide metadata and download link
       res.status(StatusCodes.OK).json({
@@ -182,9 +310,102 @@ googleWorkspaceRouter.get('/drive/files/:fileId/content', async (req: Request, r
         details: error.message,
       });
     }
-    res
-      .status(StatusCodes.INTERNAL_SERVER_ERROR)
-      .json({ error: `Failed to read file ${fileId}`, details: error.message });
+
+    // Provide more specific error messages based on the error type
+    let errorMessage = `Failed to read file ${fileId}`;
+    if (error.message.includes('notFound')) {
+      errorMessage = `File with ID ${fileId} was not found or you don't have permission to access it`;
+    } else if (error.message.includes('quotaExceeded')) {
+      errorMessage = `API quota exceeded. Please try again later`;
+    } else if (error.message.includes('rateLimitExceeded')) {
+      errorMessage = `Rate limit exceeded. Please try again later`;
+    }
+
+    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: errorMessage, details: error.message });
+  }
+});
+
+// Raw file download endpoint - streams binary file data to client
+googleWorkspaceRouter.get('/drive/files/:fileId/download', async (req: Request, res: Response) => {
+  const oauth2Client = (req as any).oauth2Client;
+  const drive = google.drive({ version: 'v3', auth: oauth2Client });
+  const fileId = req.params.fileId;
+
+  try {
+    // Get file metadata first
+    const metadataResponse = await drive.files.get({
+      fileId: fileId,
+      fields: 'id, name, mimeType, size, webViewLink',
+    });
+
+    console.log(
+      `Initiating raw download for file ${fileId}: ${metadataResponse.data.name} (${metadataResponse.data.mimeType})`
+    );
+
+    // Download raw file data as stream
+    const fileResponse = await drive.files.get({ fileId: fileId, alt: 'media' }, { responseType: 'stream' });
+
+    // Set appropriate headers for file download
+    const mimeType = metadataResponse.data.mimeType || 'application/octet-stream';
+    const fileName = metadataResponse.data.name || `file_${fileId}`;
+    const fileSize = metadataResponse.data.size;
+
+    res.setHeader('Content-Type', mimeType);
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+
+    // Set content length if available
+    if (fileSize) {
+      res.setHeader('Content-Length', fileSize);
+    }
+
+    // Add custom headers with file metadata
+    res.setHeader('X-File-Name', fileName);
+    res.setHeader('X-File-ID', fileId);
+    res.setHeader('X-File-MIME-Type', mimeType);
+
+    console.log(`Streaming raw file data for ${fileId}: ${fileName}`);
+
+    // Stream the file data directly to the response
+    fileResponse.data.pipe(res);
+
+    // Handle stream errors
+    fileResponse.data.on('error', (streamError: any) => {
+      console.error(`Stream error for file ${fileId}:`, streamError);
+      if (!res.headersSent) {
+        res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+          error: `Failed to stream file ${fileId}`,
+          details: streamError.message,
+        });
+      }
+    });
+  } catch (error: any) {
+    console.error(`Error downloading file ${fileId}:`, error);
+
+    if (error.response && (error.response.status === 401 || error.response.status === 403)) {
+      return res.status(error.response.status).json({
+        error:
+          'Google API authorization error. The token might be expired or invalid. Please re-authenticate via TypingMind.',
+        details: error.message,
+      });
+    }
+
+    // Provide more specific error messages
+    let errorMessage = `Failed to download file ${fileId}`;
+    if (error.message.includes('notFound')) {
+      errorMessage = `File with ID ${fileId} was not found or you don't have permission to download it`;
+    } else if (error.message.includes('quotaExceeded')) {
+      errorMessage = `API quota exceeded. Please try again later`;
+    } else if (error.message.includes('rateLimitExceeded')) {
+      errorMessage = `Rate limit exceeded. Please try again later`;
+    } else if (error.message.includes('downloadNotSupported')) {
+      errorMessage = `This file type cannot be downloaded directly. Try exporting to a supported format first`;
+    }
+
+    res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({
+      error: errorMessage,
+      details: error.message,
+      recommendation: 'For Google Workspace files, consider using drive_read_file_content for text extraction instead',
+    });
   }
 });
 
