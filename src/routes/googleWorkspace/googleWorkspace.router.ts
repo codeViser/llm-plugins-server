@@ -8,6 +8,13 @@ import { env } from '@/common/utils/envConfig';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const pdfParse = require('pdf-parse');
 
+// Import DOCX parsing library for Word document text extraction
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const mammoth = require('mammoth');
+
+// Import Excel parsing library for spreadsheet text extraction
+import * as ExcelJS from 'exceljs';
+
 export const googleWorkspaceRouter: Router = express.Router();
 
 // New Middleware: Expects Google Access Token as Bearer token
@@ -177,19 +184,33 @@ googleWorkspaceRouter.get('/drive/files/:fileId/content', async (req: Request, r
           message: 'Content extracted from .docx file',
         });
       } catch (exportError: any) {
-        // If export fails (e.g., for non-Google Workspace files), try direct download
-        console.warn(`Export failed for .docx file ${fileId}, attempting direct download:`, exportError.message);
+        // If export fails (e.g., for non-Google Workspace files), try parsing with mammoth
+        console.warn(
+          `Export failed for .docx file ${fileId}, attempting binary download and parsing:`,
+          exportError.message
+        );
         try {
-          const fileContentResponse = await drive.files.get({ fileId: fileId, alt: 'media' }, { responseType: 'text' });
+          // Download the .docx file as binary data
+          const fileContentResponse = await drive.files.get(
+            { fileId: fileId, alt: 'media' },
+            { responseType: 'arraybuffer' }
+          );
+
+          // Use mammoth to extract text from the .docx file
+          const result = await mammoth.extractRawText({ buffer: Buffer.from(fileContentResponse.data as ArrayBuffer) });
+
+          console.log(`Successfully extracted text from .docx file ${fileId} using mammoth`);
           res.status(StatusCodes.OK).json({
             id: fileId,
             name: metadataResponse.data.name,
             mimeType,
-            content: fileContentResponse.data,
-            message: 'Content extracted via direct download (may contain formatting artifacts)',
+            content: result.value,
+            webViewLink: metadataResponse.data.webViewLink,
+            message: 'Content extracted from .docx file using document parser',
+            warnings: result.messages.length > 0 ? result.messages.map((msg: any) => msg.message) : undefined,
           });
-        } catch (directError: any) {
-          console.error(`Both export and direct download failed for .docx file ${fileId}`);
+        } catch (parseError: any) {
+          console.error(`Both export and mammoth parsing failed for .docx file ${fileId}:`, parseError.message);
           res.status(StatusCodes.OK).json({
             id: fileId,
             name: metadataResponse.data.name,
@@ -197,26 +218,151 @@ googleWorkspaceRouter.get('/drive/files/:fileId/content', async (req: Request, r
             message:
               'This .docx file content cannot be directly displayed as text. The file may need to be converted to Google Docs format first, or downloaded for local processing.',
             webViewLink: metadataResponse.data.webViewLink,
-            error: `Export failed: ${exportError.message}, Direct download failed: ${directError.message}`,
-            recommendation: 'Try uploading this file as a Google Doc for better text extraction support',
+            error: `Export failed: ${exportError.message}, Document parsing failed: ${parseError.message}`,
+            recommendation:
+              'Try uploading this file as a Google Doc for better text extraction support, or use drive_download_file for raw access',
           });
         }
       }
     } else if (
       mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || // .xlsx
+      mimeType === 'application/vnd.ms-excel' || // .xls
+      mimeType === 'application/vnd.ms-excel.sheet.macroEnabled.12' || // .xlsm
+      mimeType === 'application/vnd.oasis.opendocument.spreadsheet' // .ods
+    ) {
+      // Handle Excel files using Drive API export method with ExcelJS fallback
+      console.log(`Attempting to export Excel file (${fileId}) as text`);
+      try {
+        const exportResponse = await drive.files.export(
+          { fileId: fileId, mimeType: 'text/plain' },
+          { responseType: 'text' }
+        );
+        console.log(`Successfully exported Excel file (${fileId}) as text`);
+        res.status(StatusCodes.OK).json({
+          id: fileId,
+          name: metadataResponse.data.name,
+          mimeType,
+          content: exportResponse.data,
+          webViewLink: metadataResponse.data.webViewLink,
+          message: 'Content extracted from Excel file',
+        });
+      } catch (exportError: any) {
+        // If export fails, try parsing with ExcelJS (for .xlsx and .xlsm files)
+        if (
+          mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+          mimeType === 'application/vnd.ms-excel.sheet.macroEnabled.12'
+        ) {
+          console.warn(
+            `Export failed for Excel file ${fileId}, attempting binary download and parsing:`,
+            exportError.message
+          );
+          try {
+            // Download the Excel file as binary data
+            const fileContentResponse = await drive.files.get(
+              { fileId: fileId, alt: 'media' },
+              { responseType: 'arraybuffer' }
+            );
+
+            // Use ExcelJS to parse the Excel file
+            const workbook = new ExcelJS.Workbook();
+            await workbook.xlsx.load(fileContentResponse.data as ArrayBuffer);
+
+            let content = '';
+            let sheetCount = 0;
+            let totalRows = 0;
+
+            // Extract text from all sheets
+            workbook.eachSheet((worksheet) => {
+              sheetCount++;
+              content += `=== Sheet: ${worksheet.name} ===\n`;
+
+              worksheet.eachRow((row) => {
+                const rowValues: string[] = [];
+                row.eachCell((cell, colNumber) => {
+                  let cellValue = '';
+                  if (cell.value !== null && cell.value !== undefined) {
+                    // Handle different cell value types
+                    if (typeof cell.value === 'object' && 'formula' in cell.value) {
+                      cellValue = `=${cell.value.formula}`;
+                    } else if (typeof cell.value === 'object' && 'richText' in cell.value) {
+                      cellValue = cell.value.richText.map((rt: any) => rt.text).join('');
+                    } else {
+                      cellValue = String(cell.value);
+                    }
+                  }
+                  rowValues[colNumber - 1] = cellValue;
+                });
+
+                // Join row values with tabs, filtering out empty cells at the end
+                const trimmedRowValues = rowValues.filter((val, idx) => {
+                  // Keep cell if it has content or if there are non-empty cells after it
+                  return val || rowValues.slice(idx + 1).some((v) => v);
+                });
+
+                if (trimmedRowValues.length > 0 && trimmedRowValues.some((val) => val)) {
+                  content += trimmedRowValues.join('\t') + '\n';
+                  totalRows++;
+                }
+              });
+              content += '\n';
+            });
+
+            console.log(
+              `Successfully extracted text from Excel file ${fileId} using ExcelJS: ${sheetCount} sheets, ${totalRows} rows`
+            );
+            res.status(StatusCodes.OK).json({
+              id: fileId,
+              name: metadataResponse.data.name,
+              mimeType,
+              content: content.trim(),
+              webViewLink: metadataResponse.data.webViewLink,
+              message: 'Content extracted from Excel file using spreadsheet parser',
+              excelInfo: {
+                sheets: sheetCount,
+                totalRows: totalRows,
+                extractionMethod: 'ExcelJS',
+              },
+            });
+          } catch (parseError: any) {
+            console.error(`Both export and ExcelJS parsing failed for Excel file ${fileId}:`, parseError.message);
+            res.status(StatusCodes.OK).json({
+              id: fileId,
+              name: metadataResponse.data.name,
+              mimeType,
+              message:
+                'This Excel file content cannot be directly displayed as text. The file may need to be converted to Google Sheets format first, or downloaded for local processing.',
+              webViewLink: metadataResponse.data.webViewLink,
+              error: `Export failed: ${exportError.message}, Spreadsheet parsing failed: ${parseError.message}`,
+              recommendation:
+                'Try uploading this file as a Google Sheet for better text extraction support, or use drive_download_file for raw access',
+            });
+          }
+        } else {
+          // For .xls and .ods files, just provide error message since ExcelJS doesn't handle them well
+          console.warn(`Export failed for legacy Excel file ${fileId} (${mimeType}):`, exportError.message);
+          res.status(StatusCodes.OK).json({
+            id: fileId,
+            name: metadataResponse.data.name,
+            mimeType,
+            message:
+              'This legacy Excel file format cannot be directly displayed as text. Please convert to .xlsx format or upload as a Google Sheet.',
+            webViewLink: metadataResponse.data.webViewLink,
+            error: `Export to text failed: ${exportError.message}`,
+            recommendation: 'Convert to modern .xlsx format or upload as Google Sheets for better compatibility',
+          });
+        }
+      }
+    } else if (
       mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' || // .pptx
       mimeType === 'application/msword' || // .doc
-      mimeType === 'application/vnd.ms-excel' || // .xls
       mimeType === 'application/vnd.ms-powerpoint' || // .ppt
       mimeType === 'application/vnd.ms-word.document.macroEnabled.12' || // .docm
-      mimeType === 'application/vnd.ms-excel.sheet.macroEnabled.12' || // .xlsm
       mimeType === 'application/vnd.ms-powerpoint.presentation.macroEnabled.12' || // .pptm
       mimeType === 'application/rtf' || // Rich Text Format
       mimeType === 'application/vnd.oasis.opendocument.text' || // .odt
-      mimeType === 'application/vnd.oasis.opendocument.spreadsheet' || // .ods
       mimeType === 'application/vnd.oasis.opendocument.presentation' // .odp
     ) {
-      // Handle Microsoft Office and other document files using Drive API export method
+      // Handle other Microsoft Office and document files using Drive API export method
       console.log(`Attempting to export ${mimeType} file (${fileId}) as text`);
       try {
         const exportResponse = await drive.files.export(
