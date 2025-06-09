@@ -389,104 +389,105 @@ function parseInlineTextContent(text: string, content: ParsedContent[], baseStyl
 
 /**
  * Converts parsed content to Google Docs API batchUpdate requests
+ * Uses a simplified approach to avoid index calculation errors
  */
 export function convertToGoogleDocsRequests(parsedContent: ParsedContent[], startIndex: number = 1): any[] {
   const requests: any[] = [];
-  let currentIndex = startIndex;
+
+  // First, build all the text content without formatting
+  let fullText = '';
+  const textSegments: Array<{ start: number; end: number; style?: any; link?: { url: string } }> = [];
+
+  let currentPosition = 0;
 
   for (const item of parsedContent) {
-    try {
-      if (item.type === 'text') {
-        if (!item.text) continue;
+    if (item.type === 'text' && item.text) {
+      const segmentStart = currentPosition;
+      const segmentEnd = currentPosition + item.text.length;
 
-        // Insert text
-        requests.push({
-          insertText: {
-            location: { index: currentIndex },
-            text: item.text,
-          },
-        });
+      textSegments.push({
+        start: segmentStart,
+        end: segmentEnd,
+        style: item.style,
+        link: item.link,
+      });
 
-        const textLength = item.text.length;
+      fullText += item.text;
+      currentPosition += item.text.length;
+    } else if (item.type === 'horizontal_rule') {
+      // Add a horizontal rule as text with a line break
+      const ruleText = '\n---\n';
+      const segmentStart = currentPosition;
+      const segmentEnd = currentPosition + ruleText.length;
 
-        // Apply text styling if present
-        if (item.style && Object.keys(item.style).length > 0) {
-          const textStyle: any = {};
+      textSegments.push({
+        start: segmentStart,
+        end: segmentEnd,
+        style: {},
+      });
 
-          if (item.style.bold !== undefined) textStyle.bold = item.style.bold;
-          if (item.style.italic !== undefined) textStyle.italic = item.style.italic;
-          if (item.style.underline !== undefined) textStyle.underline = item.style.underline;
-          if (item.style.fontSize) textStyle.fontSize = item.style.fontSize;
-          if (item.style.weightedFontFamily) textStyle.weightedFontFamily = item.style.weightedFontFamily;
-          if (item.style.foregroundColor) textStyle.foregroundColor = item.style.foregroundColor;
-          if (item.style.backgroundColor) textStyle.backgroundColor = item.style.backgroundColor;
+      fullText += ruleText;
+      currentPosition += ruleText.length;
+    }
+    // Note: Tables are more complex and would need special handling
+    // For now, we'll skip them to avoid index issues
+  }
 
-          if (Object.keys(textStyle).length > 0) {
-            requests.push({
-              updateTextStyle: {
-                range: {
-                  startIndex: currentIndex,
-                  endIndex: currentIndex + textLength,
-                },
-                textStyle: textStyle,
-                fields: Object.keys(textStyle).join(','),
-              },
-            });
-          }
-        }
+  // Insert all text at once
+  if (fullText) {
+    requests.push({
+      insertText: {
+        location: { index: startIndex },
+        text: fullText,
+      },
+    });
 
-        // Apply link if present
-        if (item.link && item.link.url) {
+    // Apply formatting to text segments
+    for (const segment of textSegments) {
+      const actualStart = startIndex + segment.start;
+      const actualEnd = startIndex + segment.end;
+
+      // Apply text styling if present
+      if (segment.style && Object.keys(segment.style).length > 0) {
+        const textStyle: any = {};
+
+        if (segment.style.bold !== undefined) textStyle.bold = segment.style.bold;
+        if (segment.style.italic !== undefined) textStyle.italic = segment.style.italic;
+        if (segment.style.underline !== undefined) textStyle.underline = segment.style.underline;
+        if (segment.style.fontSize) textStyle.fontSize = segment.style.fontSize;
+        if (segment.style.weightedFontFamily) textStyle.weightedFontFamily = segment.style.weightedFontFamily;
+        if (segment.style.foregroundColor) textStyle.foregroundColor = segment.style.foregroundColor;
+        if (segment.style.backgroundColor) textStyle.backgroundColor = segment.style.backgroundColor;
+
+        if (Object.keys(textStyle).length > 0) {
           requests.push({
             updateTextStyle: {
               range: {
-                startIndex: currentIndex,
-                endIndex: currentIndex + textLength,
+                startIndex: actualStart,
+                endIndex: actualEnd,
               },
-              textStyle: {
-                link: { url: item.link.url },
-              },
-              fields: 'link',
+              textStyle: textStyle,
+              fields: Object.keys(textStyle).join(','),
             },
           });
         }
+      }
 
-        currentIndex += textLength;
-      } else if (item.type === 'table') {
-        // Insert table
-        if (item.headers && item.rows && item.headers.length > 0 && item.rows.length > 0) {
-          const tableRows = item.headers.length;
-          const tableCols = item.headers.length;
-
-          requests.push({
-            insertTable: {
-              location: { index: currentIndex },
-              rows: tableRows + item.rows.length,
-              columns: tableCols,
-            },
-          });
-
-          // Note: Table insertion automatically moves the index, but we need to calculate
-          // the exact position for content insertion. This is complex and would require
-          // additional logic to track table cell positions.
-          // For now, we'll add a simplified approach
-          currentIndex += 2; // Tables typically add some spacing
-
-          // TODO: Add table content and header formatting
-          // This would require more complex logic to calculate exact cell positions
-        }
-      } else if (item.type === 'horizontal_rule') {
-        // Insert a horizontal rule (using a page break as approximation)
+      // Apply link if present
+      if (segment.link && segment.link.url) {
         requests.push({
-          insertPageBreak: {
-            location: { index: currentIndex },
+          updateTextStyle: {
+            range: {
+              startIndex: actualStart,
+              endIndex: actualEnd,
+            },
+            textStyle: {
+              link: { url: segment.link.url },
+            },
+            fields: 'link',
           },
         });
-        currentIndex += 1;
       }
-    } catch (error) {
-      console.error(`Error processing content item:`, error);
-      // Continue with other items even if one fails
     }
   }
 
