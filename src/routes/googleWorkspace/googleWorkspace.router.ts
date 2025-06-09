@@ -3,6 +3,7 @@ import { google } from 'googleapis';
 import { StatusCodes } from 'http-status-codes';
 
 import { env } from '@/common/utils/envConfig';
+import { createFormattedGoogleDoc, updateFormattedGoogleDoc } from '@/common/utils/googleDocsFormatter';
 
 // Import PDF parsing library for PDF text extraction
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -555,13 +556,13 @@ googleWorkspaceRouter.get('/drive/files/:fileId/download', async (req: Request, 
   }
 });
 
-// Placeholder for Write/Update File Content (Drive & Docs)
+// Write/Update File Content (Drive & Docs) with enhanced formatting support
 googleWorkspaceRouter.post('/drive/files/:fileId/content', async (req: Request, res: Response) => {
   const oauth2Client = (req as any).oauth2Client;
   const drive = google.drive({ version: 'v3', auth: oauth2Client });
   const docs = google.docs({ version: 'v1', auth: oauth2Client });
   const fileId = req.params.fileId;
-  const { content, mimeType: newMimeType } = req.body; // mimeType for updating raw files
+  const { content, mimeType: newMimeType, useFormatting, category, replaceContent } = req.body;
 
   if (typeof content !== 'string') {
     return res.status(StatusCodes.BAD_REQUEST).json({ error: 'Content must be a string.' });
@@ -572,31 +573,107 @@ googleWorkspaceRouter.post('/drive/files/:fileId/content', async (req: Request, 
     const currentMimeType = metadataResponse.data.mimeType;
 
     if (currentMimeType === 'application/vnd.google-apps.document') {
-      // For Google Docs, clear existing content and insert new content
-      // This is a simplified update; for more complex edits, use batchUpdate with specific requests
-      const document = await docs.documents.get({ documentId: fileId, fields: 'body' });
-      const existingContentEndIndex =
-        document.data.body?.content?.[document.data.body.content.length - 1]?.endIndex || 1;
+      // For Google Docs, use enhanced formatting if requested
+      if (useFormatting) {
+        console.log(`Updating Google Doc with formatting: ${fileId}`);
+        try {
+          if (replaceContent) {
+            // Replace entire document content with formatted content
+            const document = await docs.documents.get({ documentId: fileId, fields: 'body' });
+            const existingContentEndIndex =
+              document.data.body?.content?.[document.data.body.content.length - 1]?.endIndex || 1;
 
-      const requests: any[] = [];
-      if (existingContentEndIndex > 1) {
-        requests.push({
-          deleteContentRange: {
-            range: {
-              startIndex: 1, // Start from the beginning of the document body
-              endIndex: existingContentEndIndex - 1, // Delete up to the end of current content
+            const requests: any[] = [];
+            if (existingContentEndIndex > 1) {
+              requests.push({
+                deleteContentRange: {
+                  range: {
+                    startIndex: 1,
+                    endIndex: existingContentEndIndex - 1,
+                  },
+                },
+              });
+            }
+
+            // Use formatted content creation at the beginning
+            const { convertToGoogleDocsRequests, parseContent } = await import('@/common/utils/googleDocsFormatter');
+            const parsedContent = parseContent(content);
+            const contentRequests = convertToGoogleDocsRequests(parsedContent, 1);
+            requests.push(...contentRequests);
+
+            await docs.documents.batchUpdate({ documentId: fileId, requestBody: { requests } });
+          } else {
+            // Append formatted content to existing document
+            await updateFormattedGoogleDoc(docs, fileId, content, category || 'Update');
+          }
+          res.status(StatusCodes.OK).json({ message: 'Google Doc updated with formatting successfully.' });
+        } catch (formattingError: any) {
+          console.warn(`Formatted update failed, falling back to basic update:`, formattingError.message);
+          // Fall back to basic update
+          const document = await docs.documents.get({ documentId: fileId, fields: 'body' });
+          const existingContentEndIndex =
+            document.data.body?.content?.[document.data.body.content.length - 1]?.endIndex || 1;
+
+          const requests: any[] = [];
+          if (replaceContent && existingContentEndIndex > 1) {
+            requests.push({
+              deleteContentRange: {
+                range: {
+                  startIndex: 1,
+                  endIndex: existingContentEndIndex - 1,
+                },
+              },
+            });
+            requests.push({
+              insertText: {
+                location: { index: 1 },
+                text: content,
+              },
+            });
+          } else {
+            requests.push({
+              insertText: {
+                location: { index: existingContentEndIndex },
+                text: `\n${content}`,
+              },
+            });
+          }
+          await docs.documents.batchUpdate({ documentId: fileId, requestBody: { requests } });
+          res.status(StatusCodes.OK).json({ message: 'Google Doc updated successfully (basic formatting).' });
+        }
+      } else {
+        // Basic Google Doc update (original logic)
+        const document = await docs.documents.get({ documentId: fileId, fields: 'body' });
+        const existingContentEndIndex =
+          document.data.body?.content?.[document.data.body.content.length - 1]?.endIndex || 1;
+
+        const requests: any[] = [];
+        if (replaceContent && existingContentEndIndex > 1) {
+          requests.push({
+            deleteContentRange: {
+              range: {
+                startIndex: 1,
+                endIndex: existingContentEndIndex - 1,
+              },
             },
-          },
-        });
+          });
+          requests.push({
+            insertText: {
+              location: { index: 1 },
+              text: content,
+            },
+          });
+        } else {
+          requests.push({
+            insertText: {
+              location: { index: existingContentEndIndex },
+              text: replaceContent ? content : `\n${content}`,
+            },
+          });
+        }
+        await docs.documents.batchUpdate({ documentId: fileId, requestBody: { requests } });
+        res.status(StatusCodes.OK).json({ message: 'Google Doc updated successfully.' });
       }
-      requests.push({
-        insertText: {
-          location: { index: 1 }, // Insert at the beginning
-          text: content,
-        },
-      });
-      await docs.documents.batchUpdate({ documentId: fileId, requestBody: { requests } });
-      res.status(StatusCodes.OK).json({ message: 'Google Doc updated successfully.' });
     } else {
       // For other file types, update using Drive API v3 upload (overwrite)
       const media = {
@@ -621,12 +698,12 @@ googleWorkspaceRouter.post('/drive/files/:fileId/content', async (req: Request, 
   }
 });
 
-// Placeholder for Create File (Drive & Docs)
+// Create File (Drive & Docs) with enhanced formatting support
 googleWorkspaceRouter.post('/drive/files', async (req: Request, res: Response) => {
   const oauth2Client = (req as any).oauth2Client;
   const drive = google.drive({ version: 'v3', auth: oauth2Client });
   const docs = google.docs({ version: 'v1', auth: oauth2Client });
-  const { name, mimeType, content, folderId } = req.body;
+  const { name, mimeType, content, folderId, useFormatting, category } = req.body;
 
   if (!name || !mimeType) {
     return res.status(StatusCodes.BAD_REQUEST).json({ error: 'File name and mimeType are required.' });
@@ -643,31 +720,65 @@ googleWorkspaceRouter.post('/drive/files', async (req: Request, res: Response) =
 
     let createdFile;
     if (mimeType === 'application/vnd.google-apps.document') {
-      // Create Google Doc
-      const doc = await docs.documents.create({ requestBody: { title: name } });
-      if (doc.data.documentId && folderId) {
-        // If created as a Doc, and folderId is specified, move it (Drive API doesn't support parent on Docs.create)
-        await drive.files.update({
-          fileId: doc.data.documentId,
-          addParents: folderId,
-          removeParents: 'root', // Assuming it was created in root
-          fields: 'id, parents',
-        });
-      }
-      createdFile = {
-        id: doc.data.documentId,
-        name: name,
-        mimeType: mimeType,
-        webViewLink: `https://docs.google.com/document/d/${doc.data.documentId}/edit`,
-      };
-      // Optionally, add content to the new doc
-      if (content && doc.data.documentId && typeof content === 'string') {
-        await docs.documents.batchUpdate({
-          documentId: doc.data.documentId,
-          requestBody: {
-            requests: [{ insertText: { location: { index: 1 }, text: content } }],
-          },
-        });
+      // Check if enhanced formatting should be used
+      if (useFormatting && content && typeof content === 'string') {
+        console.log(`Creating formatted Google Doc: ${name}`);
+        try {
+          createdFile = await createFormattedGoogleDoc(docs, drive, name, content, folderId, category || 'Document');
+        } catch (formattingError: any) {
+          console.warn(`Formatted creation failed, falling back to basic creation:`, formattingError.message);
+          // Fall back to basic creation if formatting fails
+          const doc = await docs.documents.create({ requestBody: { title: name } });
+          if (doc.data.documentId && folderId) {
+            await drive.files.update({
+              fileId: doc.data.documentId,
+              addParents: folderId,
+              removeParents: 'root',
+              fields: 'id, parents',
+            });
+          }
+          createdFile = {
+            id: doc.data.documentId,
+            name: name,
+            mimeType: mimeType,
+            webViewLink: `https://docs.google.com/document/d/${doc.data.documentId}/edit`,
+          };
+          // Add content without formatting
+          if (doc.data.documentId) {
+            await docs.documents.batchUpdate({
+              documentId: doc.data.documentId,
+              requestBody: {
+                requests: [{ insertText: { location: { index: 1 }, text: content } }],
+              },
+            });
+          }
+        }
+      } else {
+        // Create Google Doc with basic formatting (original logic)
+        const doc = await docs.documents.create({ requestBody: { title: name } });
+        if (doc.data.documentId && folderId) {
+          await drive.files.update({
+            fileId: doc.data.documentId,
+            addParents: folderId,
+            removeParents: 'root',
+            fields: 'id, parents',
+          });
+        }
+        createdFile = {
+          id: doc.data.documentId,
+          name: name,
+          mimeType: mimeType,
+          webViewLink: `https://docs.google.com/document/d/${doc.data.documentId}/edit`,
+        };
+        // Optionally, add content to the new doc
+        if (content && doc.data.documentId && typeof content === 'string') {
+          await docs.documents.batchUpdate({
+            documentId: doc.data.documentId,
+            requestBody: {
+              requests: [{ insertText: { location: { index: 1 }, text: content } }],
+            },
+          });
+        }
       }
     } else {
       // Create other file types (e.g., text file)
