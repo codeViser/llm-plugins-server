@@ -24,6 +24,7 @@ import fs from 'fs';
 import { StatusCodes } from 'http-status-codes';
 import cron from 'node-cron';
 import path from 'path';
+import { z } from 'zod';
 
 import { createApiRequestBody } from '@/api-docs/openAPIRequestBuilders';
 import { createApiResponse } from '@/api-docs/openAPIResponseBuilders';
@@ -437,7 +438,7 @@ async function execGenWordFuncs(
     fontFamily: string;
     fontSize: number;
     lineHeight: number;
-    margins: string;
+    margins: any;
     showTableOfContent: boolean;
   }
 ) {
@@ -592,27 +593,18 @@ export const wordGeneratorRouter: Router = (() => {
   router.use('/downloads', express.static(exportsDir));
 
   router.post('/generate', async (_req: Request, res: Response) => {
-    const { title, sections = [], header, footer, wordConfig = {} } = _req.body;
-    if (!sections.length) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Sections is required!',
-        'Please make sure you have sent the sections content generated from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
     try {
-      const wordConfigs = {
-        numberingReference: wordConfig.showNumberingInHeader ? wordConfig.numberingReference : '',
-        showPageNumber: wordConfig.showPageNumber ?? false,
-        pageOrientation: wordConfig.pageOrientation ? wordConfig.pageOrientation : PageOrientation.PORTRAIT,
-        fontFamily: wordConfig.fontFamily ? wordConfig.fontFamily : FONT_CONFIG.family,
-        fontSize: wordConfig.fontSize ? wordConfig.fontSize : FONT_CONFIG.size,
-        lineHeight: wordConfig.lineHeight ? LINE_HEIGHT_CONFIG[wordConfig.lineHeight] : LINE_HEIGHT_CONFIG['1.15'],
-        margins: wordConfig.margins ? PAGE_MARGINS[wordConfig.margins] : PAGE_MARGINS.NORMAL,
-        showTableOfContent: wordConfig.showTableOfContent ?? false,
+      const { title, sections, header, footer, wordConfig } = WordGeneratorRequestBodySchema.parse(_req.body);
+
+      const finalConfigs = {
+        numberingReference: wordConfig?.showNumberingInHeader ? wordConfig.numberingReference : '',
+        showPageNumber: wordConfig?.showPageNumber ?? false,
+        pageOrientation: wordConfig?.pageOrientation || PageOrientation.PORTRAIT,
+        fontFamily: wordConfig?.fontFamily || FONT_CONFIG.family,
+        fontSize: wordConfig?.fontSize || FONT_CONFIG.size,
+        lineHeight: (wordConfig?.lineHeight && LINE_HEIGHT_CONFIG[wordConfig.lineHeight]) || LINE_HEIGHT_CONFIG['1.15'],
+        margins: (wordConfig?.margins && PAGE_MARGINS[wordConfig.margins]) || PAGE_MARGINS.normal,
+        showTableOfContent: wordConfig?.showTableOfContent ?? false,
       };
 
       const fileName = await execGenWordFuncs(
@@ -622,7 +614,7 @@ export const wordGeneratorRouter: Router = (() => {
           header,
           footer,
         },
-        wordConfigs
+        finalConfigs
       );
       const serviceResponse = new ServiceResponse(
         ResponseStatus.Success,
@@ -632,20 +624,25 @@ export const wordGeneratorRouter: Router = (() => {
         },
         StatusCodes.OK
       );
-      return handleServiceResponse(serviceResponse, res);
-    } catch (error) {
-      const errorMessage = (error as Error).message;
-      let responseObject = '';
-      if (errorMessage.includes('')) {
-        responseObject = `Sorry, we couldn't generate word file.`;
+      handleServiceResponse(serviceResponse, res);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        const serviceResponse = new ServiceResponse(
+          ResponseStatus.Failed,
+          'Invalid input',
+          { errors: error.errors },
+          StatusCodes.BAD_REQUEST
+        );
+        return handleServiceResponse(serviceResponse, res);
       }
+      const errorMessage = (error as Error).message;
       const errorServiceResponse = new ServiceResponse(
         ResponseStatus.Failed,
-        `Error ${errorMessage}`,
-        responseObject,
+        `Error: ${errorMessage}`,
+        `Sorry, we couldn't generate word file.`,
         StatusCodes.INTERNAL_SERVER_ERROR
       );
-      return handleServiceResponse(errorServiceResponse, res);
+      handleServiceResponse(errorServiceResponse, res);
     }
   });
   return router;

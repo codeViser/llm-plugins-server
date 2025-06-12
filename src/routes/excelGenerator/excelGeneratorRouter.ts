@@ -5,6 +5,7 @@ import fs from 'fs';
 import { StatusCodes } from 'http-status-codes';
 import cron from 'node-cron';
 import path from 'path';
+import { z } from 'zod';
 
 import { createApiRequestBody } from '@/api-docs/openAPIRequestBuilders';
 import { createApiResponse } from '@/api-docs/openAPIResponseBuilders';
@@ -69,17 +70,22 @@ cron.schedule('0 * * * *', () => {
 
 const serverUrl = process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000';
 
+// This interface now matches the Zod schema's output type
 interface SheetData {
   sheetName: string;
   tables: {
-    title: string;
-    startCell: string;
+    title?: string;
+    startCell?: string;
     rows: {
-      type: string; // static_value or formula,
+      type: 'static_value' | 'formula';
       value: string;
     }[][];
-    columns: { name: string; type: string; format: string }[]; // types that have format, number, percent, currency
-    skipHeader: boolean;
+    columns: {
+      name: string;
+      type: 'string' | 'number' | 'boolean' | 'percent' | 'currency' | 'date';
+      format?: string;
+    }[];
+    skipHeader?: boolean;
   }[];
 }
 
@@ -90,7 +96,7 @@ interface ExcelConfig {
   fontSize: number;
   autoFitColumnWidth: boolean;
   autoFilter: boolean;
-  borderStyle: ExcelJS.BorderStyle | null; // thin, double, dashed, thick
+  borderStyle: ExcelJS.BorderStyle | null;
   wrapText: boolean;
 }
 
@@ -118,7 +124,7 @@ function columnLetterToNumber(letter: string): number {
 function autoFitColumns(
   worksheet: ExcelJS.Worksheet,
   startRow: number,
-  rows: any[],
+  rows: { type: string; value: string }[][],
   numColumns: number,
   startCol: number
 ): void {
@@ -127,9 +133,9 @@ function autoFitColumns(
 
     // Check the max length of the content in the column
     rows.forEach((row) => {
-      const cellValue = row[colIdx];
-      if (cellValue != null) {
-        const cellLength = String(cellValue).length;
+      const cellData = row[colIdx];
+      if (cellData != null && cellData.value != null) {
+        const cellLength = String(cellData.value).length;
         maxLength = Math.max(maxLength, cellLength);
       }
     });
@@ -187,22 +193,22 @@ export function execGenExcelFuncs(sheetsData: SheetData[], excelConfigs: ExcelCo
   sheetsData.forEach(({ sheetName, tables }) => {
     const worksheet = workbook.addWorksheet(sheetName);
     tables.forEach(({ startCell = 'A1', title, rows = [], columns = [], skipHeader }) => {
-      const startCol = columnLetterToNumber(startCell[0]); // Convert column letter to index (e.g., 'A' -> 1)
-      const startRow = parseInt(startCell.slice(1)); // Extract the row number (e.g., 'A1' -> 1)
-      let rowIndex = startRow; // Set the initial row index to startRow for each table
+      const startCol = columnLetterToNumber(startCell);
+      const startRow = parseInt(startCell.slice(1));
+      let rowIndex = startRow;
 
-      // Add table name row
       if (title) {
-        const startCell = worksheet.getCell(rowIndex, startCol);
-        startCell.value = title;
+        const titleCell = worksheet.getCell(rowIndex, startCol);
+        titleCell.value = title;
         worksheet.mergeCells(rowIndex, startCol, rowIndex, startCol + columns.length - 1);
-        startCell.alignment = titleAlignmentConfigs;
-        startCell.font = titleFontConfigs;
-        startCell.border = borderConfigs;
-        rowIndex++; // Move to the next row
+        titleCell.alignment = titleAlignmentConfigs;
+        titleCell.font = titleFontConfigs;
+        titleCell.border = borderConfigs;
+        rowIndex++;
       }
 
-      // Add column headers if not skipped
+      const headerRowForFilter = skipHeader ? startRow : startRow + 1;
+
       if (!skipHeader && columns) {
         columns.forEach((col, colIdx) => {
           const cell = worksheet.getCell(rowIndex, startCol + colIdx);
@@ -211,159 +217,112 @@ export function execGenExcelFuncs(sheetsData: SheetData[], excelConfigs: ExcelCo
           cell.font = headerFontConfigs;
           cell.border = borderConfigs;
         });
-        rowIndex++; // Increment row index after adding headers
+        rowIndex++;
       }
 
-      // Map headers to types
-      const columnTypes = columns.map((col: any) => col.type) || [];
-      const columnFormats =
-        columns?.map((col: any) => {
-          let format = undefined;
-          switch (col.type) {
-            case 'number':
-              format = col.format || undefined;
-              break;
-            case 'percent':
-              format = col.format || '0.00%'; // Default to percentage format
-              break;
-            case 'currency':
-              format = col.format || '$#,##0'; // Default to currency format
-              break;
-            case 'date':
-              format = col.format || undefined;
-              break;
-          }
-          return format;
-        }) || [];
+      const columnTypes = columns.map((col) => col.type);
+      const columnFormats = columns.map((col) => {
+        let format: string | undefined = undefined;
+        switch (col.type) {
+          case 'number':
+            format = col.format;
+            break;
+          case 'percent':
+            format = col.format || '0.00%';
+            break;
+          case 'currency':
+            format = col.format || '$#,##0';
+            break;
+          case 'date':
+            format = col.format;
+            break;
+        }
+        return format;
+      });
 
-      // Add rows with data types
       rows.forEach((rowData) => {
         rowData.forEach((cellData, colIdx) => {
           const { type = 'static_value', value } = cellData;
           const valueType = columnTypes[colIdx];
           const format = columnFormats[colIdx];
-          let cellValue: any = value != null ? value : ''; // Handle empty/null values
           const cell = worksheet.getCell(rowIndex, startCol + colIdx);
-          // Check if the value is a formula
-          if (type == 'formula') {
-            const formulaCell: any = { formula: cellValue }; // Handle formula
+
+          if (type === 'formula') {
+            cell.value = { formula: value };
             if (valueType === 'percent' || valueType === 'currency' || valueType === 'number' || valueType === 'date') {
-              cell.numFmt = format; // Apply number format
+              cell.numFmt = format;
             }
-            cell.value = formulaCell;
           } else {
-            // Assign cell type based on the header definition
             switch (valueType) {
-              case 'number': {
-                cellValue = !isNaN(Number(cellValue)) ? Math.round(Number(cellValue)) : cellValue;
-                cell.value = cellValue;
+              case 'number':
+                cell.value = !isNaN(Number(value)) ? Number(value) : value;
                 cell.numFmt = format || '0';
                 break;
-              }
-              case 'boolean': {
-                cellValue = Boolean(cellValue);
-                cell.value = cellValue;
+              case 'boolean':
+                cell.value = Boolean(value);
                 break;
-              }
-              case 'date': {
-                const parsedDate = new Date(cellValue);
-                cellValue = !isNaN(parsedDate.getTime()) ? parsedDate : cellValue;
-                cell.value = cellValue;
+              case 'date':
+                cell.value = new Date(value);
                 cell.numFmt = format || 'yyyy-mm-dd';
                 break;
-              }
-              case 'percent': {
-                cellValue = !isNaN(Number(cellValue)) ? Number(cellValue) : cellValue;
-                cell.value = cellValue;
+              case 'percent':
+                cell.value = !isNaN(Number(value)) ? Number(value) / 100 : value;
                 cell.numFmt = format || '0.00%';
                 break;
-              }
-              case 'currency': {
-                cellValue = !isNaN(Number(cellValue)) ? Number(cellValue) : cellValue;
-                cell.value = cellValue;
-                cell.numFmt = format || '$#,##0';
+              case 'currency':
+                cell.value = !isNaN(Number(value)) ? Number(value) : value;
+                cell.numFmt = format || '$#,##0.00';
                 break;
-              }
-              case 'string':
-              default: {
-                cellValue = String(cellValue);
-                cell.value = cellValue;
+              default:
+                cell.value = String(value);
                 break;
-              }
             }
           }
-
-          // Apply styles to the cell
           cell.font = cellFontConfigs;
           cell.border = borderConfigs;
           cell.alignment = cellAlignmentConfigs;
         });
-        rowIndex++; // Move to the next row
+        rowIndex++;
       });
 
-      // Apply auto-filter
       if (excelConfigs.autoFilter) {
-        const lastCol = startCol + columns.length - 1; // Calculate the last column
         worksheet.autoFilter = {
-          from: { row: startRow + 1, column: startCol }, // Start from header row
-          to: { row: rowIndex - 1, column: lastCol }, // End at the last row of data
+          from: { row: headerRowForFilter, column: startCol },
+          to: { row: rowIndex - 1, column: startCol + columns.length - 1 },
         };
       }
 
-      // Auto-fit column widths
       if (excelConfigs.autoFitColumnWidth) {
-        autoFitColumns(worksheet, startRow, rows, columns.length, startCol);
+        autoFitColumns(worksheet, headerRowForFilter, rows, columns.length, startCol);
       }
     });
   });
 
-  // Write the workbook to a file
   const fileName = `excel-file-${new Date().toISOString().replace(/\D/gi, '')}.xlsx`;
   const filePath = path.join(exportsDir, fileName);
 
-  workbook.xlsx
-    .writeFile(filePath)
-    .then(() => {
-      console.log('File has been written to', filePath);
-    })
-    .catch((err) => {
-      console.error('Error writing Excel file', err);
-    });
+  workbook.xlsx.writeFile(filePath).catch((err) => {
+    console.error('Error writing Excel file', err);
+  });
 
   return fileName;
 }
 
 export const excelGeneratorRouter: Router = (() => {
   const router = express.Router();
-  // Static route for downloading files
   router.use('/downloads', express.static(exportsDir));
 
   router.post('/generate', async (_req: Request, res: Response) => {
-    const { sheetsData, excelConfigs } = _req.body; // TODO: extract excel config object from request body
-    if (!sheetsData.length) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Sheets data is required!',
-        'Please make sure you have sent the excel sheets content generated from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
     try {
-      const fileName = execGenExcelFuncs(sheetsData, {
-        fontFamily: excelConfigs.fontFamily ?? DEFAULT_EXCEL_CONFIGS.fontFamily,
-        tableTitleFontSize: excelConfigs.titleFontSize ?? DEFAULT_EXCEL_CONFIGS.tableTitleFontSize,
-        headerFontSize: excelConfigs.headerFontSize ?? DEFAULT_EXCEL_CONFIGS.headerFontSize,
-        fontSize: excelConfigs.fontSize ?? DEFAULT_EXCEL_CONFIGS.fontSize,
-        autoFilter: excelConfigs.autoFilter ?? DEFAULT_EXCEL_CONFIGS.autoFilter,
-        borderStyle:
-          excelConfigs.borderStyle || excelConfigs.borderStyle !== 'none'
-            ? excelConfigs.borderStyle
-            : DEFAULT_EXCEL_CONFIGS.borderStyle,
-        wrapText: excelConfigs.wrapText ?? DEFAULT_EXCEL_CONFIGS.wrapText,
-        autoFitColumnWidth: excelConfigs.autoFitColumnWidth ?? DEFAULT_EXCEL_CONFIGS.autoFitColumnWidth,
-      });
+      const { sheetsData, excelConfigs } = ExcelGeneratorRequestBodySchema.parse(_req.body);
+
+      const finalConfig: ExcelConfig = {
+        ...DEFAULT_EXCEL_CONFIGS,
+        ...excelConfigs,
+        borderStyle: excelConfigs?.borderStyle === 'none' ? null : (excelConfigs?.borderStyle ?? null),
+      };
+
+      const fileName = execGenExcelFuncs(sheetsData, finalConfig);
 
       const serviceResponse = new ServiceResponse(
         ResponseStatus.Success,
@@ -373,20 +332,25 @@ export const excelGeneratorRouter: Router = (() => {
         },
         StatusCodes.OK
       );
-      return handleServiceResponse(serviceResponse, res);
-    } catch (error) {
-      const errorMessage = (error as Error).message;
-      let responseObject = '';
-      if (errorMessage.includes('')) {
-        responseObject = `Sorry, we couldn't generate excel file.`;
+      handleServiceResponse(serviceResponse, res);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        const serviceResponse = new ServiceResponse(
+          ResponseStatus.Failed,
+          'Invalid input',
+          { errors: error.errors },
+          StatusCodes.BAD_REQUEST
+        );
+        return handleServiceResponse(serviceResponse, res);
       }
+      const errorMessage = (error as Error).message;
       const errorServiceResponse = new ServiceResponse(
         ResponseStatus.Failed,
-        `Error ${errorMessage}`,
-        responseObject,
+        `Error: ${errorMessage}`,
+        `Sorry, we couldn't generate excel file.`,
         StatusCodes.INTERNAL_SERVER_ERROR
       );
-      return handleServiceResponse(errorServiceResponse, res);
+      handleServiceResponse(errorServiceResponse, res);
     }
   });
   return router;

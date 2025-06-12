@@ -1,6 +1,7 @@
 import express, { NextFunction, Request, Response, Router } from 'express';
 import { google } from 'googleapis';
 import { StatusCodes } from 'http-status-codes';
+import { z } from 'zod';
 
 import { env } from '@/common/utils/envConfig';
 import { createFormattedGoogleDoc, updateFormattedGoogleDoc } from '@/common/utils/googleDocsFormatter';
@@ -58,31 +59,95 @@ export const verifyGoogleAccessTokenAndSetClient = (req: Request, res: Response,
 // Apply this new middleware to all routes in this router
 googleWorkspaceRouter.use(verifyGoogleAccessTokenAndSetClient);
 
+// Schemas for validation
+const listFilesSchema = z.object({
+  query: z.object({
+    pageSize: z.string().regex(/^\d+$/).transform(Number).optional(),
+    orderBy: z.string().optional(),
+    q: z.string().optional(),
+    corpora: z.string().optional(),
+    includeItemsFromAllDrives: z
+      .string()
+      .transform((v) => v === 'true')
+      .optional(),
+    pageToken: z.string().optional(),
+  }),
+});
+
+const searchFilesSchema = z.object({
+  query: z.object({
+    q: z.string().min(1, { message: 'Search query (q) is required.' }),
+    pageSize: z.string().regex(/^\d+$/).transform(Number).optional(),
+    pageToken: z.string().optional(),
+    orderBy: z.string().optional(),
+    corpora: z.string().optional(),
+    includeItemsFromAllDrives: z
+      .string()
+      .transform((v) => v === 'true')
+      .optional(),
+  }),
+});
+
+const fileIdSchema = z.object({
+  params: z.object({
+    fileId: z.string(),
+  }),
+});
+
+const createFileSchema = z.object({
+  body: z.object({
+    name: z.string().min(1),
+    mimeType: z.string().min(1),
+    content: z.string().optional(),
+    folderId: z.string().optional(),
+    useFormatting: z.boolean().optional(),
+    category: z.string().optional(),
+    addHeaders: z.boolean().optional(),
+  }),
+});
+
+const updateFileSchema = z.object({
+  params: z.object({
+    fileId: z.string(),
+  }),
+  body: z.object({
+    content: z.string(),
+    mimeType: z.string().optional(), // For non-GDoc files
+    useFormatting: z.boolean().optional(),
+    category: z.string().optional(),
+    replaceContent: z.boolean().optional(),
+    addHeaders: z.boolean().optional(),
+  }),
+});
+
 // Placeholder for Drive routes (List, Read, Write, Search)
 googleWorkspaceRouter.get('/drive/files', async (req: Request, res: Response) => {
-  const oauth2Client = (req as any).oauth2Client;
-  const drive = google.drive({ version: 'v3', auth: oauth2Client });
-
   try {
+    const { query } = listFilesSchema.parse(req);
+    const oauth2Client = (req as any).oauth2Client;
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
     const listParams: any = {
-      // Type as any for flexibility with query params
-      pageSize: parseInt(req.query.pageSize as string) || 20,
+      pageSize: query.pageSize || 20,
       fields:
         'nextPageToken, files(id, name, mimeType, webViewLink, iconLink, modifiedTime, createdTime, owners, shared, capabilities)',
-      orderBy: (req.query.orderBy as string) || 'modifiedTime desc',
-      q: (req.query.q as string) || 'trashed=false',
-      corpora: (req.query.corpora as string) || 'user',
-      includeItemsFromAllDrives: req.query.includeItemsFromAllDrives === 'true',
+      orderBy: query.orderBy || 'modifiedTime desc',
+      q: query.q || 'trashed=false',
+      corpora: query.corpora || 'user',
+      includeItemsFromAllDrives: query.includeItemsFromAllDrives || false,
       supportsAllDrives: true,
     };
 
-    if (req.query.pageToken) {
-      listParams.pageToken = req.query.pageToken as string;
+    if (query.pageToken) {
+      listParams.pageToken = query.pageToken;
     }
 
     const response = await drive.files.list(listParams);
     res.status(StatusCodes.OK).json(response.data);
   } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(StatusCodes.BAD_REQUEST).json({ error: 'Invalid input', details: error.errors });
+    }
     console.error('Error listing drive files:', error);
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
       return res.status(error.response.status).json({
@@ -99,37 +164,34 @@ googleWorkspaceRouter.get('/drive/files', async (req: Request, res: Response) =>
 
 // Example: Search files (including within Docs content if possible)
 googleWorkspaceRouter.get('/drive/search', async (req: Request, res: Response) => {
-  const oauth2Client = (req as any).oauth2Client;
-  const drive = google.drive({ version: 'v3', auth: oauth2Client });
-  const query = req.query.q as string;
-
-  if (!query) {
-    return res.status(StatusCodes.BAD_REQUEST).json({ error: 'Search query (q) is required.' });
-  }
-
   try {
+    const { query } = searchFilesSchema.parse(req);
+    const oauth2Client = (req as any).oauth2Client;
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
     const searchParams: any = {
-      q: query,
-      pageSize: parseInt(req.query.pageSize as string) || 20,
+      q: query.q,
+      pageSize: query.pageSize || 20,
       fields: 'nextPageToken, files(id, name, mimeType, webViewLink, iconLink, modifiedTime)',
-      corpora: (req.query.corpora as string) || 'user',
-      includeItemsFromAllDrives: req.query.includeItemsFromAllDrives === 'true',
+      corpora: query.corpora || 'user',
+      includeItemsFromAllDrives: query.includeItemsFromAllDrives || false,
       supportsAllDrives: true,
     };
 
-    // Only add orderBy if it's explicitly provided by the client and is valid,
-    // otherwise, let Google handle relevance-based ordering for search queries.
-    if (req.query.orderBy) {
-      searchParams.orderBy = req.query.orderBy as string;
+    if (query.orderBy) {
+      searchParams.orderBy = query.orderBy;
     }
 
-    if (req.query.pageToken) {
-      searchParams.pageToken = req.query.pageToken as string;
+    if (query.pageToken) {
+      searchParams.pageToken = query.pageToken;
     }
 
     const response = await drive.files.list(searchParams);
     res.status(StatusCodes.OK).json(response.data);
   } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(StatusCodes.BAD_REQUEST).json({ error: 'Invalid input', details: error.errors });
+    }
     console.error('Error searching Drive:', error);
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
       return res.status(error.response.status).json({
@@ -144,12 +206,13 @@ googleWorkspaceRouter.get('/drive/search', async (req: Request, res: Response) =
 
 // Placeholder for Read File Content (Drive & Docs)
 googleWorkspaceRouter.get('/drive/files/:fileId/content', async (req: Request, res: Response) => {
-  const oauth2Client = (req as any).oauth2Client;
-  const drive = google.drive({ version: 'v3', auth: oauth2Client });
-  const docs = google.docs({ version: 'v1', auth: oauth2Client });
-  const fileId = req.params.fileId;
-
   try {
+    const { params } = fileIdSchema.parse(req);
+    const fileId = params.fileId;
+    const oauth2Client = (req as any).oauth2Client;
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+    const docs = google.docs({ version: 'v1', auth: oauth2Client });
+
     // Get file metadata to determine type
     const metadataResponse = await drive.files.get({ fileId: fileId, fields: 'id, name, mimeType, webViewLink' });
     const mimeType = metadataResponse.data.mimeType;
@@ -449,6 +512,10 @@ googleWorkspaceRouter.get('/drive/files/:fileId/content', async (req: Request, r
       });
     }
   } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(StatusCodes.BAD_REQUEST).json({ error: 'Invalid input', details: error.errors });
+    }
+    const fileId = req.params.fileId; // Fallback for error message if parsing fails
     console.error(`Error reading file ${fileId}:`, error);
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
       return res.status(error.response.status).json({
@@ -474,11 +541,12 @@ googleWorkspaceRouter.get('/drive/files/:fileId/content', async (req: Request, r
 
 // Raw file download endpoint - streams binary file data to client
 googleWorkspaceRouter.get('/drive/files/:fileId/download', async (req: Request, res: Response) => {
-  const oauth2Client = (req as any).oauth2Client;
-  const drive = google.drive({ version: 'v3', auth: oauth2Client });
-  const fileId = req.params.fileId;
-
   try {
+    const { params } = fileIdSchema.parse(req);
+    const fileId = params.fileId;
+    const oauth2Client = (req as any).oauth2Client;
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
     // Get file metadata first
     const metadataResponse = await drive.files.get({
       fileId: fileId,
@@ -526,6 +594,10 @@ googleWorkspaceRouter.get('/drive/files/:fileId/download', async (req: Request, 
       }
     });
   } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(StatusCodes.BAD_REQUEST).json({ error: 'Invalid input', details: error.errors });
+    }
+    const fileId = req.params.fileId; // Fallback for error message if parsing fails
     console.error(`Error downloading file ${fileId}:`, error);
 
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
@@ -558,17 +630,14 @@ googleWorkspaceRouter.get('/drive/files/:fileId/download', async (req: Request, 
 
 // Write/Update File Content (Drive & Docs) with enhanced formatting support
 googleWorkspaceRouter.post('/drive/files/:fileId/content', async (req: Request, res: Response) => {
-  const oauth2Client = (req as any).oauth2Client;
-  const drive = google.drive({ version: 'v3', auth: oauth2Client });
-  const docs = google.docs({ version: 'v1', auth: oauth2Client });
-  const fileId = req.params.fileId;
-  const { content, mimeType: newMimeType, useFormatting, category, replaceContent, addHeaders } = req.body;
-
-  if (typeof content !== 'string') {
-    return res.status(StatusCodes.BAD_REQUEST).json({ error: 'Content must be a string.' });
-  }
-
   try {
+    const { params, body } = updateFileSchema.parse(req);
+    const fileId = params.fileId;
+    const oauth2Client = (req as any).oauth2Client;
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+    const docs = google.docs({ version: 'v1', auth: oauth2Client });
+    const { content, mimeType: newMimeType, useFormatting, category, replaceContent, addHeaders } = body;
+
     const metadataResponse = await drive.files.get({ fileId: fileId, fields: 'mimeType' });
     const currentMimeType = metadataResponse.data.mimeType;
 
@@ -677,13 +746,17 @@ googleWorkspaceRouter.post('/drive/files/:fileId/content', async (req: Request, 
     } else {
       // For other file types, update using Drive API v3 upload (overwrite)
       const media = {
-        mimeType: newMimeType || currentMimeType, // Use newMimeType if provided, else current
+        mimeType: newMimeType || currentMimeType || undefined,
         body: content,
       };
       await drive.files.update({ fileId: fileId, media: media });
       res.status(StatusCodes.OK).json({ message: 'File updated successfully.' });
     }
   } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(StatusCodes.BAD_REQUEST).json({ error: 'Invalid input', details: error.errors });
+    }
+    const fileId = req.params.fileId; // Fallback for error message if parsing fails
     console.error(`Error writing to file ${fileId}:`, error);
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
       return res.status(error.response.status).json({
@@ -700,16 +773,13 @@ googleWorkspaceRouter.post('/drive/files/:fileId/content', async (req: Request, 
 
 // Create File (Drive & Docs) with enhanced formatting support
 googleWorkspaceRouter.post('/drive/files', async (req: Request, res: Response) => {
-  const oauth2Client = (req as any).oauth2Client;
-  const drive = google.drive({ version: 'v3', auth: oauth2Client });
-  const docs = google.docs({ version: 'v1', auth: oauth2Client });
-  const { name, mimeType, content, folderId, useFormatting, category, addHeaders } = req.body;
-
-  if (!name || !mimeType) {
-    return res.status(StatusCodes.BAD_REQUEST).json({ error: 'File name and mimeType are required.' });
-  }
-
   try {
+    const { body } = createFileSchema.parse(req);
+    const oauth2Client = (req as any).oauth2Client;
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+    const docs = google.docs({ version: 'v1', auth: oauth2Client });
+    const { name, mimeType, content, folderId, useFormatting, category, addHeaders } = body;
+
     const fileMetadata: any = {
       name: name,
       mimeType: mimeType,
@@ -803,6 +873,9 @@ googleWorkspaceRouter.post('/drive/files', async (req: Request, res: Response) =
     }
     res.status(StatusCodes.CREATED).json(createdFile);
   } catch (error: any) {
+    if (error instanceof z.ZodError) {
+      return res.status(StatusCodes.BAD_REQUEST).json({ error: 'Invalid input', details: error.errors });
+    }
     console.error('Error creating file:', error);
     if (error.response && (error.response.status === 401 || error.response.status === 403)) {
       return res.status(error.response.status).json({

@@ -5,6 +5,7 @@ import express, { Request, Response, Router } from 'express';
 import got from 'got';
 import { StatusCodes } from 'http-status-codes';
 import { JSDOM } from 'jsdom';
+import { z } from 'zod';
 
 import { createApiResponse } from '@/api-docs/openAPIResponseBuilders';
 import { ResponseStatus, ServiceResponse } from '@/common/models/serviceResponse';
@@ -73,13 +74,8 @@ export const webPageReaderRouter: Router = (() => {
   });
 
   router.get('/get-content', async (_req: Request, res: Response) => {
-    const { url } = _req.query;
-
-    if (typeof url !== 'string') {
-      return new ServiceResponse(ResponseStatus.Failed, 'URL must be a string', null, StatusCodes.BAD_REQUEST);
-    }
-
     try {
+      const { url } = WebPageReaderRequestParamSchema.parse(_req.query);
       const content = await fetchAndCleanContent(url);
       const serviceResponse = new ServiceResponse(
         ResponseStatus.Success,
@@ -87,17 +83,26 @@ export const webPageReaderRouter: Router = (() => {
         content,
         StatusCodes.OK
       );
-      return handleServiceResponse(serviceResponse, res);
-    } catch (error) {
+      handleServiceResponse(serviceResponse, res);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        const serviceResponse = new ServiceResponse(
+          ResponseStatus.Failed,
+          'Invalid input',
+          { errors: error.errors },
+          StatusCodes.BAD_REQUEST
+        );
+        return handleServiceResponse(serviceResponse, res);
+      }
       console.error(`Error fetching content ${(error as Error).message}`);
-      const errorMessage = `Error fetching content ${(error as Error).message}`;
+      const errorMessage = `Error fetching content: ${(error as Error).message}`;
       const serviceResponse = new ServiceResponse(
         ResponseStatus.Failed,
         errorMessage,
         null,
         StatusCodes.INTERNAL_SERVER_ERROR
       );
-      return handleServiceResponse(serviceResponse, res);
+      handleServiceResponse(serviceResponse, res);
     }
   });
 

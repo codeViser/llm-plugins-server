@@ -69,22 +69,26 @@ export const WordGeneratorRequestBodySchema = z.object({
   title: z.string().openapi({
     description: 'Title of the document.',
   }),
-  header: z.object({
-    text: z.string().openapi({
-      description: 'Text content for the header.',
-    }),
-    alignment: z.enum(['left', 'center', 'right']).default('left').openapi({
-      description: 'Alignment of the header text.',
-    }),
-  }),
-  footer: z.object({
-    text: z.string().openapi({
-      description: 'Text content for the footer.',
-    }),
-    alignment: z.enum(['left', 'center', 'right']).default('left').openapi({
-      description: 'Alignment of the footer text.',
-    }),
-  }),
+  header: z
+    .object({
+      text: z.string().openapi({
+        description: 'Text content for the header.',
+      }),
+      alignment: z.enum(['left', 'center', 'right']).default('left').openapi({
+        description: 'Alignment of the header text.',
+      }),
+    })
+    .optional(),
+  footer: z
+    .object({
+      text: z.string().openapi({
+        description: 'Text content for the footer.',
+      }),
+      alignment: z.enum(['left', 'center', 'right']).default('left').openapi({
+        description: 'Alignment of the footer text.',
+      }),
+    })
+    .optional(),
   sections: z.array(SectionSchema).openapi({
     description: 'Sections of the document, which may include sub-sections.',
   }),
@@ -130,6 +134,7 @@ export const WordGeneratorRequestBodySchema = z.object({
         description: 'Set page margins for the document.',
       }),
     })
+    .optional()
     .openapi({
       description: 'Word configuration settings for generating the document.',
     }),

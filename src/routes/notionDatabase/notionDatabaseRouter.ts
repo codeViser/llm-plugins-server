@@ -2,6 +2,7 @@ import { OpenAPIRegistry } from '@asteasolutions/zod-to-openapi';
 import { Client as NotionClient } from '@notionhq/client';
 import express, { Request, Response, Router } from 'express';
 import { StatusCodes } from 'http-status-codes';
+import { z } from 'zod';
 
 import { createApiRequestBody } from '@/api-docs/openAPIRequestBuilders';
 import { createApiResponse } from '@/api-docs/openAPIResponseBuilders';
@@ -213,28 +214,9 @@ export const notionDatabaseRouter: Router = (() => {
   const router = express.Router();
 
   router.post('/view-structure', async (_req: Request, res: Response) => {
-    const { notionApiKey, databaseId } = _req.body;
-    if (!notionApiKey) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Notion Key is required!',
-        'Please make sure you have sent the Notion Key from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
-    if (!databaseId) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Database ID is required!',
-        'Please make sure you have sent the Database ID from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
     try {
+      const { notionApiKey, databaseId } = NotionDatabaseStructureViewerRequestBodySchema.parse(_req.body);
+
       const notion = initNotionClient(notionApiKey);
       const database = await notion.databases.retrieve({ database_id: databaseId });
       const result = {
@@ -247,50 +229,35 @@ export const notionDatabaseRouter: Router = (() => {
         result,
         StatusCodes.OK
       );
-      return handleServiceResponse(serviceResponse, res);
-    } catch (error) {
-      const errorMessage = (error as Error).message;
-      let responseObject = '';
-      ``;
-      if (errorMessage.includes('')) {
-        responseObject = `Sorry, we couldn't get the database structure.`;
+      handleServiceResponse(serviceResponse, res);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        const serviceResponse = new ServiceResponse(
+          ResponseStatus.Failed,
+          'Invalid input',
+          { errors: error.errors },
+          StatusCodes.BAD_REQUEST
+        );
+        return handleServiceResponse(serviceResponse, res);
       }
+      const errorMessage = (error as Error).message;
       const errorServiceResponse = new ServiceResponse(
         ResponseStatus.Failed,
         `Error ${errorMessage}`,
-        responseObject,
+        `Sorry, we couldn't get the database structure.`,
         StatusCodes.INTERNAL_SERVER_ERROR
       );
-      return handleServiceResponse(errorServiceResponse, res);
+      handleServiceResponse(errorServiceResponse, res);
     }
   });
 
   router.post('/create-page', async (_req: Request, res: Response) => {
-    const { notionApiKey, databaseId, properties, databaseStructure = [] } = _req.body;
-
-    if (!notionApiKey) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Notion Key is required!',
-        'Please make sure you have sent the Notion Key from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
-    if (!databaseId) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Database ID is required!',
-        'Please make sure you have sent the Database ID from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
     try {
+      const { notionApiKey, databaseId, properties, databaseStructure } =
+        NotionDatabaseCreatePageRequestBodySchema.parse(_req.body);
+
       const notion = initNotionClient(notionApiKey);
-      // Validate properties before creating
-      validateNotionProperties(databaseStructure, properties);
+      validateNotionProperties(databaseStructure || [], properties);
       const notionProperties = mapNotionPropertyRequestBody(properties);
       const result = await notion.pages.create({
         parent: { database_id: databaseId },
@@ -302,8 +269,17 @@ export const notionDatabaseRouter: Router = (() => {
         result,
         StatusCodes.OK
       );
-      return handleServiceResponse(serviceResponse, res);
-    } catch (error) {
+      handleServiceResponse(serviceResponse, res);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        const serviceResponse = new ServiceResponse(
+          ResponseStatus.Failed,
+          'Invalid input',
+          { errors: error.errors },
+          StatusCodes.BAD_REQUEST
+        );
+        return handleServiceResponse(serviceResponse, res);
+      }
       const errorMessage = (error as Error).message;
       const errorServiceResponse = new ServiceResponse(
         ResponseStatus.Failed,
@@ -311,37 +287,17 @@ export const notionDatabaseRouter: Router = (() => {
         `Sorry, we couldn't create new page in the Notion database!`,
         errorMessage.includes('[Validation Error]') ? StatusCodes.BAD_REQUEST : StatusCodes.INTERNAL_SERVER_ERROR
       );
-      return handleServiceResponse(errorServiceResponse, res);
+      handleServiceResponse(errorServiceResponse, res);
     }
   });
 
-  router.post('/update-page', async (_req: Request, res: Response) => {
-    const { notionApiKey, pageId, properties, databaseStructure = [] } = _req.body;
-
-    if (!notionApiKey) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Notion Key is required!',
-        'Please make sure you have sent the Notion Key from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
-    if (!pageId) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Page ID is required!',
-        'Please make sure you have sent the Page ID from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
+  router.patch('/update-page', async (_req: Request, res: Response) => {
     try {
+      const { notionApiKey, pageId, properties, databaseStructure } = NotionDatabaseUpdatePageRequestBodySchema.parse(
+        _req.body
+      );
       const notion = initNotionClient(notionApiKey);
-      // Validate properties before creating
-      validateNotionProperties(databaseStructure, properties);
+      validateNotionProperties(databaseStructure || [], properties);
       const notionProperties = mapNotionPropertyRequestBody(properties);
       const result = await notion.pages.update({
         page_id: pageId,
@@ -353,8 +309,17 @@ export const notionDatabaseRouter: Router = (() => {
         result,
         StatusCodes.OK
       );
-      return handleServiceResponse(serviceResponse, res);
-    } catch (error) {
+      handleServiceResponse(serviceResponse, res);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        const serviceResponse = new ServiceResponse(
+          ResponseStatus.Failed,
+          'Invalid input',
+          { errors: error.errors },
+          StatusCodes.BAD_REQUEST
+        );
+        return handleServiceResponse(serviceResponse, res);
+      }
       const errorMessage = (error as Error).message;
       const errorServiceResponse = new ServiceResponse(
         ResponseStatus.Failed,
@@ -362,34 +327,13 @@ export const notionDatabaseRouter: Router = (() => {
         `Sorry, we couldn't update the page!!`,
         errorMessage.includes('[Validation Error]') ? StatusCodes.BAD_REQUEST : StatusCodes.INTERNAL_SERVER_ERROR
       );
-      return handleServiceResponse(errorServiceResponse, res);
+      handleServiceResponse(errorServiceResponse, res);
     }
   });
 
   router.post('/archive-page', async (_req: Request, res: Response) => {
-    const { notionApiKey, pageId } = _req.body;
-
-    if (!notionApiKey) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Notion Key is required!',
-        'Please make sure you have sent the Notion Key from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
-    if (!pageId) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Page ID is required!',
-        'Please make sure you have sent the Page ID from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
     try {
+      const { notionApiKey, pageId } = NotionDatabaseArchivePageRequestBodySchema.parse(_req.body);
       const notion = initNotionClient(notionApiKey);
       const result = await notion.pages.update({
         page_id: pageId,
@@ -401,62 +345,39 @@ export const notionDatabaseRouter: Router = (() => {
         result,
         StatusCodes.OK
       );
-      return handleServiceResponse(serviceResponse, res);
-    } catch (error) {
-      const errorMessage = (error as Error).message;
-      let responseObject = '';
-      if (errorMessage.includes('')) {
-        responseObject = `Sorry, we couldn't remove the page!`;
+      handleServiceResponse(serviceResponse, res);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        const serviceResponse = new ServiceResponse(
+          ResponseStatus.Failed,
+          'Invalid input',
+          { errors: error.errors },
+          StatusCodes.BAD_REQUEST
+        );
+        return handleServiceResponse(serviceResponse, res);
       }
+      const errorMessage = (error as Error).message;
       const errorServiceResponse = new ServiceResponse(
         ResponseStatus.Failed,
         `Error ${errorMessage}`,
-        responseObject,
+        `Sorry, we couldn't remove the page!`,
         StatusCodes.INTERNAL_SERVER_ERROR
       );
-      return handleServiceResponse(errorServiceResponse, res);
+      handleServiceResponse(errorServiceResponse, res);
     }
   });
 
   router.post('/query-pages', async (_req: Request, res: Response) => {
-    const {
-      notionApiKey,
-      databaseId,
-      databaseStructure = [],
-      filter = {},
-      sorts = [],
-      pageSize = 100,
-      startCursor,
-    } = _req.body;
-
-    if (!notionApiKey) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Notion Key is required!',
-        'Please make sure you have sent the Notion Key from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
-    if (!databaseId) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Database ID is required!',
-        'Please make sure you have sent the Database ID from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
     try {
+      const { notionApiKey, databaseId, databaseStructure, filter, sorts, pageSize, startCursor } =
+        NotionDatabaseQueryPageRequestBodySchema.parse(_req.body);
+
       const notion = initNotionClient(notionApiKey);
-      // Validate databaseStructure against filters and sorts
-      validateDatabaseQueryConfig(databaseStructure, filter, sorts);
+      validateDatabaseQueryConfig(databaseStructure || [], filter || {}, sorts || []);
       const result = await notion.databases.query({
         database_id: databaseId,
-        filter,
-        sorts,
+        filter: filter,
+        sorts: sorts,
         page_size: pageSize,
         start_cursor: startCursor,
       });
@@ -466,8 +387,17 @@ export const notionDatabaseRouter: Router = (() => {
         result,
         StatusCodes.OK
       );
-      return handleServiceResponse(serviceResponse, res);
-    } catch (error) {
+      handleServiceResponse(serviceResponse, res);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        const serviceResponse = new ServiceResponse(
+          ResponseStatus.Failed,
+          'Invalid input',
+          { errors: error.errors },
+          StatusCodes.BAD_REQUEST
+        );
+        return handleServiceResponse(serviceResponse, res);
+      }
       const errorMessage = (error as Error).message;
       const errorServiceResponse = new ServiceResponse(
         ResponseStatus.Failed,
@@ -475,60 +405,29 @@ export const notionDatabaseRouter: Router = (() => {
         `Sorry, we couldn't query the pages!`,
         errorMessage.includes('[Validation Error]') ? StatusCodes.BAD_REQUEST : StatusCodes.INTERNAL_SERVER_ERROR
       );
-      return handleServiceResponse(errorServiceResponse, res);
+      handleServiceResponse(errorServiceResponse, res);
     }
   });
 
   router.post('/create-database', async (_req: Request, res: Response) => {
-    const {
-      notionApiKey,
-      parent,
-      icon,
-      cover,
-      title,
-      description,
-      isInline = false,
-      notionProperties = [],
-    } = _req.body;
-
-    if (!notionApiKey) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Notion Key is required!',
-        'Please make sure you have sent the Notion Key from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
-    if (parent && parent.type === 'page_id' && !parent.pageId) {
-      const validateServiceResponse = new ServiceResponse(
-        ResponseStatus.Failed,
-        '[Validation Error] Page ID is required!. Please provide specific Page ID or Page URL',
-        'Please make sure you have sent the Page ID from TypingMind.',
-        StatusCodes.BAD_REQUEST
-      );
-      return handleServiceResponse(validateServiceResponse, res);
-    }
-
     try {
+      const { notionApiKey, parent, icon, cover, title, description, isInline, notionProperties } =
+        NotionDatabaseMakerRequestBodySchema.parse(_req.body);
+
       const notion = initNotionClient(notionApiKey);
 
-      // Initialize an empty object to hold properties
       const databaseProperties: Record<string, any> = {};
-      // Iterate over notionProperties and maintain the order
-      notionProperties.forEach((property: any) => {
-        const schema = buildColumnSchema(property); // Assume this builds the required schema
+      (notionProperties || []).forEach((property: any) => {
+        const schema = buildColumnSchema(property);
         for (const [key, value] of Object.entries(schema.properties)) {
           databaseProperties[key] = value;
         }
       });
 
-      // Prepare the request payload to create the Notion database
       const payload: any = {
         parent: { type: parent.type, page_id: parent.pageId },
         title: mapNotionRichTextProperty(title),
-        description: mapNotionRichTextProperty(description),
+        description: mapNotionRichTextProperty(description || []),
         is_inline: isInline,
         properties: databaseProperties,
       };
@@ -541,7 +440,6 @@ export const notionDatabaseRouter: Router = (() => {
         payload.cover = { type: 'external', external: { url: cover } };
       }
 
-      // Call the Notion client to create the database
       const result = await notion.databases.create(payload);
 
       const serviceResponse = new ServiceResponse(
@@ -550,8 +448,17 @@ export const notionDatabaseRouter: Router = (() => {
         result,
         StatusCodes.OK
       );
-      return handleServiceResponse(serviceResponse, res);
-    } catch (error) {
+      handleServiceResponse(serviceResponse, res);
+    } catch (error: any) {
+      if (error instanceof z.ZodError) {
+        const serviceResponse = new ServiceResponse(
+          ResponseStatus.Failed,
+          'Invalid input',
+          { errors: error.errors },
+          StatusCodes.BAD_REQUEST
+        );
+        return handleServiceResponse(serviceResponse, res);
+      }
       const errorMessage = (error as Error).message;
       const errorServiceResponse = new ServiceResponse(
         ResponseStatus.Failed,
@@ -559,7 +466,7 @@ export const notionDatabaseRouter: Router = (() => {
         `Sorry, we couldn't create Database!`,
         errorMessage.includes('[Validation Error]') ? StatusCodes.BAD_REQUEST : StatusCodes.INTERNAL_SERVER_ERROR
       );
-      return handleServiceResponse(errorServiceResponse, res);
+      handleServiceResponse(errorServiceResponse, res);
     }
   });
 

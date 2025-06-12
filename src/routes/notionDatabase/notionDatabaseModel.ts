@@ -31,6 +31,7 @@ export const NotionDatabaseCreatePageRequestBodySchema = z.object({
       'The Notion API Key getting from Notion Integration Page at https://www.notion.so/profile/integrations',
   }),
   properties: z.array(z.object({})),
+  databaseStructure: z.array(z.object({})).optional(),
 });
 export type NotionDatabaseCreatePageRequestBody = z.infer<typeof NotionDatabaseCreatePageRequestBodySchema>;
 
@@ -47,6 +48,7 @@ export const NotionDatabaseUpdatePageRequestBodySchema = z.object({
       'The Notion API Key getting from Notion Integration Page at https://www.notion.so/profile/integrations',
   }),
   properties: z.array(z.object({})),
+  databaseStructure: z.array(z.object({})).optional(),
 });
 export type NotionDatabaseUpdatePageRequestBody = z.infer<typeof NotionDatabaseUpdatePageRequestBodySchema>;
 
@@ -73,61 +75,13 @@ export const NotionDatabaseQueryPageRequestBodySchema = z.object({
   databaseId: z.string().openapi({
     description: 'The ID of the Notion Database whose structure is being viewed.',
   }),
-  databaseStructure: z
-    .array(
-      z.object({
-        name: z.string().openapi({
-          description: 'The name of the property.',
-        }),
-        type: z
-          .string()
-          .openapi({
-            description: 'The type of the property.',
-          })
-          .refine(
-            (value) =>
-              [
-                'title',
-                'number',
-                'multi_select',
-                'select',
-                'checkbox',
-                'url',
-                'status',
-                'email',
-                'date',
-                'files',
-                'phone_number',
-                'rich_text',
-              ].includes(value),
-            {
-              message: 'Invalid type',
-            }
-          ),
-        options: z
-          .array(
-            z.object({
-              name: z.string().openapi({
-                description: 'Name of the option.',
-              }),
-            })
-          )
-          .optional()
-          .openapi({
-            description: 'List of options for select, multi-select, and status properties.',
-          }),
-      })
-    )
-    .openapi({
-      description:
-        'An array of properties from the Notion database structure, used to generate filter or sort criteria.',
-    }),
+  databaseStructure: z.array(z.object({})).optional(),
   notionApiKey: z.string().openapi({
     description:
       'The Notion API Key getting from Notion Integration Page at https://www.notion.so/profile/integrations',
   }),
-  query: z.object({}),
-  sorts: z.array(z.object({})),
+  filter: z.any().optional(),
+  sorts: z.array(z.any()).optional(),
   pageSize: z.number().optional(),
   startCursor: z.any().optional(),
 });

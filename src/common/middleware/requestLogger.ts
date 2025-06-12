@@ -17,7 +17,7 @@ const requestLogger = (options?: Options): RequestHandler[] => {
   const pinoOptions: Options = {
     enabled: env.isProduction,
     customProps: customProps as unknown as Options['customProps'],
-    redact: [],
+    redact: ['req.headers.authorization'],
     genReqId,
     customLogLevel,
     customSuccessMessage,

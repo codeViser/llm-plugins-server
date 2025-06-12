@@ -62,8 +62,8 @@ async function fetchFromGooglePlacesApi(params: z.infer<typeof GooglePlacesApiRe
   const url = `${endpoint}?${queryParams.toString()}`;
 
   try {
-    const response = await got(url).json();
-    return response;
+    const response = await got(url);
+    return JSON.parse(response.body);
   } catch (error: any) {
     let errorMessage = `Google Places API error: ${error.message}`;
     if (error.response && error.response.body) {
@@ -85,20 +85,8 @@ export const googlePlacesRouter: Router = (() => {
     '/query',
     validateRequest(z.object({ body: GooglePlacesApiRequestBodySchema })),
     async (req: Request, res: Response) => {
-      const requestBody = req.body as z.infer<typeof GooglePlacesApiRequestBodySchema>;
-      const apiKeyToUse = requestBody.apiKey;
-
-      if (!apiKeyToUse) {
-        const errorServiceResponse = new ServiceResponse(
-          ResponseStatus.Failed,
-          'API Key for Google Places must be provided in the request body.',
-          null,
-          StatusCodes.BAD_REQUEST
-        );
-        return handleServiceResponse(errorServiceResponse, res);
-      }
-
       try {
+        const requestBody = req.body as z.infer<typeof GooglePlacesApiRequestBodySchema>;
         const result = await fetchFromGooglePlacesApi(requestBody);
         const serviceResponse = new ServiceResponse(
           ResponseStatus.Success,
@@ -106,7 +94,7 @@ export const googlePlacesRouter: Router = (() => {
           result,
           StatusCodes.OK
         );
-        return handleServiceResponse(serviceResponse, res);
+        handleServiceResponse(serviceResponse, res);
       } catch (error: any) {
         const errorMessage = error.message || 'An unknown error occurred while fetching from Google Places API.';
         const errorServiceResponse = new ServiceResponse(
@@ -119,7 +107,7 @@ export const googlePlacesRouter: Router = (() => {
             ? StatusCodes.BAD_REQUEST
             : StatusCodes.INTERNAL_SERVER_ERROR
         );
-        return handleServiceResponse(errorServiceResponse, res);
+        handleServiceResponse(errorServiceResponse, res);
       }
     }
   );
