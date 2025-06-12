@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { createApiResponse } from '@/api-docs/openAPIResponseBuilders';
 import { ResponseStatus, ServiceResponse } from '@/common/models/serviceResponse';
 import { handleServiceResponse } from '@/common/utils/httpHandlers';
+import { isValidPublicUrl } from '@/common/utils/urlValidation';
 
 import { WebPageReaderRequestParamSchema, WebPageReaderResponseSchema } from './webPageReaderModel';
 
@@ -76,6 +77,18 @@ export const webPageReaderRouter: Router = (() => {
   router.get('/get-content', async (_req: Request, res: Response) => {
     try {
       const { url } = WebPageReaderRequestParamSchema.parse(_req.query);
+
+      // Validate URL before making the request
+      if (!isValidPublicUrl(url)) {
+        const serviceResponse = new ServiceResponse(
+          ResponseStatus.Failed,
+          'Invalid URL: Internal or local addresses are not allowed',
+          null,
+          StatusCodes.BAD_REQUEST
+        );
+        return handleServiceResponse(serviceResponse, res);
+      }
+
       const content = await fetchAndCleanContent(url);
       const serviceResponse = new ServiceResponse(
         ResponseStatus.Success,
