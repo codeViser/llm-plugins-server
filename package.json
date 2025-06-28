@@ -10,7 +10,7 @@
     "clean": "rimraf dist coverage",
     "lint": "eslint",
     "lint:fix": "eslint --fix",
-    "prettier": "prettier --config .prettierrc --write .",
+    "prettier": "prettier --config .prettierrc --write",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest --coverage",
@@ -85,11 +85,10 @@
     "vite-tsconfig-paths": "^5.1.4",
     "vitest": "^3.2.4"
   },
-  "lint-staged": {
-    "**/*": "npm run prettier",
-    "**/*.{js,ts}": "npm run lint:fix"
-  },
   "author": "Travis",
   "repository": "travis-thuanle/typingmind-proxy",
-  "license": "MIT"
+  "license": "MIT",
+  "overrides": {
+    "path-to-regexp": "6.2.1"
+  }
 }
