@@ -49,7 +49,6 @@
     "pino-http": "^10.5.0",
     "pptxgenjs": "^4.0.1",
     "swagger-ui-express": "^5.0.1",
-    "uuidv4": "^6.2.13",
     "youtube-transcript": "^1.2.1",
     "zod": "^3.25.67"
   },
@@ -89,6 +88,7 @@
   "repository": "travis-thuanle/typingmind-proxy",
   "license": "MIT",
   "overrides": {
-    "path-to-regexp": "6.2.1"
+    "glob": "^9.0.0",
+    "unzipper": "^0.12.3"
   }
 }
