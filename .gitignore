@@ -28,3 +28,4 @@ public/images/*
 *.sw?
 plans/
 demo_repos/
+ecosystem.*
