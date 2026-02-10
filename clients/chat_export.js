@@ -246,7 +246,7 @@
   }
   function Mblock(raw) {
     if (!raw) return ""; let h = String(raw);
-    const cb = []; h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_, _l, c) => (cb.push(`<pre><code>${E(c)}</code></pre>`), `\n%%CB${cb.length - 1}%%\n`));
+    const cb = []; h = h.replace(/```(\w*)\s*\n([\s\S]*?)\n```/g, (_, _l, c) => (cb.push(`<pre><code>${E(c)}</code></pre>`), `\n%%CB${cb.length - 1}%%\n`));
     const ic = []; h = h.replace(/`([^`\n]+)`/g, (_, c) => (ic.push(`<code>${E(c)}</code>`), `%%IC${ic.length - 1}%%`));
     const tx = []; h = protectTeX(h, tx);
     h = SH(h);
