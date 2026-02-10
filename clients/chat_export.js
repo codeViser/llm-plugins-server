@@ -1,21 +1,20 @@
 (() => {
   /******************************************************************
-   * TypingMind Extension — Full Export (Super JSON) → v6 Converter
+   * TypingMind Extension — v6.4 (Mobile-safe)
+   *
+   * Fixes Android/PWA crash by:
+   *  - NOT overriding window.Blob (that can break TypingMind internals on mobile)
+   *  - Capturing exports by intercepting URL.createObjectURL(blob) + <a>.click()
+   *  - Only attempting sidebar full-export when we can confidently identify
+   *    the active chat row (selected-chat-item with kebab).
+   *  - If not confident, falls back to Share→JSON (messages-only) instead of crashing.
+   *
    * Adds 2 buttons in Share modal:
-   *   1) Interactive HTML
-   *   2) Nice PDF (Print)
-   *
-   * Capture strategy (robust):
-   *   A) Try sidebar selected chat kebab → Export (full JSON: data.chats...)
-   *   B) Fallback to Share modal → JSON (messages-only)
-   *
-   * Key robustness fixes:
-   *   - Uses [data-element-id="selected-chat-item"] as the active row
-   *   - Targets the correct kebab menu via aria-labelledby=kebab.id
-   *   - Works on phone/desktop (opens sidebar if collapsed)
+   *  - Interactive HTML  (download/shareable HTML)
+   *  - Nice PDF          (opens print window; fallback = download HTML)
    ******************************************************************/
 
-  const TAG = "[TM Export v6.2]";
+  const TAG = "[TM Export v6.4]";
   const log = (...a) => console.log(TAG, ...a);
   const warn = (...a) => console.warn(TAG, ...a);
 
@@ -25,27 +24,40 @@
     shareModal: '[data-element-id="pop-up-modal"]',
     chatTitle: '[data-element-id="current-chat-title"]',
 
-    // Sidebar toggle (mobile/collapsed)
+    // Sidebar (mobile collapsed)
     sidebarToggleCompact: '[data-element-id="workspace-logo-button-compact"]',
 
-    // Sidebar chat rows
+    // Sidebar rows
     sidebarChatItem: '[data-element-id="custom-chat-item"]',
     sidebarSelectedChatItem: '[data-element-id="selected-chat-item"]',
 
-    // Kebab inside a row
+    // Chat row kebab
     chatItemKebab: 'button[aria-label="Chat settings"]',
 
-    // Menu item for full export
+    // Kebab menu item for export
     exportChatBtn: 'button[data-element-id="export-chat-button"]',
   };
 
-  // Force kebab to be clickable even if hidden until hover (desktop)
+  // Force kebab clickable even if normally hidden until hover (desktop)
   const FORCE_CSS = `
-    .tm-force-open button[aria-label="Chat settings"]{
+    .tm-force-open ${SEL.chatItemKebab}{
       opacity: 1 !important;
       width: auto !important;
       pointer-events: auto !important;
     }
+    .tm-toast{
+      position: fixed; left: 12px; right: 12px; bottom: 14px; z-index: 2147483647;
+      background: rgba(17,24,39,.95); color: #fff; border: 1px solid rgba(255,255,255,.12);
+      border-radius: 12px; padding: 10px 12px; font: 13px/1.35 system-ui, -apple-system, sans-serif;
+      box-shadow: 0 8px 30px rgba(0,0,0,.35);
+    }
+    .tm-toast .row{display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px}
+    .tm-toast button{
+      border: none; border-radius: 10px; padding: 8px 10px; font-weight: 800; font-size: 12px;
+      background: #00a884; color: #111; cursor: pointer;
+    }
+    .tm-toast button.alt{ background: #f59e0b; }
+    .tm-toast button.ghost{ background: rgba(255,255,255,.12); color:#fff; font-weight:700; }
   `;
   const style = document.createElement("style");
   style.textContent = FORCE_CSS;
@@ -65,6 +77,27 @@
 
   function textOf(el) {
     return (el?.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function toast(msg, actions = []) {
+    try { document.querySelectorAll(".tm-toast").forEach((x) => x.remove()); } catch {}
+    const t = document.createElement("div");
+    t.className = "tm-toast";
+    t.innerHTML = `<div>${msg}</div><div class="row"></div>`;
+    const row = t.querySelector(".row");
+    actions.forEach((a) => {
+      const b = document.createElement("button");
+      b.textContent = a.label;
+      if (a.kind) b.className = a.kind;
+      b.onclick = () => { try { a.onClick?.(); } finally { try { t.remove(); } catch {} } };
+      row.appendChild(b);
+    });
+    const close = document.createElement("button");
+    close.textContent = "Close";
+    close.className = "ghost";
+    close.onclick = () => { try { t.remove(); } catch {} };
+    row.appendChild(close);
+    document.body.appendChild(t);
   }
 
   function getTopChatTitle() {
@@ -95,76 +128,62 @@
   }
 
   /******************************************************************
-   * Capture JSON download by intercepting Blob + anchor click
+   * SAFE CAPTURE (mobile-safe): intercept URL.createObjectURL(blob) + <a>.click()
+   * - No Blob override
    ******************************************************************/
-  function decodeBlobPartsToText(parts) {
-    const dec = new TextDecoder("utf-8");
-    let out = "";
-    for (const p of parts || []) {
-      try {
-        if (typeof p === "string") out += p;
-        else if (p instanceof ArrayBuffer) out += dec.decode(new Uint8Array(p));
-        else if (ArrayBuffer.isView(p)) out += dec.decode(p);
-        else out += String(p);
-      } catch {}
-    }
-    return out;
-  }
-
-  async function captureJSONDownload(triggerFn, predicate, timeoutMs = 14000) {
-    const OrigBlob = window.Blob;
+  async function captureDownloadViaObjectURL(triggerFn, {
+    shouldCaptureBlob,
+    predicateText,
+    timeoutMs = 14000,
+    suppressDownload = true,
+  } = {}) {
+    const OrigCOU = URL.createObjectURL.bind(URL);
+    const OrigRVO = URL.revokeObjectURL.bind(URL);
     const OrigAClick = HTMLAnchorElement.prototype.click;
 
-    let capturedText = null;
-    let resolved = false;
+    const urlToTextPromise = new Map(); // url -> Promise<string>
+    let clickedUrl = null;
 
     function restore() {
-      window.Blob = OrigBlob;
+      URL.createObjectURL = OrigCOU;
+      URL.revokeObjectURL = OrigRVO;
       HTMLAnchorElement.prototype.click = OrigAClick;
     }
 
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (!resolved) {
-          restore();
-          reject(new Error("Timed out capturing JSON download"));
-        }
+        restore();
+        reject(new Error("Timed out capturing download"));
       }, timeoutMs);
 
-      window.Blob = function (parts, opts) {
-        const blob = new OrigBlob(parts, opts);
-        const type = (opts && opts.type) ? String(opts.type).toLowerCase() : "";
-        const txt = decodeBlobPartsToText(parts);
-        const looksJson = type.includes("json") || (/^\s*[{[]/.test(txt) && txt.length > 10);
-
-        if (looksJson && !capturedText) {
-          try {
-            if (!predicate || predicate(txt)) {
-              JSON.parse(txt);
-              capturedText = txt;
-            }
-          } catch {}
-        }
-        return blob;
+      URL.createObjectURL = function (blob) {
+        const url = OrigCOU(blob);
+        try {
+          const type = (blob && blob.type) ? String(blob.type).toLowerCase() : "";
+          const ok = shouldCaptureBlob
+            ? !!shouldCaptureBlob(blob)
+            : (type.includes("json") || type.includes("application"));
+          if (ok && blob && typeof blob.text === "function") {
+            urlToTextPromise.set(url, blob.text());
+          }
+        } catch {}
+        return url;
       };
 
       HTMLAnchorElement.prototype.click = function () {
         try {
-          const dl = (this && this.download) ? String(this.download).toLowerCase() : "";
-          if (capturedText && (dl.includes(".json") || dl.includes("json"))) {
-            resolved = true;
-            clearTimeout(timer);
-            restore();
-            resolve(capturedText);
-            return;
+          const href = (this && this.href) ? String(this.href) : "";
+          if (href && urlToTextPromise.has(href)) {
+            clickedUrl = href;
+            if (suppressDownload) return; // swallow the click
           }
         } catch {}
         return OrigAClick.apply(this, arguments);
       };
 
-      try {
-        triggerFn();
-      } catch (e) {
+      // Trigger after hooks installed
+      try { triggerFn(); }
+      catch (e) {
         clearTimeout(timer);
         restore();
         reject(e);
@@ -174,21 +193,45 @@
       (async () => {
         const t0 = Date.now();
         while (Date.now() - t0 < timeoutMs) {
-          if (capturedText && !resolved) {
-            resolved = true;
-            clearTimeout(timer);
-            restore();
-            resolve(capturedText);
-            return;
+          if (clickedUrl && urlToTextPromise.has(clickedUrl)) {
+            try {
+              const txt = await urlToTextPromise.get(clickedUrl);
+              // Clean up URL
+              try { OrigRVO(clickedUrl); } catch {}
+              restore();
+              clearTimeout(timer);
+
+              try {
+                if (predicateText && !predicateText(txt)) {
+                  reject(new Error("Captured download but content did not match predicate"));
+                  return;
+                }
+                JSON.parse(txt); // validate JSON
+              } catch (e) {
+                reject(new Error("Captured content is not valid JSON"));
+                return;
+              }
+
+              resolve(txt);
+              return;
+            } catch (e) {
+              restore();
+              clearTimeout(timer);
+              reject(e);
+              return;
+            }
           }
           await sleep(50);
         }
+        restore();
+        clearTimeout(timer);
+        reject(new Error("No captured object URL click detected"));
       })();
     });
   }
 
   /******************************************************************
-   * Sidebar automation (full export) — correct selected chat handling
+   * Sidebar full export capture (super JSON)
    ******************************************************************/
   async function ensureSidebarHasAnything() {
     const hasAny = () =>
@@ -213,46 +256,68 @@
     return 0;
   }
 
-  function fallbackFindSidebarChatItemByTitle() {
+  function pickActiveChatRowConfidently() {
     const topTitle = getTopChatTitle();
-    const items = [...document.querySelectorAll(SEL.sidebarChatItem)];
-    if (!items.length) return null;
 
-    let best = null, bestScore = 0;
+    // 1) Best: TypingMind marks active row explicitly
+    const selected = document.querySelector(SEL.sidebarSelectedChatItem);
+    if (selected && selected.querySelector(SEL.chatItemKebab)) {
+      // If it has a visible title, verify match roughly (avoid edge case where selected is transient)
+      const titleEl = selected.querySelector(".truncate");
+      const sTitle = textOf(titleEl) || textOf(selected);
+      const sc = scoreTitleMatch(topTitle, sTitle);
+      // Even if score is low, selected marker is authoritative—accept.
+      return { row: selected, confidence: Math.max(700, sc), reason: "selected-chat-item" };
+    }
+
+    // 2) Fallback: find best title match among visible chat items (not folders)
+    const items = [...document.querySelectorAll(SEL.sidebarChatItem)]
+      .filter((it) => it.querySelector(SEL.chatItemKebab)); // ensure it's a chat row
+
+    if (!items.length) return { row: null, confidence: 0, reason: "no-chat-items" };
+
+    let best = null, bestScore = 0, bestTitle = "";
     for (const it of items) {
       const titleEl = it.querySelector(".truncate");
-      const sidebarTitle = textOf(titleEl) || textOf(it);
-      const s = scoreTitleMatch(topTitle, sidebarTitle);
-      if (s > bestScore) {
-        bestScore = s;
+      const sTitle = textOf(titleEl) || textOf(it);
+      const sc = scoreTitleMatch(topTitle, sTitle);
+      if (sc > bestScore) {
+        bestScore = sc;
         best = it;
+        bestTitle = sTitle;
       }
     }
-    return best || items[0];
+    return { row: best, confidence: bestScore, reason: `best-match:${bestTitle}` };
   }
 
   async function captureFullExportJSON() {
+    // IMPORTANT: on mobile, share modal can block sidebar interactions
     closeShareModalIfOpen();
 
     const okSidebar = await ensureSidebarHasAnything();
     if (!okSidebar) throw new Error("Sidebar not available");
 
-    // Prefer TypingMind's active row marker
-    let row = document.querySelector(SEL.sidebarSelectedChatItem);
-    if (!row) row = fallbackFindSidebarChatItemByTitle();
-    if (!row) throw new Error("Could not locate active chat row in sidebar");
+    const pick = pickActiveChatRowConfidently();
+    if (!pick.row) throw new Error("Could not locate active chat row in sidebar");
+    // If we are not confident, do NOT attempt full-export (avoids app crash on mobile)
+    if (pick.confidence < 450) {
+      throw new Error("Low confidence identifying active chat in sidebar; skipping full export");
+    }
 
+    const row = pick.row;
     row.classList.add("tm-force-open");
     try { row.scrollIntoView({ block: "center", inline: "nearest" }); } catch {}
 
     const kebab = row.querySelector(SEL.chatItemKebab);
     if (!kebab) throw new Error("Chat settings (kebab) button not found in active row");
 
+    // Open THIS row's menu
     kebab.click();
 
+    // Identify the menu for THIS kebab via aria-labelledby
     const kebabId = kebab.id;
     const menuSel = kebabId
-      ? `[role="menu"][aria-labelledby="${CSS.escape(kebabId)}"]`
+      ? `[role="menu"][aria-labelledby="${(window.CSS && CSS.escape) ? CSS.escape(kebabId) : kebabId}"]`
       : `[role="menu"]`;
 
     const menu = await waitFor(() => document.querySelector(menuSel), 3500);
@@ -261,14 +326,23 @@
     const exportBtn = menu.querySelector(SEL.exportChatBtn);
     if (!exportBtn) throw new Error("Export button not found in kebab menu");
 
-    const txt = await captureJSONDownload(
+    // Capture the JSON export download in a mobile-safe way
+    const txt = await captureDownloadViaObjectURL(
       () => exportBtn.click(),
-      (t) => /"data"\s*:\s*\{[\s\S]*"chats"\s*:\s*\[/.test(t) || /"messages"\s*:\s*\[/.test(t)
+      {
+        shouldCaptureBlob: (blob) => String(blob?.type || "").toLowerCase().includes("json"),
+        predicateText: (t) => /"data"\s*:\s*\{[\s\S]*"chats"\s*:\s*\[/.test(t) || /"messages"\s*:\s*\[/.test(t),
+        suppressDownload: true,
+        timeoutMs: 14000,
+      }
     );
 
     return txt;
   }
 
+  /******************************************************************
+   * Share modal JSON capture (fallback)
+   ******************************************************************/
   async function captureShareExportJSON() {
     openShareModal();
     const modal = await waitFor(() => document.querySelector(SEL.shareModal), 3500);
@@ -277,15 +351,21 @@
     const jsonBtn = findShareJsonButton(modal);
     if (!jsonBtn) throw new Error("JSON button not found in Share modal");
 
-    const txt = await captureJSONDownload(
+    const txt = await captureDownloadViaObjectURL(
       () => jsonBtn.click(),
-      (t) => /"messages"\s*:\s*\[/.test(t) || /^\s*\[/.test(t)
+      {
+        shouldCaptureBlob: (blob) => String(blob?.type || "").toLowerCase().includes("json"),
+        predicateText: (t) => /"messages"\s*:\s*\[/.test(t) || /^\s*\[/.test(t),
+        suppressDownload: true,
+        timeoutMs: 12000,
+      }
     );
+
     return txt;
   }
 
   /******************************************************************
-   * KaTeX loader (render LaTeX at export-time, output HTML has KaTeX CSS)
+   * KaTeX loader (render LaTeX during export)
    ******************************************************************/
   async function ensureKaTeXLoaded() {
     if (window.katex && typeof window.katex.renderToString === "function") return true;
@@ -313,7 +393,7 @@
   }
 
   /******************************************************************
-   * v6 Converter (tables, inline HTML, artifact renders, LaTeX, robust stringify)
+   * v6 Converter (core)
    ******************************************************************/
   function S(c) {
     if (c == null) return "";
@@ -344,11 +424,6 @@
     return d.innerHTML;
   }
 
-  function tr(s, n = 100) {
-    s = S(s);
-    return s.length > n ? s.slice(0, n) + "..." : s;
-  }
-
   function renderTeX(tex, display) {
     if (window.katex) {
       try {
@@ -360,7 +435,7 @@
       : `<code>${E(tex)}</code>`;
   }
 
-  // Extract TeX from RAW (before SH) to avoid &lt; &gt; encoding issues
+  // Extract TeX from RAW before SH() to avoid &lt; &gt; encoding issues
   function protectTeX(raw, arr) {
     raw = raw.replace(/\\\[([\s\S]+?)\\\]/g, (_, t) => (arr.push(renderTeX(t.trim(), true)), `%%TX${arr.length - 1}%%`));
     raw = raw.replace(/\\\(([\s\S]+?)\\\)/g, (_, t) => (arr.push(renderTeX(t.trim(), false)), `%%TX${arr.length - 1}%%`));
@@ -375,7 +450,7 @@
     return raw;
   }
 
-  // Inline markdown for table cells (supports bold/links/img + inline TeX)
+  // Inline markdown for table cells
   function Icell(raw) {
     if (!raw) return "";
     let h = String(raw);
@@ -461,64 +536,52 @@
     if (!rawText) return "";
     let h = String(rawText);
 
-    // Code blocks from RAW
     const cb = [];
     h = h.replace(/```(\w*)\n([\s\S]*?)```/g, (_, __lang, c) => {
       cb.push(`<pre><code>${E(c)}</code></pre>`);
       return `\n%%CB${cb.length - 1}%%\n`;
     });
 
-    // Inline code from RAW
     const ic = [];
     h = h.replace(/`([^`\n]+)`/g, (_, c) => {
       ic.push(`<code>${E(c)}</code>`);
       return `%%IC${ic.length - 1}%%`;
     });
 
-    // TeX from RAW (before SH)
     const tx = [];
     h = protectTeX(h, tx);
 
-    // Sanitize remainder
     h = SH(h);
 
-    // Protect existing HTML blocks
     const hb = [];
     h = h.replace(
       /(<(?:table|div|details|figure|section|article|style)[\s\S]*?<\/(?:table|div|details|figure|section|article|style)>)/gi,
       (m) => (hb.push(m), `\n%%HB${hb.length - 1}%%\n`)
     );
 
-    // Tables
     h = parseMdTables(h);
     h = h.replace(/(<table[\s\S]*?<\/table>)/gi, (m) => (hb.push(m), `\n%%HB${hb.length - 1}%%\n`));
 
-    // Headings
     h = h.replace(/^####\s+(.+)$/gm, "<h4>$1</h4>");
     h = h.replace(/^###\s+(.+)$/gm, "<h3>$1</h3>");
     h = h.replace(/^##\s+(.+)$/gm, "<h2>$1</h2>");
     h = h.replace(/^#\s+(.+)$/gm, "<h1>$1</h1>");
 
-    // Bold/italic
     h = h.replace(/\*\*\*(.+?)\*\*\*/g, "<strong><em>$1</em></strong>");
     h = h.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
 
-    // Images before links
     h = h.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, `<img src="$2" alt="$1" loading="lazy">`);
     h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g, `<a href="$2" target="_blank" rel="noopener">$1</a>`);
 
-    // Quotes, lists, hr
     h = h.replace(/^&gt;\s+(.+)$/gm, "<blockquote>$1</blockquote>");
     h = h.replace(/^>\s+(.+)$/gm, "<blockquote>$1</blockquote>");
     h = h.replace(/^[-*]\s+(.+)$/gm, "<li>$1</li>");
     h = h.replace(/^\d+\.\s+(.+)$/gm, "<li>$1</li>");
     h = h.replace(/^---+$/gm, "<hr>");
 
-    // Paragraphs
     h = h.replace(/\n\n/g, "</p><p>");
     h = h.replace(/\n/g, "<br>");
 
-    // Restore
     for (let i = 0; i < cb.length; i++) h = h.replace(`%%CB${i}%%`, cb[i]);
     for (let i = 0; i < ic.length; i++) h = h.replace(`%%IC${i}%%`, ic[i]);
     for (let i = 0; i < tx.length; i++) h = h.replace(`%%TX${i}%%`, tx[i]);
@@ -555,7 +618,6 @@
     const d = JSON.parse(raw);
     const r = { messages: [], title: "", model: "", created: "" };
 
-    // Full export
     if (d?.data?.chats && Array.isArray(d.data.chats)) {
       const chat = d.data.chats[0];
       r.messages = chat.messages || [];
@@ -565,10 +627,7 @@
       return r;
     }
 
-    // Small export
     if (d?.messages && Array.isArray(d.messages)) { r.messages = d.messages; return r; }
-
-    // Raw array
     if (Array.isArray(d)) { r.messages = d; return r; }
 
     throw new Error("Unrecognized JSON format");
@@ -613,7 +672,6 @@
     }
 
     if (src && src.length > 50) {
-      // Note: allow-scripts enables interactive renders; still sandboxed.
       return `<details class="render-wrap" open><summary>Rendered: ${E(name)}</summary>` +
         `<iframe srcdoc="${src.replace(/"/g, "&quot;")}" sandbox="allow-scripts" ` +
         `style="width:100%;min-height:300px;border:none;border-radius:0 0 6px 6px;background:#fff" loading="lazy"></iframe></details>`;
@@ -757,8 +815,8 @@
       `</div></body></html>`;
   }
 
-  function downloadTextAsFile(text, filename, mime = "text/html;charset=utf-8") {
-    const b = new Blob([text], { type: mime });
+  function downloadHTML(html, filename) {
+    const b = new Blob([html], { type: "text/html;charset=utf-8" });
     const u = URL.createObjectURL(b);
     const a = document.createElement("a");
     a.href = u;
@@ -766,13 +824,32 @@
     document.body.appendChild(a);
     a.click();
     setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(u);
+      try { document.body.removeChild(a); } catch {}
+      try { URL.revokeObjectURL(u); } catch {}
     }, 300);
+    return { blob: b, url: u };
+  }
+
+  function canShareFile(file) {
+    try {
+      return !!(navigator.canShare && navigator.canShare({ files: [file] }));
+    } catch {
+      return false;
+    }
+  }
+
+  async function tryShareFile(file, title) {
+    if (!navigator.share || !canShareFile(file)) return false;
+    try {
+      await navigator.share({ files: [file], title });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /******************************************************************
-   * Main actions
+   * Main action helpers
    ******************************************************************/
   async function getBestJSON() {
     try {
@@ -787,46 +864,77 @@
 
   async function doInteractiveHTML() {
     const fallbackTitle = getTopChatTitle();
-    await ensureKaTeXLoaded();
 
+    // Capture JSON first (keeps mobile user-gesture chain as short as possible)
+    toast("Exporting… (capturing JSON, please wait)");
     const { jsonText, source } = await getBestJSON();
-    const parsed = parseExport(jsonText);
 
+    // Load KaTeX only after capture
+    try { await ensureKaTeXLoaded(); } catch {}
+
+    const parsed = parseExport(jsonText);
     const html = buildShareableHTML(parsed, fallbackTitle);
+
     const safeBase = (parsed.title || fallbackTitle || "chat").replace(/[^a-zA-Z0-9 -]/g, "").trim() || "chat";
-    downloadTextAsFile(html, `${safeBase}-${source}-${Date.now()}.html`);
+    const filename = `${safeBase}-${source}-${Date.now()}.html`;
+
+    const { blob } = downloadHTML(html, filename);
+
+    // Mobile-friendly fallback actions (if download didn’t start, user can Share)
+    const file = new File([blob], filename, { type: "text/html" });
+    toast("HTML ready. If download didn’t start, tap Share.", [
+      { label: "Share HTML", kind: "alt", onClick: () => tryShareFile(file, safeBase) },
+      { label: "Download again", onClick: () => downloadHTML(html, filename) },
+    ]);
   }
 
   async function doNicePDF() {
-    // Open popup immediately to avoid popup blockers
+    // On mobile PWAs, printing can be flaky; we open a window immediately (gesture)
     const w = window.open("", "_blank");
     if (!w) {
-      alert("Pop-up blocked. Please allow pop-ups for TypingMind to print.");
+      toast("Pop-up blocked. Generating HTML instead.", []);
+      await doInteractiveHTML();
       return;
     }
 
     const fallbackTitle = getTopChatTitle();
-    await ensureKaTeXLoaded();
 
+    toast("Exporting… (capturing JSON, please wait)");
     const { jsonText } = await getBestJSON();
-    const parsed = parseExport(jsonText);
 
+    try { await ensureKaTeXLoaded(); } catch {}
+
+    const parsed = parseExport(jsonText);
     const html = buildShareableHTML(parsed, fallbackTitle);
 
     w.document.open();
     w.document.write(html);
     w.document.close();
 
+    // Try print
     setTimeout(() => {
-      try { w.focus(); w.print(); } catch (e) { alert("Print failed: " + (e?.message || e)); }
-    }, 800);
+      try {
+        w.focus();
+        w.print();
+      } catch (e) {
+        // Fallback: also offer HTML download/share
+        const safeBase = (parsed.title || fallbackTitle || "chat").replace(/[^a-zA-Z0-9 -]/g, "").trim() || "chat";
+        const filename = `${safeBase}-print-${Date.now()}.html`;
+        const { blob } = downloadHTML(html, filename);
+        const file = new File([blob], filename, { type: "text/html" });
+        toast("Print failed on this device. Use the HTML instead.", [
+          { label: "Share HTML", kind: "alt", onClick: () => tryShareFile(file, safeBase) },
+          { label: "Download HTML", onClick: () => downloadHTML(html, filename) },
+        ]);
+      }
+    }, 900);
   }
 
   /******************************************************************
    * Inject buttons into Share modal
    ******************************************************************/
   function injectButtons(modal) {
-    if (!modal || modal.querySelector("[data-tm-added='v62']")) return;
+    if (!modal || modal.querySelector("[data-tm-added='v64']")) return;
 
     const grid = modal.querySelector(".grid.grid-cols-2");
     if (!grid) return;
@@ -846,8 +954,11 @@
       b.addEventListener("click", async () => {
         b.disabled = true;
         try { await onClick(); }
-        catch (e) { alert("Export failed: " + (e?.message || e)); }
-        finally { b.disabled = false; }
+        catch (e) {
+          alert("Export failed: " + (e?.message || e));
+        } finally {
+          b.disabled = false;
+        }
       });
       return b;
     };
@@ -857,17 +968,17 @@
     left1.appendChild(mkBtn("Interactive HTML", "#00a884", doInteractiveHTML));
 
     const right1 = document.createElement("div");
-    right1.textContent = "Prefers sidebar Export (full JSON). Falls back to Share JSON.";
+    right1.textContent = "Uses full sidebar Export when safely detectable; otherwise falls back to Share JSON.";
 
     const left2 = document.createElement("div");
     left2.className = "flex items-center justify-end";
     left2.appendChild(mkBtn("Nice PDF", "#f59e0b", doNicePDF));
 
     const right2 = document.createElement("div");
-    right2.textContent = "Print-ready output. Uses full JSON when available.";
+    right2.textContent = "Opens print window; if printing fails on mobile, provides HTML fallback.";
 
     const marker = document.createElement("div");
-    marker.setAttribute("data-tm-added", "v62");
+    marker.setAttribute("data-tm-added", "v64");
     marker.style.display = "none";
     modal.appendChild(marker);
 
