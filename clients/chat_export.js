@@ -27,7 +27,9 @@
   const sEl = document.createElement("style");
   sEl.textContent = `
     .tm-force-open button[aria-label="Chat settings"]{opacity:1!important;width:auto!important;pointer-events:auto!important}
-    .tmx-bar{position:fixed;bottom:0;left:0;right:0;z-index:2147483647;background:rgba(17,24,39,.97);color:#fff;border-top:2px solid #00a884;padding:14px 16px;font:13px/1.4 system-ui,-apple-system,sans-serif;box-shadow:0 -4px 24px rgba(0,0,0,.4)}
+    .tmx-bar{position:fixed;bottom:0;left:0;right:0;z-index:2147483647;background:rgba(17,24,39,.85);color:#fff;border-top:2px solid #00a884;padding:10px 16px;font:13px/1.4 system-ui,-apple-system,sans-serif;box-shadow:0 -4px 24px rgba(0,0,0,.4);pointer-events:none}
+    .tmx-bar *{pointer-events:none}
+    .tmx-bar button{pointer-events:auto}
     .tmx-bar b{color:#00a884}
     .tmx-bar .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
     .tmx-bar button{border:none;border-radius:10px;padding:8px 14px;font-weight:800;font-size:12px;cursor:pointer}
