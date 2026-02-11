@@ -71,9 +71,22 @@
 
   function openModal() { document.querySelector(SEL.shareBtn)?.click(); }
 
+  /* ============ STATUS TOAST (non-blocking) ============ */
+  function showStatus(msg, durationMs) {
+    try { document.querySelectorAll('.tmx-status').forEach(x => x.remove()); } catch {}
+    const d = document.createElement('div');
+    d.className = 'tmx-status';
+    d.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;background:rgba(17,24,39,.92);color:#fff;padding:8px 16px;border-radius:10px;font:12px/1.4 system-ui,-apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.3);pointer-events:none;transition:opacity .3s';
+    d.textContent = msg;
+    document.body.appendChild(d);
+    if (durationMs) setTimeout(() => { d.style.opacity = '0'; setTimeout(() => { try { d.remove(); } catch {} }, 400); }, durationMs);
+    return d;
+  }
+  
   /* ============ CAPTURE ENGINE ============ */
   // Brief override of <a>.click() to intercept JSON blob downloads.
   // fetch(blobURL) starts before TypingMind revokes the URL.
+  /* ============ CAPTURE ENGINE (dual: prototype override + document click listener) ============ */
   function createCapture({ timeoutMs = 15000, suppressDownload = false, acceptSmall = false } = {}) {
     const Orig = HTMLAnchorElement.prototype.click;
     let done = false;
@@ -90,6 +103,7 @@
       done = true;
       clearTimeout(timer);
       HTMLAnchorElement.prototype.click = Orig;
+      document.removeEventListener('click', onDocClick, true);
       rejectFn(err || new Error("Cancelled"));
     }
 
@@ -98,46 +112,63 @@
       done = true;
       clearTimeout(timer);
       HTMLAnchorElement.prototype.click = Orig;
+      document.removeEventListener('click', onDocClick, true);
     }
 
+    function processText(txt) {
+      if (done) return;
+      try {
+        const obj = JSON.parse(txt);
+        const isFull = !!(obj?.data?.chats?.[0]);
+        const isSmall = !!(obj?.messages || Array.isArray(obj));
+
+        if (isFull) {
+          restore();
+          resolveFn({ text: txt, kind: "full" });
+        } else if (isSmall && acceptSmall) {
+          restore();
+          resolveFn({ text: txt, kind: "share" });
+        }
+        // else: not a recognized JSON format, keep listening
+      } catch {
+        // Not valid JSON, keep listening
+      }
+    }
+
+    function isJSONDownloadAnchor(el) {
+      if (!el || el.tagName !== 'A') return false;
+      const href = String(el.href || '');
+      const dl = String(el.getAttribute('download') || el.download || '').toLowerCase();
+      return href.startsWith('blob:') && (dl.includes('json') || dl.endsWith('.json'));
+    }
+
+    /* Method 1: prototype override — catches programmatic a.click() */
     HTMLAnchorElement.prototype.click = function () {
-      const href = String(this.href || "");
-      const dl = String(this.download || "").toLowerCase();
-
-      if (!done && href.startsWith("blob:") && (dl.includes("json") || dl.endsWith(".json"))) {
-        // Start fetch immediately (before revokeObjectURL)
-        const fetchP = fetch(href).then((r) => r.text());
-
-        // Let the actual download proceed (or suppress on desktop automation)
-        if (!suppressDownload) Orig.call(this);
-
-        fetchP.then((txt) => {
-          try {
-            const obj = JSON.parse(txt);
-            const isFull = !!(obj?.data?.chats?.[0]);
-            const isSmall = !!(obj?.messages || Array.isArray(obj));
-
-            if (isFull) {
-              restore();
-              resolveFn({ text: txt, kind: "full" });
-            } else if (isSmall && acceptSmall) {
-              restore();
-              resolveFn({ text: txt, kind: "share" });
-            }
-            // else: not the right JSON, keep listening
-          } catch {
-            // Not valid JSON, keep listening
-          }
-        }).catch(() => {});
-
+      if (!done && isJSONDownloadAnchor(this)) {
+        const href = this.href;
+        const self = this;
+        fetch(href).then(r => r.text()).then(processText).catch(() => {});
+        if (!suppressDownload) Orig.call(self);
         return;
       }
-
       return Orig.call(this);
     };
 
+    /* Method 2: document click listener — catches real user clicks on <a download> */
+    function onDocClick(e) {
+      if (done) return;
+      try {
+        const a = e.target?.closest?.('a');
+        if (!a || !isJSONDownloadAnchor(a)) return;
+        // Don't prevent default — let the download happen
+        fetch(a.href).then(r => r.text()).then(processText).catch(() => {});
+      } catch {}
+    }
+    document.addEventListener('click', onDocClick, true);
+
     return { promise, cancel };
   }
+
 
   /* ============ DESKTOP: SIDEBAR AUTOMATION ============ */
   async function desktopTriggerFullExport() {
@@ -359,30 +390,33 @@
   /* ============ DESKTOP FLOWS ============ */
   async function desktopFlow(mode) {
     const title = getTitle();
-    await ensureKaTeX().catch(() => {});
+    await ensureKaTeXLoaded().catch(() => {});
     closeModal();
 
-    // Attempt 1: full export via sidebar automation
+    showStatus('Attempting full export (sidebar)…');
+
     const cap1 = createCapture({ timeoutMs: 12000, suppressDownload: true, acceptSmall: false });
     try {
       await desktopTriggerFullExport();
-      const { text } = await cap1.promise;
-      const kind = convertAndOutput(text, mode, title);
-      log("Desktop: exported via", kind);
+      const { text, kind } = await cap1.promise;
+      showStatus('Captured ' + kind + ' JSON. Converting…', 2000);
+      convertAndOutput(text, mode, title);
+      showStatus('Done! Exported ' + mode.toUpperCase() + ' from ' + kind + ' JSON.', 3000);
       return;
     } catch (e) {
       cap1.cancel(e);
-      log("Full export failed:", e?.message, "→ fallback to Share JSON");
+      log("Full export failed:", e?.message, "→ fallback");
+      showStatus('Full export failed. Trying Share JSON…');
     }
 
-    // Attempt 2: fallback to Share→JSON (small)
     await sleep(300);
     const cap2 = createCapture({ timeoutMs: 12000, suppressDownload: true, acceptSmall: true });
     try {
       await desktopTriggerShareJSON();
-      const { text } = await cap2.promise;
-      const kind = convertAndOutput(text, mode, title);
-      log("Desktop fallback: exported via", kind);
+      const { text, kind } = await cap2.promise;
+      showStatus('Captured ' + kind + ' JSON. Converting…', 2000);
+      convertAndOutput(text, mode, title);
+      showStatus('Done! Exported ' + mode.toUpperCase() + ' from ' + kind + ' JSON.', 3000);
     } catch (e2) {
       cap2.cancel(e2);
       throw new Error("Both full export and share JSON failed: " + (e2?.message || e2));
@@ -435,7 +469,7 @@
       await sleep(100);
       const exportKind = convertAndOutput(text, mode, title);
 
-      bar.innerHTML = `<div>Done! Exported as <b>${exportKind}</b> ${mode === "html" ? "HTML" : "PDF"}.</div><div class="row"></div>`;
+      bar.innerHTML = `<div>Done! Exported <b>${kind}</b> JSON → ${mode === "html" ? "HTML" : "PDF"}.</div><div class="row"></div>`;
       const closeBtn = document.createElement("button");
       closeBtn.className = "cancel";
       closeBtn.textContent = "Close";
