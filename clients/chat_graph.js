@@ -1,32 +1,30 @@
 // ================================================================
-//  TypingMind — Chat Branch Graph  v1.4.0
+//  TypingMind — Chat Branch Graph  v1.5.0
 //
-//  Fixed vs v1.3.0:
+//  Fixes vs v1.4.0:
+//  1. switchPath multi-step now uses pure upfront computation:
+//     all steps applied as array transforms on the INITIAL fiber
+//     state, then ONE dispatch + ONE IDB write at the end.
+//     No more getChatState() between steps (was reading stale
+//     fiber because dispatch commits async in React 18).
 //
-//  BUG 1: Verification check `curTxt.length > 0` was always true
-//    (any non-empty message content passes), so forceReload was
-//    NEVER triggered. React dispatch silently fails to commit to
-//    the DOM in React 18 concurrent mode, leaving old messages
-//    visible until a manual reload.
+//  2. applySingleSwitch replaced by computeSingleSwitch — a pure
+//     synchronous function (no IDB reads). IDB is only written
+//     once, after all steps are computed.
 //
-//  BUG 2: forceReloadFromIDB stored `selected-chat-item` before
-//    clicking away, but after other.click() TM moves that element
-//    into the other chat's DOM. The stored reference then pointed
-//    to the wrong chat, so navigation never returned to original.
+//  3. readMessagesFromIDB removed entirely — was the root cause
+//     of v1.4.0 regressions: new chats not yet saved to IDB caused
+//     an immediate throw, skipping dispatch + reload + rebuild.
 //
-//  FIXES:
-//  1. applySingleSwitch now reads from + writes to IDB only.
-//     No React dispatch dependency — IDB is the single source
-//     of truth. Multi-step switches always read the committed
-//     result of the previous step.
-//  2. forceReloadCurrentChat stores the parent custom-chat-item
-//     element (not selected-chat-item) BEFORE clicking away.
-//     After clicking another chat, it clicks the stored parent
-//     reference directly — not a re-query that finds the wrong el.
-//  3. Force reload is now UNCONDITIONAL: always applied after
-//     IDB writes, no weak verification gating it.
-//  4. getChatState() is used only for chatID extraction and for
-//     the post-reload graph rebuild — never for branch data.
+//  4. forceReloadCurrentChat stores custom-chat-item parent BEFORE
+//     clicking away (not selected-chat-item which moves after click).
+//
+//  5. Force reload is unconditional — no weak verification gating.
+//
+//  Preserved from v1.3.0:
+//  - Complete tree at all depths (inactive chains show nested variants)
+//  - switchPath multi-step auto navigation
+//  - ↓ depth indicator on deep inactive nodes
 // ================================================================
 (() => {
   'use strict';
@@ -41,21 +39,18 @@
       #${EXT}-btn {
         display:flex;align-items:center;justify-content:center;
         width:36px;height:36px;border-radius:8px;border:none;
-        background:transparent;cursor:pointer;color:inherit;
-        transition:background .15s;
+        background:transparent;cursor:pointer;color:inherit;transition:background .15s;
       }
       #${EXT}-btn:hover { background:rgba(255,255,255,.12); }
       #${EXT}-btn svg { width:18px;height:18px; }
       #${EXT}-ov {
-        position:fixed;inset:0;z-index:2147483647;
-        background:rgba(11,20,26,.96);
+        position:fixed;inset:0;z-index:2147483647;background:rgba(11,20,26,.96);
         display:flex;flex-direction:column;
         font-family:system-ui,-apple-system,sans-serif;color:#e9edef;
       }
       #${EXT}-bar {
         display:flex;align-items:center;justify-content:space-between;
-        padding:10px 16px;border-bottom:1px solid rgba(255,255,255,.08);
-        flex-shrink:0;
+        padding:10px 16px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0;
       }
       #${EXT}-bar h2    { margin:0;font-size:13px;font-weight:700; }
       #${EXT}-bar .hint { font-size:11px;color:#8696a0;margin-left:10px; }
@@ -67,8 +62,7 @@
       #${EXT}-xbtn:hover { background:rgba(255,255,255,.12);color:#e9edef; }
       #${EXT}-leg {
         display:flex;gap:14px;padding:5px 16px;flex-shrink:0;flex-wrap:wrap;
-        border-bottom:1px solid rgba(255,255,255,.06);
-        font-size:10px;color:#8696a0;
+        border-bottom:1px solid rgba(255,255,255,.06);font-size:10px;color:#8696a0;
       }
       #${EXT}-leg span { display:flex;align-items:center;gap:4px; }
       .${EXT}-dot { width:9px;height:9px;border-radius:50%;display:inline-block; }
@@ -88,7 +82,7 @@
     document.head.appendChild(s);
   }
 
-  /* ── REACT FIBER (used only for chatID + post-reload rebuild) ── */
+  /* ── REACT FIBER ─────────────────────────────────────────────── */
   function getFiber(el) {
     const k = Object.keys(el).find(k => k.startsWith('__reactFiber'));
     return k ? el[k] : null;
@@ -103,33 +97,19 @@
         const v = hs.memoizedState;
         if (v && !Array.isArray(v) && typeof v === 'object' &&
             Array.isArray(v.messages) && v.chatID)
-          return { state: v };
+          return { state: v, dispatch: hs.queue?.dispatch };
       }
     }
     return null;
   }
 
-  /* ── IDB — primary data layer ────────────────────────────────── */
+  /* ── IDB (write only — no reads) ────────────────────────────── */
   const openIDB = () => new Promise((res, rej) => {
     const r = indexedDB.open('keyval-store');
     r.onsuccess = e => res(e.target.result);
     r.onerror   = () => rej(r.error);
   });
-
-  /** Read messages array from IDB — source of truth for branch ops */
-  async function readMessagesFromIDB(chatID) {
-    const db = await openIDB();
-    return new Promise((res, rej) => {
-      const tx = db.transaction('keyval', 'readonly');
-      const st = tx.objectStore('keyval');
-      const g  = st.get(`CHAT_${chatID}`);
-      g.onsuccess = () => { db.close(); res(g.result?.messages ?? null); };
-      g.onerror   = () => { db.close(); rej(g.error); };
-    });
-  }
-
-  /** Write updated messages back to IDB, preserving all other chat fields */
-  async function writeMessagesToIDB(chatID, msgs) {
+  async function persistMessages(chatID, msgs) {
     const db = await openIDB();
     return new Promise((res, rej) => {
       const tx = db.transaction('keyval', 'readwrite');
@@ -138,7 +118,9 @@
       const g = st.get(key);
       g.onsuccess = () => {
         const prev = g.result;
-        if (!prev) { db.close(); rej(new Error('No IDB record: ' + key)); return; }
+        // If key doesn't exist yet (new chat), skip — IDB write not needed
+        // TM will persist when its own save timer fires with the fiber state
+        if (!prev) { db.close(); res(); return; }
         const p = st.put({ ...prev, messages: msgs, updatedAt: new Date() }, key);
         p.onsuccess = () => { db.close(); res(); };
         p.onerror   = () => { db.close(); rej(p.error); };
@@ -152,10 +134,12 @@
     !c ? '' : typeof c === 'string' ? c :
     Array.isArray(c) ? c.map(x => x?.text ?? x?.content ?? '').join(' ') : '';
 
-  /* ── TREE BUILDER ────────────────────────────────────────────── */
-  //  switchPath = [{sourceUUID, branchIdx}, …]
-  //  Complete sequence of branch switches to reach this node.
-  //  Active nodes: []   Direct inactive: [step1]   Deep: [step1,step2,…]
+  /* ── TREE BUILDER ────────────────────────────────────────────────
+   *  switchPath = [{sourceUUID, branchIdx}, …]
+   *  Full sequence of switches to reach this node.
+   *  Processes threads at ALL depths — inactive chains show
+   *  ALL nested variants (fix from v1.3.0, preserved here).
+   * ─────────────────────────────────────────────────────────────── */
   function buildChain(msgs, start, isActive, switchPath) {
     if (!msgs || start >= msgs.length) return [];
     const m = msgs[start];
@@ -169,23 +153,18 @@
       branchIdx:  switchPath.length > 0 ? switchPath[switchPath.length - 1].branchIdx  : null,
       x:0, y:0, w:0, h:0, children:[], variants:[]
     };
-
-    // Always process threads at every depth (fix from v1.3.0)
     if (m.role === 'user' && m.threads?.length > 0) {
       node.variants = m.threads.map((thread, ti) => {
-        const varPath = [
-          ...(isActive ? [] : switchPath),
-          { sourceUUID: m.uuid, branchIdx: ti }
-        ];
+        const vp = [...(isActive ? [] : switchPath), { sourceUUID: m.uuid, branchIdx: ti }];
         const hd = {
           id: `${m.uuid}__t${ti}`, role: 'user',
           label: extractText(thread.userMessageContent).replace(/\s+/g, ' ').slice(0, 85),
-          active: false, switchPath: varPath,
-          sourceUUID: varPath[varPath.length - 1].sourceUUID,
-          branchIdx:  varPath[varPath.length - 1].branchIdx,
+          active: false, switchPath: vp,
+          sourceUUID: vp[vp.length - 1].sourceUUID,
+          branchIdx:  vp[vp.length - 1].branchIdx,
           x:0, y:0, w:0, h:0, children:[], variants:[]
         };
-        hd.children = buildChain(thread.messages || [], 0, false, varPath);
+        hd.children = buildChain(thread.messages || [], 0, false, vp);
         return hd;
       });
       node.children = isActive
@@ -193,7 +172,6 @@
         : buildChain(msgs, start + 1, false, switchPath);
       return [node];
     }
-
     node.children = buildChain(msgs, start + 1, isActive, switchPath);
     return [node];
   }
@@ -201,25 +179,22 @@
   /* ── LAYOUT ──────────────────────────────────────────────────── */
   const NW = 210, NH = 60, VGAP = 38, slotW = 238;
   const colsPx = n => n * slotW - 28;
-
   function treeCols(node) {
     if (!node) return 1;
     if (node.variants.length > 0)
-      return treeCols(node.children[0] || null) +
-             node.variants.reduce((s, v) => s + treeCols(v), 0);
+      return treeCols(node.children[0] || null) + node.variants.reduce((s, v) => s + treeCols(v), 0);
     return node.children.length ? treeCols(node.children[0]) : 1;
   }
-
   function placeNode(node, cx, cy, all, edges) {
     if (!node) return;
     node.x = cx - NW / 2; node.y = cy; node.w = NW; node.h = NH;
     all.push(node);
     const nextY = cy + NH + VGAP;
     if (node.variants.length > 0) {
-      const ac  = treeCols(node.children[0] || null);
+      const ac = treeCols(node.children[0] || null);
       const vcs = node.variants.map(v => treeCols(v));
-      const tc  = ac + vcs.reduce((s, c) => s + c, 0);
-      let   sx  = cx - colsPx(tc) / 2;
+      const tc = ac + vcs.reduce((s, c) => s + c, 0);
+      let sx = cx - colsPx(tc) / 2;
       if (node.children[0]) {
         const aCx = sx + colsPx(ac) / 2;
         edges.push({ fx:cx, fy:cy+NH, tx:aCx, ty:nextY, active:true });
@@ -237,16 +212,11 @@
       placeNode(node.children[0], cx, nextY, all, edges);
     }
   }
-
   function doLayout(root) {
     const all = [], edges = [];
     placeNode(root, colsPx(treeCols(root)) / 2 + 60, 60, all, edges);
     let minX = Infinity, maxX = -Infinity, maxY = -Infinity;
-    all.forEach(n => {
-      minX = Math.min(minX, n.x);
-      maxX = Math.max(maxX, n.x + n.w);
-      maxY = Math.max(maxY, n.y + n.h);
-    });
+    all.forEach(n => { minX=Math.min(minX,n.x); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+n.h); });
     return { all, edges, bounds: { minX, maxX, maxY } };
   }
 
@@ -271,15 +241,15 @@
     const ctx=canvas.getContext('2d');
     ctx.scale(dpr,dpr); ctx.clearRect(0,0,W,H);
     ctx.save(); ctx.translate(tr.tx,tr.ty); ctx.scale(tr.s,tr.s);
-    edges.forEach(e => {
+    edges.forEach(e=>{
       ctx.beginPath(); ctx.moveTo(e.fx,e.fy);
       const m=(e.fy+e.ty)/2;
       ctx.bezierCurveTo(e.fx,m,e.tx,m,e.tx,e.ty);
       ctx.strokeStyle=e.active?C.eA:C.eI; ctx.lineWidth=e.active?2:1.5;
       ctx.setLineDash(e.active?[]:[6,4]); ctx.stroke(); ctx.setLineDash([]);
     });
-    all.forEach(n => {
-      const isU=n.role==='user', ia=n.active, hov=n.id===hoverId;
+    all.forEach(n=>{
+      const isU=n.role==='user',ia=n.active,hov=n.id===hoverId;
       const bg=isU?(ia?C.uA:C.uI):(ia?C.aA:C.aI);
       const bdr=isU?(ia?C.uAb:C.uIb):(ia?C.aAb:C.aIb);
       ctx.shadowColor='rgba(0,0,0,.35)'; ctx.shadowBlur=hov?18:5; ctx.shadowOffsetY=hov?4:2;
@@ -293,85 +263,70 @@
       ctx.font='bold 8px system-ui'; ctx.textAlign='left';
       ctx.fillText(isU?'USER':'AI',n.x+11,n.y+17);
       ctx.fillStyle=ia?C.tA:C.tI; ctx.font=`${ia?500:400} 10.5px system-ui`;
-      let lbl=n.label||'(empty)', maxW=n.w-18;
+      let lbl=n.label||'(empty)',maxW=n.w-18;
       while(ctx.measureText(lbl).width>maxW&&lbl.length>6) lbl=lbl.slice(0,-4)+'…';
       ctx.fillText(lbl,n.x+8,n.y+42);
-      if(n.variants?.length){
-        ctx.fillStyle=C.dot;
-        ctx.beginPath(); ctx.arc(n.x+n.w-9,n.y+9,4.5,0,Math.PI*2); ctx.fill();
-      }
-      if(!ia && n.switchPath?.length > 1){
-        ctx.fillStyle='rgba(245,158,11,.75)'; ctx.font='bold 8px system-ui'; ctx.textAlign='right';
-        ctx.fillText(`${n.switchPath.length}↓`,n.x+n.w-6,n.y+n.h-6);
-      }
+      if(n.variants?.length){ ctx.fillStyle=C.dot; ctx.beginPath(); ctx.arc(n.x+n.w-9,n.y+9,4.5,0,Math.PI*2); ctx.fill(); }
+      if(!ia&&n.switchPath?.length>1){ ctx.fillStyle='rgba(245,158,11,.75)'; ctx.font='bold 8px system-ui'; ctx.textAlign='right'; ctx.fillText(`${n.switchPath.length}↓`,n.x+n.w-6,n.y+n.h-6); }
     });
     ctx.restore();
   }
 
   /* ── HIT TEST ────────────────────────────────────────────────── */
-  function hitTest(all, mx, my, tr) {
+  function hitTest(all,mx,my,tr) {
     const wx=(mx-tr.tx)/tr.s, wy=(my-tr.ty)/tr.s;
     return all.find(n=>wx>=n.x&&wx<=n.x+n.w&&wy>=n.y&&wy<=n.y+n.h)||null;
   }
 
   /* ── SCROLL ──────────────────────────────────────────────────── */
   function scrollToMessage(uuid) {
-    if (!uuid||uuid.includes('__t')) return;
+    if(!uuid||uuid.includes('__t')) return;
     const ts=document.getElementById(`message-timestamp-${uuid}`);
     (ts?.closest('[data-element-id="response-block"]')||ts?.parentElement)
       ?.scrollIntoView({behavior:'smooth',block:'center'});
   }
 
   /* ── MODULE STATE ────────────────────────────────────────────── */
-  let graphCtx   = null;
-  let overlay    = null;
-  let toastEl    = null;
-  let toastTmr   = null;
-  let navigating = false;
+  let graphCtx=null, overlay=null, toastEl=null, toastTmr=null, navigating=false;
 
-  /* ── CLOSE OVERLAY ───────────────────────────────────────────── */
+  /* ── CLOSE ───────────────────────────────────────────────────── */
   function closeOverlay() {
-    if (!overlay) return;
+    if(!overlay) return;
     graphCtx?.ro?.disconnect();
     graphCtx?.ac?.abort();
-    const uuid = graphCtx?.lastSrcUUID;
-    overlay.remove();
-    overlay = null; toastEl = null; graphCtx = null;
+    const uuid=graphCtx?.lastSrcUUID;
+    overlay.remove(); overlay=null; toastEl=null; graphCtx=null;
     clearTimeout(toastTmr);
     document.dispatchEvent(new CustomEvent('tmg:branchSwitched'));
-    if (uuid) setTimeout(() => scrollToMessage(uuid), 200);
+    if(uuid) setTimeout(()=>scrollToMessage(uuid), 200);
   }
 
   /* ── TOAST ───────────────────────────────────────────────────── */
-  function showToast(msg, type='ok') {
-    if (!toastEl) return;
+  function showToast(msg,type='ok') {
+    if(!toastEl) return;
     clearTimeout(toastTmr);
     toastEl.textContent=msg; toastEl.className=type;
     toastTmr=setTimeout(()=>{ if(toastEl) toastEl.className=''; }, 3500);
   }
 
-  /* ── IDB-PRIMARY SINGLE SWITCH ───────────────────────────────────
+  /* ── PURE BRANCH SWITCH COMPUTATION ─────────────────────────────
    *
-   *  Reads current messages from IDB (not React fiber).
-   *  This guarantees that in multi-step navigation, each step
-   *  sees the COMMITTED result of the previous step, not an
-   *  uncommitted or stale React fiber state.
+   *  Synchronous pure function — takes a messages array, applies
+   *  ONE branch switch, returns the new messages array.
    *
-   *  No React dispatch is called here. The DOM update happens
-   *  once at the end via forceReloadCurrentChat().
+   *  Called in a loop for multi-step navigation, building up the
+   *  final target state without any getChatState() calls between
+   *  steps (fiber state may not have committed between async steps).
    * ─────────────────────────────────────────────────────────────── */
-  async function applySingleSwitch(chatID, sourceUUID, branchIdx) {
-    const msgs = await readMessagesFromIDB(chatID);
-    if (!msgs) throw new Error('Cannot read messages from IDB for ' + chatID);
-
+  function computeSingleSwitch(msgs, sourceUUID, branchIdx) {
     const srcIdx = msgs.findIndex(m => m.uuid === sourceUUID);
     if (srcIdx < 0)
-      throw new Error(`Source UUID ${sourceUUID} not found in IDB messages`);
+      throw new Error(`Source UUID ${sourceUUID} not found in messages`);
 
     const srcMsg = msgs[srcIdx];
     const target = srcMsg.threads?.[branchIdx];
     if (!target)
-      throw new Error(`threads[${branchIdx}] not found on message ${sourceUUID}`);
+      throw new Error(`threads[${branchIdx}] not found on ${sourceUUID}`);
 
     const newThreads = [
       ...srcMsg.threads.filter((_, i) => i !== branchIdx),
@@ -381,87 +336,61 @@
         createdAt:          new Date().toISOString()
       }
     ];
-    const newMsgs = [
+    return [
       ...msgs.slice(0, srcIdx),
       { ...srcMsg, content: target.userMessageContent,
         threads: newThreads, updatedAt: new Date().toISOString() },
       ...(target.messages || [])
     ];
-
-    await writeMessagesToIDB(chatID, newMsgs);
   }
 
-  /* ── SIDEBAR CHAT CONTAINER FINDER ──────────────────────────────
-   *
-   *  Returns the `custom-chat-item` parent element of the currently
-   *  selected chat. This reference stays valid even after clicking
-   *  another chat (unlike `selected-chat-item` which moves).
-   * ─────────────────────────────────────────────────────────────── */
+  /* ── SIDEBAR HELPERS ─────────────────────────────────────────── */
   function getOriginalChatContainer() {
+    // Store the PARENT custom-chat-item element (not selected-chat-item,
+    // which moves to another chat after clicking it).
     const sel = document.querySelector('[data-element-id="selected-chat-item"]');
-    if (!sel) return null;
-    return sel.closest('[data-element-id="custom-chat-item"]') || sel.parentElement;
+    return sel?.closest('[data-element-id="custom-chat-item"]') || sel?.parentElement || null;
   }
 
-  /* ── FORCE RELOAD FROM IDB ───────────────────────────────────────
-   *
-   *  Guarantees the TM chat DOM reflects the current IDB state.
-   *  React dispatch is unreliable for DOM commits in concurrent mode;
-   *  this sidebar-bounce approach is the definitive fallback.
-   *
-   *  WHY THE ORIGINAL WAS BROKEN:
-   *    const sel = querySelector('selected-chat-item');
-   *    other.click();  ← `selected-chat-item` now lives in `other`!
-   *    sel.click();    ← clicks wrong element (other chat or stale ref)
-   *
-   *  FIX: store the PARENT container (custom-chat-item) BEFORE
-   *  clicking away. It doesn't change when another chat is selected.
-   * ─────────────────────────────────────────────────────────────── */
+  /* ── FORCE RELOAD ─────────────────────────────────────────────── */
   async function forceReloadCurrentChat(origContainer) {
     if (!origContainer) {
-      // No sidebar item found — wait briefly and hope React committed
       await new Promise(r => setTimeout(r, 700));
       return;
     }
-
     const allChats = [...document.querySelectorAll('[data-element-id="custom-chat-item"]')];
-    const otherChat = allChats.find(c => c !== origContainer);
-
-    if (!otherChat) {
-      // Only one chat in history — nothing to bounce via. Reload page.
+    const other    = allChats.find(c => c !== origContainer);
+    if (!other) {
+      // Only one chat — reload page to pick up IDB changes
       window.location.reload();
       return;
     }
-
-    // Navigate to a different chat (forces TM to unload current)
-    otherChat.click();
-    await new Promise(r => setTimeout(r, 500));
-
-    // Navigate BACK using the STORED parent reference.
-    // CRITICAL: do NOT re-query `selected-chat-item` here — it now
-    // belongs to otherChat. The origContainer reference is stable.
+    // Navigate to another chat (TM unloads current)
+    other.click();
+    await new Promise(r => setTimeout(r, 600));
+    // Navigate BACK via stored container reference.
+    // CRITICAL: origContainer is the custom-chat-item parent element captured
+    // before any clicks. 'selected-chat-item' would now belong to `other`.
     origContainer.click();
-    await new Promise(r => setTimeout(r, 650));
+    await new Promise(r => setTimeout(r, 750));
   }
 
   /* ── NAVIGATION ──────────────────────────────────────────────────
    *
-   *  Complete IDB-primary flow:
-   *  1. Get chatID from React fiber (only thing we need React for)
-   *  2. Store origContainer before any DOM changes
-   *  3. Apply each switch step via IDB (reads + writes IDB)
-   *  4. Force reload (sidebar bounce) — unconditional, guaranteed
-   *  5. Rebuild graph from fresh fiber state (post-reload)
-   *  6. Show success toast; user closes manually via X
+   *  Fix summary:
+   *  1. Load initial messages from React fiber ONE TIME.
+   *  2. Apply ALL switchPath steps as PURE transformations (no
+   *     async, no getChatState between steps).
+   *  3. Single dispatch of final state + single IDB write.
+   *  4. Unconditional forceReloadCurrentChat (sidebar bounce).
+   *  5. Rebuild graph from fresh post-reload fiber state.
    * ─────────────────────────────────────────────────────────────── */
   async function navigateToNode(node) {
-    // Active node → close overlay and scroll to it
     if (node.active) {
       if (graphCtx && !node.id.includes('__t')) graphCtx.lastSrcUUID = node.id;
       closeOverlay();
       return;
     }
-
     if (navigating) return;
     if (!node.switchPath?.length) return;
 
@@ -469,38 +398,43 @@
     const steps = node.switchPath.length;
 
     try {
-      // chatID is obtained from React — no messages data read
+      // Read initial state from React fiber (ONCE — no inter-step re-reads)
       const cs = getChatState();
-      if (!cs?.state?.chatID) {
-        showToast('Cannot read chat ID', 'err'); return;
-      }
-      const chatID = cs.state.chatID;
+      if (!cs?.state?.chatID) { showToast('Cannot read chat state', 'err'); return; }
 
-      // Capture original container BEFORE any clicks
       const origContainer = getOriginalChatContainer();
+      showToast(steps > 1 ? `Computing ${steps}-step switch…` : 'Switching branch…', 'warn');
 
-      // ── Step A: Apply all branch switches via IDB ─────────────
+      // ── Pure computation of all switches upfront ───────────────
+      // Each step is a synchronous array transformation.
+      // No getChatState() between steps avoids the stale-fiber issue.
+      let msgs = cs.state.messages;
       for (let i = 0; i < node.switchPath.length; i++) {
-        showToast(
-          steps > 1 ? `Applying step ${i + 1} of ${steps}…` : 'Switching branch…',
-          'warn'
-        );
         const step = node.switchPath[i];
-        await applySingleSwitch(chatID, step.sourceUUID, step.branchIdx);
+        if (steps > 1) showToast(`Step ${i + 1} / ${steps}…`, 'warn');
+        msgs = computeSingleSwitch(msgs, step.sourceUUID, step.branchIdx);
       }
 
-      if (!graphCtx) return; // overlay closed during async ops
+      if (!graphCtx) return;
 
-      // ── Step B: Force TM to reload from updated IDB (UNCONDITIONAL)
-      // This is the guaranteed DOM update. No weak verification needed.
-      showToast('Refreshing chat view…', 'warn');
+      // ── Single dispatch (updates React fiber immediately) ──────
+      if (cs.dispatch) {
+        try { cs.dispatch({ ...cs.state, messages: msgs }); }
+        catch (e) { console.warn('[TM Graph] dispatch:', e.message); }
+      }
+
+      // ── Single IDB write (for persistence + force reload) ─────
+      persistMessages(cs.state.chatID, msgs).catch(e =>
+        console.warn('[TM Graph] IDB:', e.message)
+      );
+
+      // ── Force reload: guaranteed DOM update from IDB ──────────
+      showToast('Refreshing chat…', 'warn');
       await forceReloadCurrentChat(origContainer);
 
       if (!graphCtx) return;
 
-      // ── Step C: Rebuild graph from fresh React state ───────────
-      // After force reload, React state was re-initialized from IDB
-      // and is now correct. Rebuild tree from this fresh state.
+      // ── Rebuild graph from fresh post-reload fiber state ───────
       const cs2 = getChatState();
       if (cs2?.state?.messages) {
         const newRoot = buildChain(cs2.state.messages, 0, true, [])[0];
@@ -518,8 +452,8 @@
 
       showToast(
         steps > 1
-          ? `${steps}-step switch done ✓ — close ✕ to return`
-          : 'Branch switched ✓ — close ✕ to return to chat',
+          ? `${steps}-step switch ✓ — close ✕ to return`
+          : 'Branch switched ✓ — close ✕ to return',
         'ok'
       );
 
@@ -534,7 +468,7 @@
   /* ── OPEN GRAPH ──────────────────────────────────────────────── */
   function openGraph() {
     if (overlay) { closeOverlay(); return; }
-    const cs   = getChatState();
+    const cs = getChatState();
     if (!cs) { alert('[TM Graph] No active conversation.'); return; }
     const root = buildChain(cs.state.messages, 0, true, [])[0];
     if (!root) { alert('[TM Graph] No messages found.'); return; }
@@ -545,7 +479,7 @@
     bar.innerHTML = `
       <div style="display:flex;align-items:center">
         <h2>Chat Branch Graph</h2>
-        <span class="hint">Drag · Scroll/pinch to zoom · Tap node to navigate</span>
+        <span class="hint">Drag · Scroll/pinch · Tap to navigate · ↓ = multi-step</span>
       </div>
       <button id="${EXT}-xbtn" title="Close (Esc)">✕</button>`;
     const leg = document.createElement('div'); leg.id = EXT + '-leg';
@@ -553,23 +487,23 @@
       <span><span class="${EXT}-dot" style="background:#00a884"></span>Active — tap to scroll</span>
       <span><span class="${EXT}-dot" style="background:#1f2c34;border:1px solid #3b4a54"></span>Inactive — tap to switch</span>
       <span><span class="${EXT}-dot" style="background:#f59e0b"></span>Branch point</span>
-      <span style="color:#f59e0b;font-size:9px">↓ = auto multi-step switch</span>`;
+      <span style="color:#f59e0b;font-size:9px">↓ = auto multi-step</span>`;
     const wrap   = document.createElement('div');   wrap.id = EXT + '-wrap';
     const canvas = document.createElement('canvas'); canvas.id = EXT + '-cv';
-    toastEl = document.createElement('div');          toastEl.id = EXT + '-toast';
+    toastEl = document.createElement('div');         toastEl.id = EXT + '-toast';
     wrap.appendChild(canvas); wrap.appendChild(toastEl);
     overlay.appendChild(bar); overlay.appendChild(leg); overlay.appendChild(wrap);
     document.body.appendChild(overlay);
 
-    const ac  = new AbortController(), sig = ac.signal;
-    const ro  = new ResizeObserver(() =>
+    const ac = new AbortController(), sig = ac.signal;
+    const ro = new ResizeObserver(() =>
       requestAnimationFrame(() => { graphCtx?.centre(); graphCtx?.draw(); })
     );
     ro.observe(wrap);
 
     graphCtx = {
       all, edges, bounds, ac, ro,
-      tr: { tx:0, ty:0, s:1 }, hoverId:null, lastSrcUUID:null,
+      tr:{tx:0,ty:0,s:1}, hoverId:null, lastSrcUUID:null,
       centre() {
         const W=canvas.clientWidth, H=canvas.clientHeight;
         if(!W||!H) return;
@@ -585,13 +519,11 @@
     requestAnimationFrame(() => { graphCtx.centre(); graphCtx.draw(); });
 
     bar.querySelector('#' + EXT + '-xbtn')
-      .addEventListener('click', closeOverlay, { signal: sig });
+      .addEventListener('click', closeOverlay, { signal:sig });
     window.addEventListener('keydown',
-      e => { if (e.key === 'Escape') closeOverlay(); },
-      { signal: sig }
+      e => { if(e.key==='Escape') closeOverlay(); },
+      { signal:sig }
     );
-
-    // Wheel zoom
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
       const rect=canvas.getBoundingClientRect();
@@ -600,14 +532,12 @@
       graphCtx.tr.ty=my-(my-graphCtx.tr.ty)*d;
       graphCtx.tr.s=Math.min(3.5,Math.max(0.12,graphCtx.tr.s*d));
       graphCtx.draw();
-    }, { passive:false, signal:sig });
-
-    // Mouse drag
+    }, {passive:false,signal:sig});
     let mdrag=null;
     canvas.addEventListener('mousedown', e => {
-      mdrag={sx:e.clientX-graphCtx.tr.tx, sy:e.clientY-graphCtx.tr.ty};
+      mdrag={sx:e.clientX-graphCtx.tr.tx,sy:e.clientY-graphCtx.tr.ty};
       canvas.classList.add('drag');
-    }, { signal:sig });
+    }, {signal:sig});
     window.addEventListener('mousemove', e => {
       if(!graphCtx) return;
       const rect=canvas.getBoundingClientRect();
@@ -617,44 +547,33 @@
       if(nid!==graphCtx.hoverId){ graphCtx.hoverId=nid; graphCtx.draw(); }
       canvas.style.cursor=mdrag?'grabbing':nid?(!hit.active?'pointer':'default'):'grab';
       if(mdrag){ graphCtx.tr.tx=e.clientX-mdrag.sx; graphCtx.tr.ty=e.clientY-mdrag.sy; graphCtx.draw(); }
-    }, { signal:sig });
-    window.addEventListener('mouseup', () => {
-      mdrag=null; canvas.classList.remove('drag');
-    }, { signal:sig });
-
-    // Mouse click
+    }, {signal:sig});
+    window.addEventListener('mouseup', () => { mdrag=null; canvas.classList.remove('drag'); }, {signal:sig});
     canvas.addEventListener('click', e => {
       if(mdrag) return;
       const rect=canvas.getBoundingClientRect();
       const hit=hitTest(graphCtx.all,e.clientX-rect.left,e.clientY-rect.top,graphCtx.tr);
       if(hit) navigateToNode(hit);
-    }, { signal:sig });
-
-    // Touch (Android PWA — tap in touchend, pan/pinch in touchmove)
+    }, {signal:sig});
+    // Touch (Android PWA)
     let lastTouches=null, touchStart=null, panning=false;
-    canvas.addEventListener('touchstart', e => {
+    canvas.addEventListener('touchstart', e=>{
       e.preventDefault();
       const ts=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
       lastTouches=ts; panning=false;
       if(e.touches.length===1){
-        const t=e.touches[0];
-        touchStart={x:t.clientX,y:t.clientY,time:Date.now()};
+        const t=e.touches[0]; touchStart={x:t.clientX,y:t.clientY,time:Date.now()};
         const rect=canvas.getBoundingClientRect();
         const hit=hitTest(graphCtx.all,t.clientX-rect.left,t.clientY-rect.top,graphCtx.tr);
         if((hit?.id||null)!==graphCtx.hoverId){ graphCtx.hoverId=hit?.id||null; graphCtx.draw(); }
       } else touchStart=null;
-    }, { passive:false, signal:sig });
-
-    canvas.addEventListener('touchmove', e => {
+    }, {passive:false,signal:sig});
+    canvas.addEventListener('touchmove', e=>{
       e.preventDefault();
       const ts=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
-      if(touchStart){
-        const mv=Math.hypot(ts[0].x-touchStart.x,ts[0].y-touchStart.y);
-        if(mv>8) panning=true;
-      }
+      if(touchStart){ const mv=Math.hypot(ts[0].x-touchStart.x,ts[0].y-touchStart.y); if(mv>8) panning=true; }
       if(ts.length===1&&lastTouches?.length===1){
-        graphCtx.tr.tx+=ts[0].x-lastTouches[0].x;
-        graphCtx.tr.ty+=ts[0].y-lastTouches[0].y;
+        graphCtx.tr.tx+=ts[0].x-lastTouches[0].x; graphCtx.tr.ty+=ts[0].y-lastTouches[0].y;
         const rect=canvas.getBoundingClientRect();
         graphCtx.hoverId=hitTest(graphCtx.all,ts[0].x-rect.left,ts[0].y-rect.top,graphCtx.tr)?.id||null;
         graphCtx.draw();
@@ -664,16 +583,13 @@
         if(pd>0){
           const d=cd/pd, rect=canvas.getBoundingClientRect();
           const mx=(ts[0].x+ts[1].x)/2-rect.left, my=(ts[0].y+ts[1].y)/2-rect.top;
-          graphCtx.tr.tx=mx-(mx-graphCtx.tr.tx)*d;
-          graphCtx.tr.ty=my-(my-graphCtx.tr.ty)*d;
-          graphCtx.tr.s=Math.min(3.5,Math.max(0.12,graphCtx.tr.s*d));
-          graphCtx.draw();
+          graphCtx.tr.tx=mx-(mx-graphCtx.tr.tx)*d; graphCtx.tr.ty=my-(my-graphCtx.tr.ty)*d;
+          graphCtx.tr.s=Math.min(3.5,Math.max(0.12,graphCtx.tr.s*d)); graphCtx.draw();
         }
       }
       lastTouches=ts;
-    }, { passive:false, signal:sig });
-
-    canvas.addEventListener('touchend', e => {
+    }, {passive:false,signal:sig});
+    canvas.addEventListener('touchend', e=>{
       e.preventDefault();
       if(touchStart&&!panning&&e.touches.length===0&&e.changedTouches.length===1){
         const t=e.changedTouches[0];
@@ -688,19 +604,18 @@
       touchStart=null; panning=false;
       if(e.touches.length===0){ lastTouches=null; graphCtx.hoverId=null; graphCtx.draw(); }
       else lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
-    }, { passive:false, signal:sig });
-
-    canvas.addEventListener('touchcancel', () => {
+    }, {passive:false,signal:sig});
+    canvas.addEventListener('touchcancel', ()=>{
       lastTouches=null; touchStart=null; panning=false;
       if(graphCtx){ graphCtx.hoverId=null; graphCtx.draw(); }
-    }, { passive:false, signal:sig });
+    }, {passive:false,signal:sig});
   }
 
   /* ── BUTTON INJECTION ────────────────────────────────────────── */
   const TOOLBAR = '[data-element-id="chat-input-actions"]';
   function tryInject() {
     const bar = document.querySelector(TOOLBAR);
-    if (!bar || bar.querySelector('#' + EXT + '-btn')) return;
+    if(!bar||bar.querySelector('#'+EXT+'-btn')) return;
     const btn = document.createElement('button');
     btn.id = EXT + '-btn'; btn.title = 'Chat Branch Graph';
     btn.innerHTML = `<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="4" r="2.2"/><circle cx="16" cy="4" r="2.2"/><circle cx="4" cy="16" r="2.2"/><circle cx="16" cy="16" r="2.2"/><circle cx="10" cy="10" r="2.2"/><line x1="4" y1="4" x2="10" y2="10"/><line x1="16" y1="4" x2="10" y2="10"/><line x1="10" y1="10" x2="4" y2="16"/><line x1="10" y1="10" x2="16" y2="16"/></svg>`;
@@ -711,15 +626,11 @@
   /* ── BOOTSTRAP ───────────────────────────────────────────────── */
   function init() {
     injectStyles(); tryInject();
-    let r = 10;
-    const retry = () => {
-      if (document.querySelector('#' + EXT + '-btn')) return;
-      tryInject();
-      if (--r > 0) setTimeout(retry, 650);
-    };
-    setTimeout(retry, 400);
-    new MutationObserver(tryInject).observe(document.body, { childList:true, subtree:true });
-    console.log('[TM Chat Graph] ✅ v1.4.0');
+    let r=10;
+    const retry=()=>{ if(document.querySelector('#'+EXT+'-btn'))return; tryInject(); if(--r>0)setTimeout(retry,650); };
+    setTimeout(retry,400);
+    new MutationObserver(tryInject).observe(document.body,{childList:true,subtree:true});
+    console.log('[TM Chat Graph] ✅ v1.5.0');
   }
   init();
 })();
