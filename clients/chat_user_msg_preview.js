@@ -1,21 +1,25 @@
 // ============================================================
 //  TypingMind — User Message Markdown + Math Renderer
-//  Version : 1.3.0
+//  Version : 2.0.0
 //
-//  Changelog vs 1.2.0:
-//  ✦ Critical: table horizontal scroll via wrapper div
-//  ✦ Critical: images — max-width, lazy, error fade
-//  ✦ del/s strikethrough CSS added
-//  ✦ External links → new tab (rel="noopener noreferrer")
-//  ✦ Nested blockquotes — per-level opacity cascade
-//  ✦ Task lists — checkbox style + bullet removal
-//  ✦ h4/h5/h6 individual sizing
-//  ✦ thead visual differentiation + zebra-stripe rows
-//  ✦ sup/sub, kbd, mark, abbr, dl/dt/dd CSS
-//  ✦ katex-display gets overflow-x:auto
-//  ✦ wrapper.hidden fixes Tailwind space-y-2 margin conflict
-//  ✦ margin-top:0 guard on view div
-//  ✦ Inline code uses :not(pre)>code for precision
+//  ROOT CAUSE OF v1.3.0 COMPLETE FAILURE (fixed here):
+//  ┌──────────────────────────────────────────────────────┐
+//  │  render() moved child nodes to a wrapper BEFORE      │
+//  │  calling parseFn(). If parseFn threw (KaTeX missing  │
+//  │  → "renderMathInElement is not a function"), the     │
+//  │  children were stranded in a detached node.          │
+//  │  msgEl.textContent became "" permanently.            │
+//  │  Observer re-fired → rawText empty → abort loop.    │
+//  └──────────────────────────────────────────────────────┘
+//
+//  ARCHITECTURAL CHANGES IN v2.0.0:
+//  1. parseFn is called FIRST — DOM is never touched if it throws
+//  2. Children are NEVER moved — CSS hides originals, view overlays
+//  3. KaTeX is a soft dependency — two-phase boot:
+//       Phase 1: marked.js (required) → markdown renders immediately
+//       Phase 2: KaTeX (optional) → upgrades math in background
+//  4. Removed :has() CSS — use marked's .task-list-item class instead
+//  5. A_DONE set BEFORE appendChild(view) → atomic hide+show
 //
 //  Confirmed selector: [data-element-id="user-message"]
 //  Compatible: Chromium web + Android PWA
@@ -24,9 +28,7 @@
 (() => {
   'use strict';
 
-  // ─────────────────────────────────────────────────────────
-  //  CONFIGURATION
-  // ─────────────────────────────────────────────────────────
+  // ── Configuration ─────────────────────────────────────────
   const CFG = {
     cdn: {
       marked      : 'https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js',
@@ -41,264 +43,248 @@
     },
     attr: {
       done : 'data-umr-done',
-      raw  : 'data-umr-raw',
       view : 'data-umr-view',
     },
-    // Matches the $$/$$ convention required by the system prompt
     mathDelimiters: [
       { left: '$$', right: '$$', display: true  },
       { left: '$',  right: '$',  display: false  },
     ],
   };
 
-  const { done: A_DONE, raw: A_RAW, view: A_VIEW } = CFG.attr;
+  const { done: A_DONE, view: A_VIEW } = CFG.attr;
 
-  // ─────────────────────────────────────────────────────────
-  //  STYLES
-  // ─────────────────────────────────────────────────────────
+  // Mutable parser — null until marked loads, upgraded when KaTeX loads
+  const parser = { fn: null };
+
+
+  // ── CSS ────────────────────────────────────────────────────
   function injectStyles() {
     if (document.getElementById('umr-styles')) return;
 
-    const DONE     = `[data-element-id="user-message"][${A_DONE}]`;
-    const VIEW     = `[${A_VIEW}]`;
-    const MSG_VIEW = `${DONE} > ${VIEW}`;
+    const UM   = `[data-element-id="user-message"]`;  // TM's confirmed selector
+    const DONE = `${UM}[${A_DONE}]`;                  // when we've rendered it
+    const VIEW = `[${A_VIEW}]`;                        // our injected view div
 
-    const s = document.createElement('style');
-    s.id = 'umr-styles';
+    const s    = document.createElement('style');
+    s.id       = 'umr-styles';
     s.textContent = `
 
-      /* ══ Container: state when rendered ═══════════════════ */
-
-      /* Override the whitespace-pre-wrap Tailwind class baked
-         into TM's user-message div via a higher-priority rule. */
+      /* ═══════════════════════════════════════════════════════
+         CONTAINER STATE — active while [A_DONE] is set
+         ═══════════════════════════════════════════════════════
+         Two problems to solve:
+         a) TM's whitespace-pre-wrap class would make rendered
+            HTML display literally — override with normal.
+         b) Original child ELEMENTS need hiding (display:none).
+            Original bare TEXT NODES can't be targeted by CSS
+            selectors, so we hide them via color:transparent.
+            (Layout is preserved; only colour changes.)         */
       ${DONE} {
-        white-space : normal !important;
+        white-space : normal      !important;
+        color       : transparent !important;
       }
-
-      /* Hide everything that isn't our rendered view.
-         Covers: original children restored by React during
-         reconciliation (anti-flash guard).                     */
+      /* Hide every direct element child except our view div   */
       ${DONE} > *:not(${VIEW}) {
         display : none !important;
       }
 
-      /* Neutralise Tailwind space-y-2's "> :not([hidden]) ~"
-         sibling combinator that would add margin-top.
-         The wrapper uses the HTML `hidden` attr so it is
-         already excluded; this is a belt-and-braces guard.    */
-      ${MSG_VIEW} {
-        margin-top : 0 !important;
+      /* ═══════════════════════════════════════════════════════
+         VIEW BASE
+         user-message always uses text-white (confirmed from
+         the live DOM diagnostic). Restore colour here so all
+         descendants inside the view inherit white correctly.   */
+      ${DONE} > ${VIEW} {
+        color       : white  !important;
+        font-size   : 0.9375rem;
+        line-height : 1.62;
+        white-space : normal !important;
       }
-
-
-      /* ══ View: base layout ═════════════════════════════════ */
-
+      /* Layout properties for the view itself                  */
       ${VIEW} {
-        white-space  : normal;
         word-break   : break-word;
         overflow-wrap: break-word;
-        line-height  : 1.62;
       }
       ${VIEW} > *:first-child { margin-top:    0 !important; }
       ${VIEW} > *:last-child  { margin-bottom: 0 !important; }
 
+      /* ── Paragraphs ─────────────────────────────────────── */
+      ${VIEW} p { margin: 0.4em 0; }
 
-      /* ══ Paragraphs ════════════════════════════════════════ */
-      ${VIEW} p { margin: 0.38em 0; }
-
-
-      /* ══ Headings ══════════════════════════════════════════ */
-      ${VIEW} h1, ${VIEW} h2, ${VIEW} h3,
-      ${VIEW} h4, ${VIEW} h5, ${VIEW} h6 {
+      /* ── Headings ───────────────────────────────────────── */
+      ${VIEW} h1,${VIEW} h2,${VIEW} h3,
+      ${VIEW} h4,${VIEW} h5,${VIEW} h6 {
         font-weight : 700;
         line-height : 1.25;
         margin      : 0.6em 0 0.25em;
       }
-      ${VIEW} h1 { font-size: 1.50em; }
-      ${VIEW} h2 { font-size: 1.30em; }
-      ${VIEW} h3 { font-size: 1.14em; }
-      ${VIEW} h4 { font-size: 1.02em; }
-      ${VIEW} h5 { font-size: 0.92em; }
-      ${VIEW} h6 { font-size: 0.86em; opacity: 0.82; }
+      ${VIEW} h1 { font-size: 1.50em;  }
+      ${VIEW} h2 { font-size: 1.30em;  }
+      ${VIEW} h3 { font-size: 1.13em;  }
+      ${VIEW} h4 { font-size: 1.02em;  }
+      ${VIEW} h5 { font-size: 0.92em;  }
+      ${VIEW} h6 { font-size: 0.86em;  opacity: 0.82; }
 
-
-      /* ══ Inline text formatting ════════════════════════════ */
+      /* ── Inline text formatting ─────────────────────────── */
       ${VIEW} strong, ${VIEW} b   { font-weight: 700; }
       ${VIEW} em,     ${VIEW} i   { font-style: italic; }
       ${VIEW} del,    ${VIEW} s   { text-decoration: line-through; }
       ${VIEW} u                   { text-decoration: underline; }
-      ${VIEW} sup { vertical-align: super; font-size: 0.74em; line-height: 1; }
-      ${VIEW} sub { vertical-align: sub;   font-size: 0.74em; line-height: 1; }
-
+      ${VIEW} sup { vertical-align: super; font-size: 0.75em; line-height: 1; }
+      ${VIEW} sub { vertical-align: sub;   font-size: 0.75em; line-height: 1; }
       ${VIEW} mark {
-        background    : rgba(255, 230, 0, 0.32);
-        color         : inherit;
-        padding       : 0.05em 0.22em;
-        border-radius : 2px;
+        background   : rgba(255,230,0,0.35);
+        color        : inherit;
+        padding      : 0.05em 0.22em;
+        border-radius: 2px;
       }
-      ${VIEW} abbr[title] {
-        text-decoration : underline dotted;
-        cursor          : help;
-      }
+      ${VIEW} abbr[title] { text-decoration: underline dotted; cursor: help; }
 
-
-      /* ══ Links ═════════════════════════════════════════════ */
-      /* external links get target="_blank" via postProcessDom */
-      ${VIEW} a       { text-decoration: underline; opacity: 0.90; }
+      /* ── Links ──────────────────────────────────────────── */
+      /* External links → target="_blank" via postProcessDom   */
+      ${VIEW} a       { text-decoration: underline; opacity: 0.9; }
       ${VIEW} a:hover { opacity: 1; }
 
-
-      /* ══ Code — inline ═════════════════════════════════════ */
-      /* :not(pre)>code targets only inline code, not the
-         code element that lives inside a <pre> block.         */
-      ${VIEW} :not(pre) > code, ${VIEW} kbd {
-        font-family   : ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
-        font-size     : 0.85em;
-        padding       : 0.1em 0.38em;
-        border-radius : 3px;
-        /* User bubbles = white text on blue/dark bg;
-           semi-transparent white gives a frosted-glass feel. */
-        background    : rgba(255, 255, 255, 0.18);
-        word-break    : break-all;
+      /* ── Inline code and keyboard keys ─────────────────── */
+      /* :not(pre)>code targets ONLY inline code.
+         Code inside <pre> blocks is deliberately excluded and
+         reset further below to prevent double-styling.        */
+      ${VIEW} :not(pre) > code,
+      ${VIEW} kbd {
+        font-family  : ui-monospace,'Cascadia Code','Fira Code',monospace;
+        font-size    : 0.85em;
+        padding      : 0.1em 0.38em;
+        border-radius: 3px;
+        background   : rgba(255,255,255,0.18);
+        word-break   : break-all;
       }
       ${VIEW} kbd {
-        border     : 1px solid rgba(255, 255, 255, 0.35);
-        padding    : 0.05em 0.42em;
-        box-shadow : 0 1px 0 rgba(255, 255, 255, 0.22);
+        border    : 1px solid rgba(255,255,255,0.35);
+        padding   : 0.05em 0.42em;
+        box-shadow: 0 1px 0 rgba(255,255,255,0.22);
       }
 
-
-      /* ══ Code — block ══════════════════════════════════════ */
+      /* ── Code blocks ────────────────────────────────────── */
       ${VIEW} pre {
-        margin        : 0.48em 0;
-        padding       : 0.72em 0.95em;
-        border-radius : 6px;
-        overflow-x    : auto;
+        margin       : 0.5em 0;
+        padding      : 0.72em 0.95em;
+        border-radius: 6px;
+        overflow-x   : auto;
         -webkit-overflow-scrolling: touch;
-        background    : rgba(255, 255, 255, 0.10);
-        font-size     : 0.9em;        /* governs the pre's own sizing  */
+        background   : rgba(255,255,255,0.10);
+        font-size    : 0.9em;
+        /* white-space intentionally NOT set here; <pre> uses
+           the browser UA value (pre/pre-wrap) which is correct
+           for code blocks. Descendants do not inherit the
+           normal value from our view since UA rules win.      */
       }
       ${VIEW} pre code {
-        /* Reset the inline-code overrides that would piggyback. */
-        background : none    !important;
-        padding    : 0       !important;
-        font-size  : 1em     !important;  /* now relative to pre's 0.9em  */
+        /* Reset the inline-code overrides so code blocks
+           render cleanly without double backgrounds/padding.  */
+        background : none   !important;
+        padding    : 0      !important;
+        font-size  : 1em    !important;
         word-break : normal;
       }
 
-
-      /* ══ Blockquotes — nested levels ═══════════════════════ */
+      /* ── Blockquotes (3 nesting levels) ─────────────────── */
       ${VIEW} blockquote {
-        margin       : 0.48em 0;
-        padding      : 0.08em 0 0.08em 0.78em;
-        border-left  : 3px solid rgba(255, 255, 255, 0.44);
-        opacity      : 0.90;
+        margin     : 0.48em 0;
+        padding    : 0.1em 0 0.1em 0.8em;
+        border-left: 3px solid rgba(255,255,255,0.44);
       }
       ${VIEW} blockquote blockquote {
-        /* 2nd level: slightly fainter border */
-        margin-left  : 0;
-        border-left-color : rgba(255, 255, 255, 0.28);
+        margin-left      : 0;
+        border-left-color: rgba(255,255,255,0.28);
       }
       ${VIEW} blockquote blockquote blockquote {
-        /* 3rd level: even fainter */
-        border-left-color : rgba(255, 255, 255, 0.16);
+        border-left-color: rgba(255,255,255,0.16);
       }
 
-
-      /* ══ Lists ══════════════════════════════════════════════ */
-      ${VIEW} ul, ${VIEW} ol {
-        padding-left : 1.5em;
-        margin       : 0.38em 0;
-      }
+      /* ── Lists ──────────────────────────────────────────── */
+      ${VIEW} ul, ${VIEW} ol { padding-left: 1.5em; margin: 0.38em 0; }
       ${VIEW} li             { margin: 0.18em 0; }
-      /* Tighten nested list spacing */
       ${VIEW} li > ul,
-      ${VIEW} li > ol        { margin: 0.12em 0; }
+      ${VIEW} li > ol        { margin: 0.1em 0; }
 
-      /* Task-list items — remove bullet and style checkbox */
-      ${VIEW} li:has(> input[type="checkbox"]) {
-        list-style   : none;
-        margin-left  : -1.5em;   /* un-indent the de-bulleted item */
-        padding-left : 0;
+      /* Task lists — marked.js adds class="task-list-item"
+         on each task-list <li>.  No :has() required;
+         works in all current browsers.                        */
+      ${VIEW} li.task-list-item {
+        list-style  : none;
+        margin-left : -1.5em;
+        padding-left: 0;
       }
       ${VIEW} input[type="checkbox"] {
         margin        : 0 0.42em 0.1em 0;
         vertical-align: middle;
         cursor        : default;
-        accent-color  : rgba(255, 255, 255, 0.80);
+        accent-color  : rgba(255,255,255,0.8);
       }
 
-
-      /* ══ Tables ═════════════════════════════════════════════ */
-      /* postProcessDom wraps every <table> in:
-           <div class="umr-table-wrap">...</div>
-         so overflow-x is handled on the wrapper, not the
-         table element itself (avoids display:block hacks that
-         distort td width calculations in some browsers).       */
+      /* ── Tables ─────────────────────────────────────────── */
+      /* postProcessDom wraps each <table> in:
+           <div class="umr-table-wrap">…</div>
+         The wrapper carries overflow-x:auto so the table
+         element keeps display:table — TD widths stay correct  */
       .umr-table-wrap {
-        overflow-x                : auto;
+        overflow-x : auto;
         -webkit-overflow-scrolling: touch;
-        margin                    : 0.48em 0;
-        border-radius             : 4px;
+        margin     : 0.5em 0;
+        border-radius: 4px;
       }
       ${VIEW} table {
-        border-collapse : collapse;
-        min-width       : 100%;
-        margin          : 0;          /* wrapper provides the margin  */
+        border-collapse: collapse;
+        min-width      : 100%;
+        margin         : 0;
       }
       ${VIEW} th,
       ${VIEW} td {
-        border     : 1px solid rgba(255, 255, 255, 0.26);
-        padding    : 0.30em 0.62em;
-        text-align : left;
-        /* All inline formatting (bold, code, math, links, images)
-           inside cells is handled automatically — our [VIEW] X
-           descendant selectors cascade into <td>/<th> at any
-           nesting depth without any extra rules.                */
+        border    : 1px solid rgba(255,255,255,0.26);
+        padding   : 0.3em 0.62em;
+        text-align: left;
+        /* All inline formatting (bold, italic, code, links,
+           images, math) inside cells is handled automatically
+           — our [VIEW] X descendant selectors reach any
+           nesting depth without needing extra rules.          */
       }
       ${VIEW} thead th {
-        font-weight       : 700;
-        background        : rgba(255, 255, 255, 0.09);
-        border-bottom-width: 2px;         /* accent the header row   */
+        font-weight        : 700;
+        background         : rgba(255,255,255,0.09);
+        border-bottom-width: 2px;
       }
       ${VIEW} tbody tr:nth-child(even) {
-        background : rgba(255, 255, 255, 0.04); /* subtle zebra stripe */
+        background: rgba(255,255,255,0.04);
       }
 
-
-      /* ══ Images ═════════════════════════════════════════════ */
+      /* ── Images ─────────────────────────────────────────── */
       ${VIEW} img {
-        max-width      : 100%;
-        height         : auto;
-        border-radius  : 4px;
-        display        : inline-block;
-        vertical-align : middle;
-        margin         : 0.22em 0;
-        transition     : opacity 0.2s;
+        max-width     : 100%;
+        height        : auto;
+        border-radius : 4px;
+        display       : inline-block;
+        vertical-align: middle;
+        margin        : 0.2em 0;
       }
 
-
-      /* ══ Horizontal rule ════════════════════════════════════ */
+      /* ── Horizontal rule ────────────────────────────────── */
       ${VIEW} hr {
-        border     : 0;
-        border-top : 1px solid rgba(255, 255, 255, 0.26);
-        margin     : 0.65em 0;
+        border    : 0;
+        border-top: 1px solid rgba(255,255,255,0.26);
+        margin    : 0.65em 0;
       }
 
-
-      /* ══ Definition lists ══════════════════════════════════ */
+      /* ── Definition lists ───────────────────────────────── */
       ${VIEW} dl { margin: 0.38em 0; }
       ${VIEW} dt { font-weight: 700; margin-top: 0.38em; }
       ${VIEW} dd { margin-left: 1.5em; margin-bottom: 0.2em; }
 
-
-      /* ══ KaTeX math ═════════════════════════════════════════ */
-      /* KaTeX inherits the parent's colour (text-white) and
-         font automatically. Only layout tweaks are needed.     */
+      /* ── KaTeX math ─────────────────────────────────────── */
+      /* KaTeX inherits white colour from the view container.
+         Only layout overrides are needed.                     */
       ${VIEW} .katex-display {
-        margin                    : 0.58em 0;
-        overflow-x                : auto;   /* wide equations scroll  */
-        overflow-y                : hidden;
+        margin    : 0.58em 0;
+        overflow-x: auto;
+        overflow-y: hidden;
         -webkit-overflow-scrolling: touch;
       }
       ${VIEW} .katex { font-size: 1.06em; }
@@ -307,280 +293,220 @@
   }
 
 
-  // ─────────────────────────────────────────────────────────
-  //  KATEX CSS (non-blocking link tag)
-  // ─────────────────────────────────────────────────────────
+  // ── Script / CSS loaders ───────────────────────────────────
   function injectKatexCss() {
     if (document.getElementById('umr-katex-css')) return;
-    const link  = document.createElement('link');
-    link.id     = 'umr-katex-css';
-    link.rel    = 'stylesheet';
-    link.href   = CFG.cdn.katexCss;
-    document.head.appendChild(link);
+    const l = document.createElement('link');
+    l.id    = 'umr-katex-css';
+    l.rel   = 'stylesheet';
+    l.href  = CFG.cdn.katexCss;
+    document.head.appendChild(l);
   }
 
-
-  // ─────────────────────────────────────────────────────────
-  //  SCRIPT LOADER
-  //  Reuses the library if TypingMind already loaded it
-  //  (e.g. KaTeX for AI-response math rendering).
-  // ─────────────────────────────────────────────────────────
   function loadScript(src, globalKey) {
-    return new Promise((resolve, reject) => {
-      if (globalKey && window[globalKey]) { resolve(window[globalKey]); return; }
-      const s  = document.createElement('script');
-      s.src    = src;
-      s.onload = () => resolve(globalKey ? window[globalKey] : true);
-      s.onerror= () => reject(new Error(`[TM-UserMD] Failed to load: ${src}`));
+    return new Promise((res, rej) => {
+      // Reuse if TM already loaded this library (e.g. KaTeX for AI responses)
+      if (globalKey && window[globalKey]) { res(window[globalKey]); return; }
+      const s   = document.createElement('script');
+      s.src     = src;
+      s.onload  = () => res(globalKey ? window[globalKey] : true);
+      s.onerror = () => rej(new Error('[TM-UserMD] Failed: ' + src));
       document.head.appendChild(s);
     });
   }
 
 
-  // ─────────────────────────────────────────────────────────
-  //  LIBRARY LOADING
-  //  marked.js and KaTeX load in parallel; auto-render
-  //  waits on KaTeX JS (hard dependency).
-  // ─────────────────────────────────────────────────────────
-  async function loadLibraries() {
-    injectKatexCss();
-
-    const [marked] = await Promise.all([
-      loadScript(CFG.cdn.marked,      'marked'),
-      loadScript(CFG.cdn.katexJs,     'katex')
-        .then(() => loadScript(CFG.cdn.katexRender, 'renderMathInElement')),
-    ]);
-
-    marked.use({ breaks: true, gfm: true });
-
-    return {
-      marked,
-      renderMathInElement: window.renderMathInElement,
-    };
-  }
-
-
-  // ─────────────────────────────────────────────────────────
-  //  DOM POST-PROCESSOR
-  //  Runs on the temp node after marked.parse(), before KaTeX.
-  //  Handles everything that requires DOM traversal rather
-  //  than CSS alone.
-  // ─────────────────────────────────────────────────────────
+  // ── DOM post-processor ─────────────────────────────────────
+  // Runs on a DETACHED temp node (never touches the live DOM).
+  // Called inside parseFn after marked.parse().
   function postProcessDom(root) {
-
-    // ── 1. Wrap tables in a scrollable container ───────────
-    // Using a wrapper div keeps <table> as display:table so
-    // browser td-width calculations remain correct, while
-    // the wrapper provides overflow-x: auto via CSS.
-    root.querySelectorAll('table').forEach(table => {
-      const wrap = document.createElement('div');
+    // 1. Wrap every <table> in a horizontally scrollable div.
+    //    Keep display:table so browser TD-width calc stays correct.
+    root.querySelectorAll('table').forEach(tbl => {
+      const wrap     = document.createElement('div');
       wrap.className = 'umr-table-wrap';
-      table.parentNode.insertBefore(wrap, table);
-      wrap.appendChild(table);
+      tbl.parentNode.insertBefore(wrap, tbl);
+      wrap.appendChild(tbl);
     });
 
-    // ── 2. External links → open in new tab safely ─────────
+    // 2. External links → open in new tab safely
     root.querySelectorAll('a[href]').forEach(a => {
-      const href = a.getAttribute('href') || '';
-      if (/^https?:\/\//i.test(href)) {
+      if (/^https?:\/\//i.test(a.getAttribute('href') || '')) {
         a.setAttribute('target', '_blank');
         a.setAttribute('rel',    'noopener noreferrer');
       }
     });
 
-    // ── 3. Images → responsive + lazy loading ──────────────
-    // The onerror attribute survives innerHTML serialisation
-    // (unlike addEventListener). It fades broken images to
-    // 30% opacity instead of showing the browser's broken-
-    // image icon.
-    root.querySelectorAll('img').forEach(img => {
-      img.setAttribute('loading', 'lazy');
-      img.setAttribute('onerror', "this.style.opacity='0.3'");
-    });
+    // 3. Images → lazy loading
+    //    Error fade is handled via addEventListener in render()
+    //    (not onerror attribute, which some CSPs block as unsafe-inline)
+    root.querySelectorAll('img').forEach(img =>
+      img.setAttribute('loading', 'lazy')
+    );
   }
 
 
-  // ─────────────────────────────────────────────────────────
-  //  PARSE FUNCTION
-  //  Pipeline (all on a detached temp node, never touching
-  //  the live DOM until the final innerHTML is returned):
-  //
-  //  rawText
-  //    → marked.parse()           markdown → HTML
-  //    → postProcessDom()         tables/links/images
-  //    → renderMathInElement()    $$/$$ → KaTeX spans
-  //    → .innerHTML               final HTML string
-  // ─────────────────────────────────────────────────────────
-  function makeParser(marked, renderMathInElement) {
-    return function parse(rawText) {
-      const tmp = document.createElement('div');
-      tmp.innerHTML = marked.parse(rawText);
-
-      postProcessDom(tmp);
-
-      // KaTeX auto-render natively skips <code> and <pre>
-      // content, so math delimiters inside code blocks are
-      // left as literal text — correct behaviour.
-      renderMathInElement(tmp, {
-        delimiters   : CFG.mathDelimiters,
-        throwOnError : false,
-      });
-
-      return tmp.innerHTML;
-    };
-  }
-
-
-  // ─────────────────────────────────────────────────────────
-  //  EDIT-MODE DETECTION
-  //  From the diagnostic: edit-message-button is a sibling
-  //  of user-message inside response-block, not a child.
-  //  TM likely mounts the edit textarea at the response-block
-  //  level. Checking both locations for forwards-compat.
-  // ─────────────────────────────────────────────────────────
+  // ── Edit mode detection ────────────────────────────────────
+  // From the diagnostic: edit buttons are siblings of user-message
+  // inside response-block, so TM likely mounts the textarea there.
+  // We check both locations for forward-compatibility.
   function isEditing(msgEl) {
     if (msgEl.querySelector('textarea')) return true;
     const rb = msgEl.closest(CFG.sel.responseBlk);
-    return rb ? rb.querySelector('textarea') !== null : false;
+    return rb ? !!rb.querySelector('textarea') : false;
   }
 
 
-  // ─────────────────────────────────────────────────────────
-  //  RENDER
-  // ─────────────────────────────────────────────────────────
-  function render(msgEl, parseFn) {
+  // ── Render ─────────────────────────────────────────────────
+  function render(msgEl) {
+    if (!parser.fn) return;                              // marked not loaded yet
     if (isEditing(msgEl)) { unrender(msgEl); return; }
 
-    // View missing despite done-flag = React reconciliation
-    // removed our injected children. Reset and re-render.
     if (msgEl.hasAttribute(A_DONE)) {
-      if (!msgEl.querySelector(`[${A_VIEW}]`)) {
-        msgEl.removeAttribute(A_DONE);
-      } else {
-        return; // correctly rendered, nothing to do
-      }
+      // View exists → already correctly rendered
+      if (msgEl.querySelector('[' + A_VIEW + ']')) return;
+      // View missing → React reconciliation removed our injection → re-render
+      msgEl.removeAttribute(A_DONE);
     }
 
     const rawText = msgEl.textContent.trim();
     if (!rawText) return;
 
-    // Move ALL existing child nodes (including raw text nodes
-    // that aren't wrapped in elements) into a hidden wrapper.
-    // Using the HTML `hidden` attribute (not style="display:none")
-    // so Tailwind's space-y-2 "> :not([hidden]) ~" combinator
-    // correctly excludes this wrapper from its margin-top rule.
-    const wrapper = document.createElement('span');
-    wrapper.setAttribute(A_RAW, '1');
-    wrapper.hidden = true;
-    Array.from(msgEl.childNodes).forEach(n => wrapper.appendChild(n));
+    // ── PARSE FIRST — before any DOM mutation ──────────────
+    // v1.3.0 was broken here: DOM was mutated (children moved
+    // to wrapper) BEFORE parseFn was called. If parseFn threw,
+    // the children were stranded in a detached span, making the
+    // message permanently empty. This ordering prevents that.
+    let html;
+    try {
+      html = parser.fn(rawText);
+    } catch (err) {
+      console.warn('[TM-UserMD] Parse error (DOM untouched):', err.message);
+      return;                                            // DOM is unchanged
+    }
 
-    // Build the rendered view
+    // ── Build the view div ───────────────────────────────────
     const view = document.createElement('div');
     view.setAttribute(A_VIEW, '1');
-    view.innerHTML = parseFn(rawText);
+    view.innerHTML = html;
 
-    // Attach error listeners to images now, while they are
-    // DOM nodes (before innerHTML-serialisation would lose them).
-    // These fire if the image URL is broken after insertion.
-    view.querySelectorAll('img').forEach(img => {
-      img.addEventListener('error', () => {
-        img.style.opacity = '0.3';
-      }, { once: true });
-    });
+    // img error handlers: these survive DOM insertion but NOT
+    // innerHTML serialisation. CSP-safe alternative to onerror=""
+    view.querySelectorAll('img').forEach(img =>
+      img.addEventListener('error', () => { img.style.opacity = '0.3'; }, { once: true })
+    );
 
-    msgEl.appendChild(wrapper);
-    msgEl.appendChild(view);
+    // ── Inject atomically ───────────────────────────────────
+    // Set A_DONE *before* appendChild so both operations land
+    // in the same browser rendering frame (JS is synchronous):
+    //   setAttribute → CSS fires → original children hidden via
+    //                  color:transparent + display:none
+    //   appendChild  → view becomes the sole visible child
+    // The browser only paints once, after both lines complete.
     msgEl.setAttribute(A_DONE, '1');
+    msgEl.appendChild(view);
   }
 
 
-  // ─────────────────────────────────────────────────────────
-  //  UNRENDER  (Edit mode: restore raw text)
-  // ─────────────────────────────────────────────────────────
+  // ── Unrender ───────────────────────────────────────────────
   function unrender(msgEl) {
     if (!msgEl.hasAttribute(A_DONE)) return;
-
-    const wrapper = msgEl.querySelector(`[${A_RAW}]`);
-    const view    = msgEl.querySelector(`[${A_VIEW}]`);
-
-    if (wrapper) {
-      // Move original child nodes back in their original order
-      Array.from(wrapper.childNodes).forEach(n =>
-        msgEl.insertBefore(n, wrapper)
-      );
-      wrapper.remove();
-    }
+    const view = msgEl.querySelector('[' + A_VIEW + ']');
     if (view) view.remove();
-
-    // Removing A_DONE also deactivates all CSS overrides;
-    // whitespace-pre-wrap on the parent class becomes active
-    // again automatically.
     msgEl.removeAttribute(A_DONE);
+    // Removing A_DONE instantly deactivates every CSS override:
+    // • color:transparent gone → TM's text-white restores white text
+    // • white-space:normal gone → TM's whitespace-pre-wrap restores
+    // • display:none on siblings gone → original children visible
+    // Nothing was ever moved, so there is nothing to restore.
   }
 
 
-  // ─────────────────────────────────────────────────────────
-  //  PROCESS  (all user messages in the chat area)
-  // ─────────────────────────────────────────────────────────
-  function processAll(chatArea, parseFn) {
-    chatArea
-      .querySelectorAll(CFG.sel.userMsg)
-      .forEach(msg => render(msg, parseFn));
+  // ── Process all / observe / attach ────────────────────────
+  function processAll(chatArea) {
+    chatArea.querySelectorAll(CFG.sel.userMsg).forEach(render);
   }
 
-
-  // ─────────────────────────────────────────────────────────
-  //  OBSERVER  (rAF-debounced MutationObserver)
-  // ─────────────────────────────────────────────────────────
   const _observed = new WeakSet();
 
-  function observe(chatArea, parseFn) {
+  function observe(chatArea) {
     if (_observed.has(chatArea)) return;
     _observed.add(chatArea);
-
     let rafId = null;
     new MutationObserver(() => {
       if (rafId) cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => {
-        rafId = null;
-        processAll(chatArea, parseFn);
-      });
+      rafId = requestAnimationFrame(() => { rafId = null; processAll(chatArea); });
     }).observe(chatArea, { childList: true, subtree: true });
   }
 
+  function attach() {
+    const ca = document.querySelector(CFG.sel.chatArea);
+    if (!ca) return;
+    processAll(ca);
+    observe(ca);
+  }
 
-  // ─────────────────────────────────────────────────────────
-  //  ATTACH  (handles SPA navigation + PWA foreground resume)
-  // ─────────────────────────────────────────────────────────
-  function attach(parseFn) {
-    const chatArea = document.querySelector(CFG.sel.chatArea);
-    if (!chatArea) return;
-    processAll(chatArea, parseFn);
-    observe(chatArea, parseFn);
+  // Force re-render all already-rendered messages
+  // (called after KaTeX loads to add math to existing renders)
+  function reRenderAll() {
+    document.querySelectorAll(`${CFG.sel.userMsg}[${A_DONE}]`)
+      .forEach(msg => { unrender(msg); render(msg); });
   }
 
 
-  // ─────────────────────────────────────────────────────────
-  //  BOOTSTRAP
-  // ─────────────────────────────────────────────────────────
+  // ── Bootstrap — two-phase ──────────────────────────────────
   async function boot() {
     injectStyles();
 
-    let libs;
+    // ─ Phase 1: marked.js (REQUIRED) ──────────────────────
+    // Markdown renders as soon as this loads.
+    // Extension is fully functional at this point.
+    let marked;
     try {
-      libs = await loadLibraries();
-    } catch (err) {
-      console.error('[TM-UserMD]', err.message);
+      marked = await loadScript(CFG.cdn.marked, 'marked');
+      marked.use({ breaks: true, gfm: true });
+    } catch (e) {
+      console.error('[TM-UserMD] marked.js load failed —', e.message);
       return;
     }
 
-    const parseFn = makeParser(libs.marked, libs.renderMathInElement);
+    parser.fn = text => {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = marked.parse(text);
+      postProcessDom(tmp);
+      return tmp.innerHTML;
+    };
 
-    attach(parseFn);
-    new MutationObserver(() => attach(parseFn))
-      .observe(document.body, { childList: true });
+    attach();
+    new MutationObserver(() => attach()).observe(document.body, { childList: true });
+    console.info('[TM-UserMD] ✅ v2.0 — Markdown ON');
 
-    console.info('[TM-UserMD] ✅ v1.3.0 active — Markdown + Math + full element support');
+    // ─ Phase 2: KaTeX (OPTIONAL, loads in background) ─────
+    // If this phase fails for any reason (CDN unavailable,
+    // network blocked, etc.) the extension continues working
+    // with pure markdown — it does NOT abort like v1.3.0 did.
+    injectKatexCss();
+    try {
+      await loadScript(CFG.cdn.katexJs,     'katex');
+      await loadScript(CFG.cdn.katexRender, 'renderMathInElement');
+
+      const rme = window.renderMathInElement;
+
+      // Upgrade to markdown + math
+      parser.fn = text => {
+        const tmp = document.createElement('div');
+        tmp.innerHTML = marked.parse(text);
+        postProcessDom(tmp);
+        // auto-render natively skips <code>/<pre> content ✓
+        rme(tmp, { delimiters: CFG.mathDelimiters, throwOnError: false });
+        return tmp.innerHTML;
+      };
+
+      reRenderAll();   // upgrade already-rendered messages
+      console.info('[TM-UserMD] ✅ v2.0 — Math (KaTeX) ON');
+    } catch (e) {
+      console.warn('[TM-UserMD] KaTeX not loaded — math disabled:', e.message);
+    }
   }
 
   boot();
