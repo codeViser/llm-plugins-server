@@ -1,74 +1,61 @@
 // ================================================================
-//  TypingMind — Chat Branch Graph  v2.1.0
+//  TypingMind — Chat Branch Graph  v2.1.1
 //
-//  Fix vs v2.0.0:
-//  SCROLL RELIABILITY — all scroll calls now unconditional.
+//  Fix vs v2.1.0:
 //
-//  Root cause: scrollIntoView(behavior:'smooth') silently bails
-//  when the element is in the viewport (even partially) AND can
-//  be ignored entirely by Android WebView. Both scenarios produced
-//  zero visible movement while the code appeared to "succeed."
+//  BUG: getChatScroller() returned chat-space-middle-part using
+//  `scrollHeight > clientHeight` WITHOUT checking overflow-y.
+//  That condition is true on any element with overflowing content,
+//  including elements with overflow:visible or overflow:hidden.
+//  Setting .scrollTop on those elements is a silent no-op.
+//  The function returned the wrong container — scrollToMessage
+//  executed without error and produced zero visual movement.
+//  Failure was consistent across all platforms (not mobile-only).
 //
-//  New mechanism (three functions):
+//  FIX: getChatScroller() removed. scrollToMessage now walks up
+//  the DOM from the target block itself, testing BOTH overflowY
+//  ('auto'|'scroll'|'overlay') AND scrollHeight > clientHeight.
+//  This is guaranteed to find the correct container since it
+//  traverses the exact ancestor chain of the element we scroll to.
 //
-//  getChatScroller()
-//    Finds chat-space-middle-part (TM's inner scroll container).
-//    Direct scrollTop manipulation on this element avoids both
-//    the window-vs-container ambiguity on Android and the
-//    "already visible" bailout of scrollIntoView.
+//  ADDITION: Enter key confirms the selected node:
+//  - Active node previewed → Enter → close + scroll (same as
+//    clicking "Go to Message")
+//  - Inactive node previewed → Enter → no action (Apply must be
+//    a deliberate click to prevent accidental state changes)
 //
-//  scrollToMessage(uuid) → boolean
-//    Single-shot, unconditional scroll to centre.
-//    Returns true if element found + scroll fired, false if DOM
-//    element not present yet (caller retries).
-//    Formula: scroller.scrollTop += (block offset from scroller
-//    top) − (scroller.clientHeight / 2) + (block.height / 2)
-//
-//  scrollAfterClose(uuid)
-//    For "Go to Message" (active node, no reload).
-//    Fires at t=0, t=400, t=1000ms.
-//    t=0: immediate (element in DOM).
-//    t=400: after overlay close + TM's CSS transitions.
-//    t=1000: win against TM's own scroll-to-bottom on focus.
-//
-//  scrollAfterReload(uuid)
-//    For post-Apply-Changes reload path.
-//    Polls every 400ms (up to 30× = 12s) until element appears.
-//    On first success, re-fires at +1200ms and +2800ms to
-//    win against TM's scroll-to-bottom after full hydration.
-//
-//  All other behaviour is identical to v2.0.0.
+//  All other behaviour is identical to v2.1.0.
 // ================================================================
 (() => {
   'use strict';
   const EXT        = 'tmChatGraph';
   const SCROLL_KEY = 'tmg_scroll_uuid';
 
-  /* ── SCROLL: find TM's chat container ───────────────────────── */
-  function getChatScroller() {
-    const ca = document.querySelector('[data-element-id="chat-space-middle-part"]');
-    if (!ca) return null;
-    // Most common: chatArea itself is the overflow-scroll container
-    if (ca.scrollHeight > ca.clientHeight) return ca;
-    // Some TM versions nest the actual scroller one level down
-    for (const child of ca.children) {
-      const cs = window.getComputedStyle(child);
-      if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
-          child.scrollHeight > child.clientHeight) return child;
-    }
-    return ca;
+  /* ── SCROLL AFTER RELOAD ─────────────────────────────────────── */
+  function checkScrollAfterReload() {
+    const uuid = sessionStorage.getItem(SCROLL_KEY);
+    if (!uuid) return;
+    sessionStorage.removeItem(SCROLL_KEY);
+    scrollAfterReload(uuid);
   }
 
   /* ── SCROLL: single unconditional attempt ────────────────────── */
   /**
-   * Scroll to message UUID.
+   * Scroll TM's chat so the target message is centred.
    *
-   * Uses direct scrollTop assignment — NOT scrollIntoView.
-   * scrollIntoView silently aborts when the element is "already
-   * visible," even if it's at the bottom edge or off the desired
-   * reading position. scrollTop assignment is unconditional.
+   * Finds the scroll container by walking up the DOM from the
+   * target block — the only method guaranteed to find the correct
+   * container regardless of TM's inner DOM structure.
    *
-   * @returns {boolean} true if element found + scroll fired
+   * Tests BOTH overflowY ('auto'|'scroll'|'overlay') AND
+   * scrollHeight > clientHeight. The v2.1.0 getChatScroller()
+   * only tested dimensions and could return a non-scrollable
+   * element, making scrollTop assignment a silent no-op.
+   *
+   * Uses direct scrollTop assignment — never scrollIntoView,
+   * which silently skips elements it considers "already visible."
+   *
+   * @returns {boolean} true if element found + scroll executed
    */
   function scrollToMessage(uuid) {
     if (!uuid || uuid.includes('__t')) return false;
@@ -76,76 +63,65 @@
     const tsBtn = document.getElementById(`message-timestamp-${uuid}`);
     if (!tsBtn) return false;
 
-    const block   = tsBtn.closest('[data-element-id="response-block"]') || tsBtn.parentElement;
+    const block = tsBtn.closest('[data-element-id="response-block"]') || tsBtn.parentElement;
     if (!block) return false;
 
-    const scroller = getChatScroller();
+    // Walk up from the target block to find its true scroll container.
+    // Checking overflow-y style (not just dimensions) is critical:
+    // scrollHeight > clientHeight alone is true even on overflow:hidden elements.
+    let scroller = null;
+    let el = block.parentElement;
+    while (el && el !== document.documentElement) {
+      const oy = window.getComputedStyle(el).overflowY;
+      if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') &&
+           el.scrollHeight > el.clientHeight + 1) {
+        scroller = el;
+        break;
+      }
+      el = el.parentElement;
+    }
 
     if (scroller) {
-      // getBoundingClientRect gives viewport-relative coords.
-      // delta = distance to move scroller so block is centred.
-      const sr  = scroller.getBoundingClientRect();
-      const br  = block.getBoundingClientRect();
-      const delta = (br.top - sr.top)          // block's current offset from scroller top
-                  - scroller.clientHeight / 2  // subtract half the visible height
-                  + br.height / 2;             // add half the block height (for centering)
-
-      const newTop = scroller.scrollTop + delta;
-      // Clamp: don't scroll past the top or bottom
-      scroller.scrollTop = Math.max(0, Math.min(newTop, scroller.scrollHeight - scroller.clientHeight));
+      // Delta formula: amount to shift scrollTop so block is vertically centred
+      const sr     = scroller.getBoundingClientRect();
+      const br     = block.getBoundingClientRect();
+      const target = scroller.scrollTop
+                   + (br.top  - sr.top)          // block's current offset from scroller top
+                   - scroller.clientHeight / 2   // subtract half the visible area
+                   + br.height / 2;              // add half the block (centre it)
+      scroller.scrollTop = Math.max(0, Math.min(target, scroller.scrollHeight - scroller.clientHeight));
     } else {
-      // Fallback: no scroller found — use instant scrollIntoView
-      // 'instant' (not 'smooth') to avoid the async-ignore issue on mobile
-      block.scrollIntoView({ behavior: 'instant', block: 'center' });
+      // No scrollable ancestor found — window-level fallback
+      const br = block.getBoundingClientRect();
+      window.scrollTo({ top: window.pageYOffset + br.top - window.innerHeight / 2 + br.height / 2 });
     }
 
     return true;
   }
 
-  /* ── SCROLL: for active-node "Go to Message" (no reload) ─────── */
-  /**
-   * Fire scrollToMessage at three time points after overlay close:
-   *   t=0    element is in DOM, scroll immediately
-   *   t=400  after overlay close animation and TM's CSS transitions
-   *   t=1000 win against TM's "scroll to bottom on focus" behaviour
-   */
+  /* ── SCROLL: after overlay close (active node, no reload) ───── */
   function scrollAfterClose(uuid) {
     if (!uuid || uuid.includes('__t')) return;
+    // t=0:    element in DOM, overlay just removed
+    // t=400:  after fade animations and TM's own focus-scroll
+    // t=1000: belt-and-suspenders, wins any late TM scroll sequence
     [0, 400, 1000].forEach(d => setTimeout(() => scrollToMessage(uuid), d));
   }
 
-  /* ── SCROLL: for post-reload (Apply Changes path) ────────────── */
-  /**
-   * Poll until the target element appears in the DOM, then scroll.
-   * Re-fires at +1200ms and +2800ms after first success to win
-   * against TM's own scroll-to-bottom after full hydration.
-   *
-   * Timing: 1500ms initial wait → up to 30 × 400ms retries = ~13s max.
-   * Covers even the slowest Android PWA cold-start render times.
-   */
+  /* ── SCROLL: after Apply Changes + page reload ───────────────── */
   function scrollAfterReload(uuid) {
     if (!uuid || uuid.includes('__t')) return;
     let attempts = 0;
-
     function tryOnce() {
       if (scrollToMessage(uuid)) {
-        // Scroll succeeded. Re-fire to outlast TM's own scroll sequences.
+        // Re-fire to outlast TM's scroll-to-bottom after full hydration
         setTimeout(() => scrollToMessage(uuid), 1200);
         setTimeout(() => scrollToMessage(uuid), 2800);
         return;
       }
-      // Element not in DOM yet — TM still rendering
       if (++attempts < 30) setTimeout(tryOnce, 400);
     }
-    setTimeout(tryOnce, 1500); // initial wait for TM to finish first render
-  }
-
-  /* ── SCROLL AFTER RELOAD: called at init ─────────────────────── */
-  function checkScrollAfterReload() {
-    const uuid = sessionStorage.getItem(SCROLL_KEY);
-    if (!uuid) return;
-    sessionStorage.removeItem(SCROLL_KEY);
-    scrollAfterReload(uuid);
+    setTimeout(tryOnce, 1500);
   }
 
   /* ── STYLES ─────────────────────────────────────────────────── */
@@ -196,16 +172,14 @@
       #${EXT}-panel.open { width:min(340px,44vw); }
       .${EXT}-phead {
         display:flex;align-items:center;justify-content:space-between;
-        padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.08);
-        flex-shrink:0;gap:8px;
+        padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0;gap:8px;
       }
       .${EXT}-pbody {
         flex:1;overflow-y:auto;padding:12px;font-size:13px;line-height:1.65;
         color:#e9edef;-webkit-overflow-scrolling:touch;min-height:0;
       }
-      .${EXT}-pbody p   { margin:.3em 0; }
-      .${EXT}-pbody h1,.${EXT}-pbody h2,.${EXT}-pbody h3
-        { font-weight:700;margin:.5em 0 .2em; }
+      .${EXT}-pbody p  { margin:.3em 0; }
+      .${EXT}-pbody h1,.${EXT}-pbody h2,.${EXT}-pbody h3 { font-weight:700;margin:.5em 0 .2em; }
       .${EXT}-pbody h1{font-size:1.35em}.${EXT}-pbody h2{font-size:1.18em}.${EXT}-pbody h3{font-size:1.05em}
       .${EXT}-pbody strong{font-weight:700}.${EXT}-pbody em{font-style:italic}
       .${EXT}-pbody code { background:rgba(255,255,255,.13);padding:.1em .32em;border-radius:3px;font-size:.88em; }
@@ -389,7 +363,7 @@
     placeNode(root, colsPx(treeCols(root)) / 2 + 60, 60, all, edges);
     let minX = Infinity, maxX = -Infinity, maxY = -Infinity;
     all.forEach(n => { minX=Math.min(minX,n.x); maxX=Math.max(maxX,n.x+n.w); maxY=Math.max(maxY,n.y+n.h); });
-    return { all, edges, bounds:{minX, maxX, maxY} };
+    return { all, edges, bounds:{ minX, maxX, maxY } };
   }
 
   /* ── CANVAS RENDERER ─────────────────────────────────────────── */
@@ -464,7 +438,6 @@
     graphCtx?.ac?.abort();
     overlay.remove(); overlay=null; toastEl=null; graphCtx=null;
     clearTimeout(toastTmr);
-    // Zero side effects: no state changes, no scrolling, no events
   }
 
   /* ── TOAST ───────────────────────────────────────────────────── */
@@ -493,11 +466,11 @@
         <span style="width:8px;height:8px;border-radius:50%;background:${dotColor};flex-shrink:0"></span>
         <span style="font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${roleText}</span>
       </div>
-      <button class="pclose-btn" title="Close preview" style="background:none;border:none;cursor:pointer;
+      <button class="pclose-btn" title="Close preview (Esc)" style="background:none;border:none;cursor:pointer;
         color:#8696a0;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;flex-shrink:0">✕</button>`;
     phead.querySelector('.pclose-btn').onclick=()=>closePreview(panelEl);
 
-    const pathHint=isActive?'Currently visible in chat'
+    const pathHint=isActive?'Active — press Enter or click below to scroll to this message'
       :(steps===1?'1 branch switch to activate':`${steps} branch switches to activate`);
     panelEl.querySelector('.pbody').innerHTML=`
       <div class="${EXT}-pinfobadge">${pathHint}</div>${renderForPreview(node.rawContent)}`;
@@ -513,8 +486,6 @@
         const uuid=node.id.includes('__t')?null:node.id;
         closePreview(panelEl);
         closeOverlay();
-        // Fixed: use scrollAfterClose — fires at t=0, t=400, t=1000
-        // to prevent TM's own scroll-to-focus from overwriting ours
         if (uuid) scrollAfterClose(uuid);
       };
       pfoot.appendChild(goBtn);
@@ -597,7 +568,7 @@
       <span><span class="${EXT}-dot" style="background:#00a884"></span>Active</span>
       <span><span class="${EXT}-dot" style="background:#1c2b33;border:1px solid #263742"></span>Inactive</span>
       <span><span class="${EXT}-dot" style="background:#f59e0b"></span>Branch point</span>
-      <span><span class="${EXT}-dot" style="background:#3b82f6"></span>Preview selected</span>`;
+      <span><span class="${EXT}-dot" style="background:#3b82f6"></span>Preview selected · Enter to confirm</span>`;
     const main=document.createElement('div'); main.id=EXT+'-main';
     const wrap=document.createElement('div'); wrap.id=EXT+'-wrap';
     const canvas=document.createElement('canvas'); canvas.id=EXT+'-cv';
@@ -633,12 +604,31 @@
     requestAnimationFrame(()=>{ graphCtx.centre(); graphCtx.draw(); });
 
     bar.querySelector('#'+EXT+'-xbtn').addEventListener('click',closeOverlay,{signal:sig});
-    window.addEventListener('keydown',e=>{
-      if(e.key!=='Escape') return;
-      if(panel.classList.contains('open')) closePreview(panel); else closeOverlay();
-    },{signal:sig});
 
-    canvas.addEventListener('wheel',e=>{
+    /* ── Keyboard handler ──────────────────────────────────────────
+     *  Escape: close preview if open, else close overlay.
+     *  Enter:  confirm the currently previewed node.
+     *    - Active node → close overlay + scroll to it
+     *    - Inactive node → no action (Apply must be an explicit click
+     *      to prevent accidental branch switches via keyboard)
+     * ─────────────────────────────────────────────────────────── */
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape') {
+        if (panel.classList.contains('open')) closePreview(panel);
+        else closeOverlay();
+      } else if (e.key === 'Enter' && graphCtx?.selectedId) {
+        const node = graphCtx.all.find(n => n.id === graphCtx.selectedId);
+        if (node?.active) {
+          const uuid = node.id.includes('__t') ? null : node.id;
+          closePreview(panel);
+          closeOverlay();
+          if (uuid) scrollAfterClose(uuid);
+        }
+        // Inactive: Enter does nothing — Apply Changes must be deliberate
+      }
+    }, { signal: sig });
+
+    canvas.addEventListener('wheel', e=>{
       e.preventDefault();
       const rect=canvas.getBoundingClientRect();
       const mx=e.clientX-rect.left, my=e.clientY-rect.top, d=e.deltaY<0?1.09:0.92;
@@ -742,14 +732,14 @@
 
   /* ── BOOTSTRAP ───────────────────────────────────────────────── */
   function init() {
-    checkScrollAfterReload(); // FIRST — reads sessionStorage before any other work
+    checkScrollAfterReload();
     injectStyles();
     tryInject();
     let r=10;
     const retry=()=>{ if(document.querySelector('#'+EXT+'-btn'))return; tryInject(); if(--r>0)setTimeout(retry,650); };
     setTimeout(retry,400);
     new MutationObserver(tryInject).observe(document.body,{childList:true,subtree:true});
-    console.log('[TM Chat Graph] ✅ v2.1.0');
+    console.log('[TM Chat Graph] ✅ v2.1.1');
   }
   init();
 })();
