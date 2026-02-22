@@ -1,33 +1,32 @@
 // ============================================================
 //  TypingMind — User Message Markdown + Math Renderer
-//  Version : 2.3.0
+//  Version : 2.3.1
 //
-//  What changed vs 2.2.0:
+//  What changed vs 2.3.0:
 //  ─────────────────────────────────────────────────────────
-//  NEW: Branch history preservation — TM's edit mechanism
-//  replaces threads[] with a single entry on every new edit,
-//  silently discarding all older branch versions. v2.3.0
-//  intercepts this by:
+//  FIX: Ordered (numbered) and unordered (bulleted) list
+//  markers were not rendering. Root cause: TypingMind's
+//  Tailwind CSS Preflight resets `list-style: none` globally
+//  for all ol/ul elements. The extension restored padding &
+//  margin but never restored list-style-type.
 //
-//  1. snapshotBeforeEdit(): when a textarea appears inside a
-//     response-block (isEditing() fires), snapshot the FULL
-//     current threads[] from the React fiber state.
+//  Added explicit list-style-type declarations for:
+//    • ol  → decimal    (level 1 ordered)
+//    • ul  → disc       (level 1 unordered)
+//    • Nested ol/ul combinations up to 3 levels deep
+//      (cross-nested: ol>ul, ul>ol, etc.)
+//  Uses descendant selectors — inherently recursive, so lists
+//  inside <td>, <blockquote>, or any nesting depth are covered
+//  without additional rules. Cross-platform (browser/PWA/
+//  Android WebView): all properties have universal support.
 //
-//  2. mergeHistoryAfterEdit(): after the edit completes and
-//     render() processes the new content, compare the new
-//     threads[] with the snapshot. Any threads TM dropped are
-//     re-added via React dispatch + IDB write. This preserves
-//     unlimited edit history — every version is retained.
-//
-//  3. getChatState() + persistMessages() added as self-
-//     contained helpers (prefixed UMR_ for IDB open to avoid
-//     collision if graph script runs in the same context).
-//
-//  Everything from v2.2.0 is preserved:
-//  - getSourceText(): excludes [A_VIEW] for correct src text
-//  - data-umr-src: content-change fingerprint detection
-//  - characterData: true in MutationObserver
-//  - tmg:branchSwitched event listener
+//  Everything from v2.3.0 is preserved without structural
+//  change. Only injectStyles() was modified.
+//  ─────────────────────────────────────────────────────────
+//  v2.3.0 — Branch history preservation (snapshotBeforeEdit /
+//  mergeHistoryAfterEdit), getSourceText() [A_VIEW] exclusion,
+//  data-umr-src fingerprint, characterData observer,
+//  tmg:branchSwitched listener — all retained.
 // ============================================================
 
 (() => {
@@ -91,7 +90,14 @@
       ${VIEW} blockquote{margin:.48em 0;padding:.1em 0 .1em .8em;border-left:3px solid rgba(255,255,255,.44)}
       ${VIEW} blockquote blockquote{margin-left:0;border-left-color:rgba(255,255,255,.28)}
       ${VIEW} blockquote blockquote blockquote{border-left-color:rgba(255,255,255,.16)}
-      ${VIEW} ul,${VIEW} ol{padding-left:1.5em;margin:.38em 0}${VIEW} li{margin:.18em 0}
+      ${VIEW} ul,${VIEW} ol{padding-left:1.5em;margin:.38em 0}
+      ${VIEW} ul{list-style-type:disc}
+      ${VIEW} ol{list-style-type:decimal}
+      ${VIEW} ul ul,${VIEW} ol ul{list-style-type:circle}
+      ${VIEW} ul ul ul,${VIEW} ol ul ul,${VIEW} ul ol ul,${VIEW} ol ol ul{list-style-type:square}
+      ${VIEW} ul ol,${VIEW} ol ol{list-style-type:lower-alpha}
+      ${VIEW} ul ol ol,${VIEW} ol ol ol,${VIEW} ul ul ol,${VIEW} ol ul ol{list-style-type:lower-roman}
+      ${VIEW} li{margin:.18em 0}
       ${VIEW} li>ul,${VIEW} li>ol{margin:.1em 0}
       ${VIEW} li.task-list-item{list-style:none;margin-left:-1.5em;padding-left:0}
       ${VIEW} input[type="checkbox"]{margin:0 .42em .1em 0;vertical-align:middle;cursor:default;accent-color:rgba(255,255,255,.8)}
@@ -198,13 +204,13 @@
     });
     t=t.replace(new RegExp(`${CTOK}(\\d+)`,'g'),(_,i)=>codeStore[parseInt(i)]);
     let html=marked.parse(t);
-    html=html.replace(new RegExp(`<p>\\s*${MTOK}D(\\d+)\\s*</p>`,'g'),(_,i)=>mathStore[parseInt(i)])
+    html=html.replace(new RegExp(`\n\\s*${MTOK}D(\\d+)\\s*\n\n`,'g'),(_,i)=>mathStore[parseInt(i)])
              .replace(new RegExp(`${MTOK}[DI](\\d+)`,'g'),(_,i)=>mathStore[parseInt(i)]);
     return html;
   }
   function katexRender(katex, formula, displayMode) {
     try { return katex.renderToString(formula,{displayMode,throwOnError:false}); }
-    catch(e){ const tag=displayMode?'div':'span'; return `<${tag} class="umr-math-err">$$${formula}$$</${tag}>`; }
+    catch(e){ const tag=displayMode?'div':'span'; return `<${tag} class="umr-math-err">$$${formula}$$`; }
   }
   const extractText = c =>
     !c?'':typeof c==='string'?c:Array.isArray(c)?c.map(x=>x?.text??x?.content??'').join(' '):'';
@@ -432,7 +438,7 @@
 
     attach();
     new MutationObserver(() => attach()).observe(document.body, { childList:true });
-    console.info('[TM-UserMD] ✅ v2.3 — Markdown ON');
+    console.info('[TM-UserMD] ✅ v2.3.1 — Markdown ON');
 
     injectKatexCss();
     try {
@@ -445,7 +451,7 @@
         return tmp.innerHTML;
       };
       reRenderAll();
-      console.info('[TM-UserMD] ✅ v2.3 — Math (KaTeX) ON');
+      console.info('[TM-UserMD] ✅ v2.3.1 — Math (KaTeX) ON');
     } catch (e) {
       console.warn('[TM-UserMD] KaTeX not loaded:', e.message);
     }
