@@ -14,6 +14,11 @@
    * - Mobile/PWA: passive listener + overlay
    * - DOM JSON extraction from Share modal preview
    * - All parsing, privacy filtering, markdown rendering logic
+   *
+   * Fixed vs ReferenceScriptDiscussion baseline:
+   * - Mblock step 13 only: %%IC%%/%%TX%% placeholders entombed inside
+   *   hb[] (via list items, table cells, headings, blockquotes) are now
+   *   resolved before hb[] restoration. All other code is unchanged.
    ******************************************************************/
 
   const TAG = "[TMX v12]";
@@ -276,8 +281,6 @@
 
   /* ============================================================
    * 4) CONVERTER CORE
-   *    Updated v12: new OCSS with CSS variables + theme toggle
-   *    All parsing/rendering logic unchanged from v11
    * ============================================================ */
   function S(c) {
     if (c == null) return "";
@@ -350,21 +353,26 @@
   /* ============================================================
    * Mblock — fixed Markdown-to-HTML renderer
    *
-   * Changes vs baseline:
-   *   1. Inline formatting (bold/italic/links/images) applied BEFORE
-   *      heading & list extraction, so heading/list content inherits it.
-   *   2. Headings, blockquotes, <hr> pushed into hb[] (treated as HTML
-   *      blocks) so they are not wrapped inside <p> tags.
-   *   3. List items tagged with %%LISTU%%/%%LISTO%% markers, grouped
-   *      into consecutive runs, wrapped in <ul>/<ol> and pushed to hb[].
+   * Identical to ReferenceScriptDiscussion baseline EXCEPT step 13:
    *
-   * Return type is unchanged: an HTML string.
-   * All other functions in this file are identical to the v12 baseline.
+   * THE BUG (observed as %%IC3%%, %%IC6%% etc. in rendered output):
+   *   Steps 8–10 push content into hb[] (headings, blockquotes, list
+   *   items). That content still contains %%IC%% / %%TX%% placeholders
+   *   from steps 2–3. The old step 13 restored ic[] and tx[] against h,
+   *   but those tokens were no longer in h — they were entombed inside
+   *   hb[] strings. hb[] restoration then inserted the literal text
+   *   "%%IC6%%" into the final HTML.
+   *
+   * THE FIX (step 13 only):
+   *   Before inserting each hb[] entry into h, pre-resolve any leftover
+   *   %%IC%% / %%TX%% tokens inside it. This covers all block types
+   *   (table cells, list items, headings, blockquotes) in one place.
+   *   All other steps are unchanged.
    * ============================================================ */
   function Mblock(raw) {
     if (!raw) return ""; let h = String(raw);
 
-    // ── 1. Fenced code blocks (closing ``` must be on its own line) ─────────
+    // ── 1. Fenced code blocks (closing ``` must be on its own line) ──────────
     const cb = [];
     h = h.replace(/```(\w*)\s*\n([\s\S]*?)\n```/g,
       (_, _l, c) => (cb.push(`<pre><code>${E(c)}</code></pre>`), `\n%%CB${cb.length - 1}%%\n`));
@@ -409,7 +417,6 @@
     h = h.replace(/^>\s+(.+)$/gm,    (_, c) => (hb.push(`<blockquote>${c}</blockquote>`), `\n%%HB${hb.length - 1}%%\n`));
 
     // ── 10. Lists: tag type, group consecutive items, wrap in <ul>/<ol> → HB ─
-    //   %%LISTU%% / %%LISTO%% are unambiguous transient markers (never in output).
     h = h.replace(/^[-*]\s+(.+)$/gm,  (_, c) => `%%LISTU%%${c}`);
     h = h.replace(/^\d+\.\s+(.+)$/gm, (_, c) => `%%LISTO%%${c}`);
     h = h.replace(/(%%LISTU%%[^\n]*(?:\n%%LISTU%%[^\n]*)*)/g, (m) => {
@@ -430,11 +437,35 @@
     h = h.replace(/\n\n/g, "</p><p>");
     h = h.replace(/\n/g, "<br>");
 
-    // ── 13. Restore all protected content ────────────────────────────────────
-    for (let i = 0; i < cb.length; i++) h = h.replace(`%%CB${i}%%`, cb[i]);
-    for (let i = 0; i < ic.length; i++) h = h.replace(`%%IC${i}%%`, ic[i]);
-    for (let i = 0; i < tx.length; i++) h = h.replace(`%%TX${i}%%`, tx[i]);
-    for (let i = 0; i < hb.length; i++) h = h.replace(`%%HB${i}%%`, hb[i]);
+    // ── 13. FIXED: Restore all protected content ─────────────────────────────
+    //
+    //  Root cause of %%IC3%%/%%IC6%% visible in output:
+    //  Steps 8–10 push hb[] entries (headings, blockquotes, list items,
+    //  table cells) that still contain %%IC%% / %%TX%% placeholders.
+    //  The old code restored ic[] / tx[] against h — but those tokens
+    //  were no longer in h, they were inside hb[] strings.
+    //  hb[] restoration then inserted them as literal text.
+    //
+    //  Fix: before inserting each hb[] entry into h, pre-resolve any
+    //  %%IC%% / %%TX%% trapped inside it. Covers all block types at once.
+    //  Every other step above is identical to the working baseline.
+
+    for (let i = 0; i < cb.length; i++)
+      h = h.replace(new RegExp(`%%CB${i}%%`, "g"), cb[i]);
+
+    // Restore tokens still present in h (plain paragraph text, etc.)
+    for (let i = 0; i < ic.length; i++)
+      h = h.replace(new RegExp(`%%IC${i}%%`, "g"), ic[i]);
+    for (let i = 0; i < tx.length; i++)
+      h = h.replace(new RegExp(`%%TX${i}%%`, "g"), tx[i]);
+
+    // Resolve any %%IC%% / %%TX%% trapped inside hb[] entries, then restore
+    for (let b = 0; b < hb.length; b++) {
+      hb[b] = hb[b]
+        .replace(/%%IC(\d+)%%/g, (_, i) => ic[+i] ?? "")
+        .replace(/%%TX(\d+)%%/g, (_, i) => tx[+i] ?? "");
+      h = h.replace(new RegExp(`%%HB${b}%%`, "g"), hb[b]);
+    }
 
     return `<p>${h}</p>`;
   }
@@ -479,7 +510,6 @@
 
   /* ═══════════════════════════════════════════════════════════
    * NEW v12: Output CSS with CSS variables + theme toggle
-   * Dark/Light mode support, compact tool calls, refined palette
    * ═══════════════════════════════════════════════════════════ */
   const OCSS =
     `:root,[data-theme="dark"]{--bp:#0b141a;--bh:#1f2c34;--bu:#005c4b;--ba:#202c33;--bc:#111b21;--bci:#172026;--bto:#111b21;--bth:rgba(255,255,255,.03);--bd:#2a3942;--bdt:#1f2c34;--c1:#e9edef;--c2:#8696a0;--ca:#00a884;--cl:#53bdeb;--cc:#00a884;--cp:#d1d7db;--tbh:#1a2930;--tbb:#3b4a54;--bqb:#3b4a54;--bqt:#8696a0;--sh:rgba(0,0,0,.12);--ht:#fff;--hs:rgba(255,255,255,.7);--tg:rgba(255,255,255,.1)}` +
@@ -546,7 +576,6 @@
     return out || `<div style="text-align:center;color:var(--c2);padding:40px">No messages.</div>`;
   }
 
-  /* ═══ NEW v12: buildHTML includes data-theme="dark" + theme toggle ═══ */
   function buildHTML(title, messages) {
     const dt = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
     return `<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${E(title)}</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><style>${OCSS}</style></head><body><div class="w"><div class="hd"><h1>${E(title)}</h1><p>${E("Exported " + dt)}</p><button class="tt" onclick="TT()" title="Toggle theme"><span class="td">&#x2600;&#xFE0F;</span><span class="tl">&#x1F319;</span></button></div>${buildChatHTML(messages)}</div><script>function TT(){var h=document.documentElement,c=h.getAttribute("data-theme")||"dark";h.setAttribute("data-theme",c==="dark"?"light":"dark")}<\/script></body></html>`;
@@ -588,7 +617,7 @@
     return parsed.kind;
   }
 
-  /* ============ DESKTOP FLOWS (unchanged from v11) ============ */
+  /* ============ DESKTOP FLOWS ============ */
   async function desktopFlow(mode) {
     const title = getTitle();
     await ensureKaTeX().catch(() => {});
@@ -627,7 +656,7 @@
     }
   }
 
-  /* ============ MOBILE FLOW (unchanged from v11) ============ */
+  /* ============ MOBILE FLOW ============ */
   let mobileCapture = null;
   let mobileDomListenerInstalled = false;
 
