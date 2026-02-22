@@ -1,30 +1,33 @@
 // ============================================================
 //  TypingMind — User Message Markdown + Math Renderer
-//  Version : 2.2.0
+//  Version : 2.3.0
 //
-//  What changed vs 2.1.0:
+//  What changed vs 2.2.0:
 //  ─────────────────────────────────────────────────────────
-//  BUG: After a branch switch, the [data-umr-view] div might
-//  still be present while the underlying message text changed.
-//  render() returned early ("already correct") showing STALE
-//  content.
+//  NEW: Branch history preservation — TM's edit mechanism
+//  replaces threads[] with a single entry on every new edit,
+//  silently discarding all older branch versions. v2.3.0
+//  intercepts this by:
 //
-//  FIXES:
-//  1. getSourceText(): reads text from all children EXCEPT the
-//     injected [data-umr-view] div, so we always get the
-//     current raw message text regardless of CSS visibility.
+//  1. snapshotBeforeEdit(): when a textarea appears inside a
+//     response-block (isEditing() fires), snapshot the FULL
+//     current threads[] from the React fiber state.
 //
-//  2. data-umr-src attribute: stores first 100 chars of the
-//     text that was rendered. On re-entry to render(), if
-//     A_DONE + A_VIEW exist but stored text differs from
-//     current text → stale render detected → unrender + redo.
+//  2. mergeHistoryAfterEdit(): after the edit completes and
+//     render() processes the new content, compare the new
+//     threads[] with the snapshot. Any threads TM dropped are
+//     re-added via React dispatch + IDB write. This preserves
+//     unlimited edit history — every version is retained.
 //
-//  3. MutationObserver adds characterData:true so React's
-//     in-place text node updates (nodeValue changes) also
-//     trigger re-evaluation.
+//  3. getChatState() + persistMessages() added as self-
+//     contained helpers (prefixed UMR_ for IDB open to avoid
+//     collision if graph script runs in the same context).
 //
-//  4. Listens for 'tmg:branchSwitched' event from the graph
-//     script and immediately force-rerenders all user messages.
+//  Everything from v2.2.0 is preserved:
+//  - getSourceText(): excludes [A_VIEW] for correct src text
+//  - data-umr-src: content-change fingerprint detection
+//  - characterData: true in MutationObserver
+//  - tmg:branchSwitched event listener
 // ============================================================
 
 (() => {
@@ -44,14 +47,14 @@
     attr: {
       done : 'data-umr-done',
       view : 'data-umr-view',
-      src  : 'data-umr-src',   // NEW: stores rendered-for text (first 100 chars)
+      src  : 'data-umr-src',
     },
   };
 
   const { done: A_DONE, view: A_VIEW, src: A_SRC } = CFG.attr;
   const parser = { fn: null };
 
-  /* ── CSS (identical to v2.1.0) ───────────────────────────────── */
+  /* ── CSS ─────────────────────────────────────────────────────── */
   function injectStyles() {
     if (document.getElementById('umr-styles')) return;
     const UM   = `[data-element-id="user-message"]`;
@@ -67,18 +70,23 @@
       ${VIEW} > *:first-child { margin-top:0!important; }
       ${VIEW} > *:last-child  { margin-bottom:0!important; }
       ${VIEW} p { margin:0.4em 0; }
-      ${VIEW} h1,${VIEW} h2,${VIEW} h3,${VIEW} h4,${VIEW} h5,${VIEW} h6 { font-weight:700; line-height:1.25; margin:0.6em 0 0.25em; }
+      ${VIEW} h1,${VIEW} h2,${VIEW} h3,${VIEW} h4,${VIEW} h5,${VIEW} h6
+        { font-weight:700; line-height:1.25; margin:0.6em 0 0.25em; }
       ${VIEW} h1{font-size:1.50em}${VIEW} h2{font-size:1.30em}${VIEW} h3{font-size:1.13em}
       ${VIEW} h4{font-size:1.02em}${VIEW} h5{font-size:0.92em}${VIEW} h6{font-size:0.86em;opacity:.82}
       ${VIEW} strong,${VIEW} b{font-weight:700}${VIEW} em,${VIEW} i{font-style:italic}
       ${VIEW} del,${VIEW} s{text-decoration:line-through}${VIEW} u{text-decoration:underline}
-      ${VIEW} sup{vertical-align:super;font-size:.75em;line-height:1}${VIEW} sub{vertical-align:sub;font-size:.75em;line-height:1}
+      ${VIEW} sup{vertical-align:super;font-size:.75em;line-height:1}
+      ${VIEW} sub{vertical-align:sub;font-size:.75em;line-height:1}
       ${VIEW} mark{background:rgba(255,230,0,.35);color:inherit;padding:.05em .22em;border-radius:2px}
       ${VIEW} abbr[title]{text-decoration:underline dotted;cursor:help}
       ${VIEW} a{text-decoration:underline;opacity:.9}${VIEW} a:hover{opacity:1}
-      ${VIEW} :not(pre)>code,${VIEW} kbd{font-family:ui-monospace,'Cascadia Code','Fira Code',monospace;font-size:.85em;padding:.1em .38em;border-radius:3px;background:rgba(255,255,255,.18);word-break:break-all}
+      ${VIEW} :not(pre)>code,${VIEW} kbd
+        {font-family:ui-monospace,'Cascadia Code','Fira Code',monospace;font-size:.85em;
+         padding:.1em .38em;border-radius:3px;background:rgba(255,255,255,.18);word-break:break-all}
       ${VIEW} kbd{border:1px solid rgba(255,255,255,.35);padding:.05em .42em;box-shadow:0 1px 0 rgba(255,255,255,.22)}
-      ${VIEW} pre{margin:.5em 0;padding:.72em .95em;border-radius:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;background:rgba(255,255,255,.10);font-size:.9em}
+      ${VIEW} pre{margin:.5em 0;padding:.72em .95em;border-radius:6px;overflow-x:auto;
+         -webkit-overflow-scrolling:touch;background:rgba(255,255,255,.10);font-size:.9em}
       ${VIEW} pre code{background:none!important;padding:0!important;font-size:1em!important;word-break:normal}
       ${VIEW} blockquote{margin:.48em 0;padding:.1em 0 .1em .8em;border-left:3px solid rgba(255,255,255,.44)}
       ${VIEW} blockquote blockquote{margin-left:0;border-left-color:rgba(255,255,255,.28)}
@@ -110,13 +118,51 @@
     document.head.appendChild(l);
   }
   function loadScript(src, globalKey) {
-    return new Promise((res,rej) => {
-      if (globalKey&&window[globalKey]){ res(window[globalKey]); return; }
+    return new Promise((res, rej) => {
+      if (globalKey && window[globalKey]) { res(window[globalKey]); return; }
       const s=document.createElement('script');
       s.src=src;
       s.onload=()=>res(globalKey?window[globalKey]:true);
       s.onerror=()=>rej(new Error('[TM-UserMD] Failed: '+src));
       document.head.appendChild(s);
+    });
+  }
+
+  /* ── REACT FIBER & IDB HELPERS (for branch history preservation) */
+  function umrGetChatState() {
+    const el=document.querySelector('[data-element-id="chat-space-middle-part"]');
+    if (!el) return null;
+    const fk=Object.keys(el).find(k=>k.startsWith('__reactFiber'));
+    if (!fk) return null;
+    let f=el[fk];
+    for (let d=0; f&&d<80; f=f.return,d++) {
+      let hs=f.memoizedState, hi=0;
+      for (; hs&&hi<6; hs=hs.next,hi++) {
+        const v=hs.memoizedState;
+        if (v&&!Array.isArray(v)&&typeof v==='object'&&Array.isArray(v.messages)&&v.chatID)
+          return { state:v, dispatch:hs.queue?.dispatch };
+      }
+    }
+    return null;
+  }
+
+  const umrOpenIDB = () => new Promise((res,rej)=>{
+    const r=indexedDB.open('keyval-store');
+    r.onsuccess=e=>res(e.target.result); r.onerror=()=>rej(r.error);
+  });
+  async function umrPersistMessages(chatID, msgs) {
+    const db=await umrOpenIDB();
+    return new Promise((res,rej)=>{
+      const tx=db.transaction('keyval','readwrite'), st=tx.objectStore('keyval');
+      const key=`CHAT_${chatID}`, g=st.get(key);
+      g.onsuccess=()=>{
+        const prev=g.result;
+        if (!prev){ db.close(); res(); return; } // new chat not yet in IDB — skip
+        const p=st.put({...prev,messages:msgs,updatedAt:new Date()},key);
+        p.onsuccess=()=>{ db.close(); res(); };
+        p.onerror=()=>{ db.close(); rej(p.error); };
+      };
+      g.onerror=()=>{ db.close(); rej(g.error); };
     });
   }
 
@@ -140,14 +186,14 @@
     const MTOK=`UMRmath${rnd}`, CTOK=`UMRcode${rnd}`;
     const mathStore=[], codeStore=[];
     let t=rawText;
-    t=t.replace(/(`{3,}|~{3,})([^\n]*\n[\s\S]*?)\1/g, m=>{ const i=codeStore.length; codeStore.push(m); return `${CTOK}${i}`; })
-       .replace(/`([^`\n]+)`/g, m=>{ const i=codeStore.length; codeStore.push(m); return `${CTOK}${i}`; });
-    t=t.replace(/((?:^|\n)[ \t>]*)\$\$((?:[^$]|\$(?!\$))*?)\$\$([ \t]*(?=\n|$))/g,(_,before,formula,after)=>{
-      const i=mathStore.length; mathStore.push(katexRender(katex,formula.trim(),true));
-      return `${before}${MTOK}D${i}${after}`;
+    t=t.replace(/(`{3,}|~{3,})([^\n]*\n[\s\S]*?)\1/g,m=>{ const i=codeStore.length; codeStore.push(m); return `${CTOK}${i}`; })
+       .replace(/`([^`\n]+)`/g,m=>{ const i=codeStore.length; codeStore.push(m); return `${CTOK}${i}`; });
+    t=t.replace(/((?:^|\n)[ \t>]*)\$\$((?:[^$]|\$(?!\$))*?)\$\$([ \t]*(?=\n|$))/g,(_,b,f,a)=>{
+      const i=mathStore.length; mathStore.push(katexRender(katex,f.trim(),true));
+      return `${b}${MTOK}D${i}${a}`;
     });
-    t=t.replace(/\$\$((?:[^$]|\$(?!\$))*?)\$\$/g,(_,formula)=>{
-      const i=mathStore.length; mathStore.push(katexRender(katex,formula.trim(),false));
+    t=t.replace(/\$\$((?:[^$]|\$(?!\$))*?)\$\$/g,(_,f)=>{
+      const i=mathStore.length; mathStore.push(katexRender(katex,f.trim(),false));
       return `${MTOK}I${i}`;
     });
     t=t.replace(new RegExp(`${CTOK}(\\d+)`,'g'),(_,i)=>codeStore[parseInt(i)]);
@@ -160,6 +206,8 @@
     try { return katex.renderToString(formula,{displayMode,throwOnError:false}); }
     catch(e){ const tag=displayMode?'div':'span'; return `<${tag} class="umr-math-err">$$${formula}$$</${tag}>`; }
   }
+  const extractText = c =>
+    !c?'':typeof c==='string'?c:Array.isArray(c)?c.map(x=>x?.text??x?.content??'').join(' '):'';
 
   /* ── EDIT DETECTION ──────────────────────────────────────────── */
   function isEditing(msgEl) {
@@ -168,47 +216,120 @@
     return rb ? !!rb.querySelector('textarea') : false;
   }
 
-  /* ── SOURCE TEXT EXTRACTION (NEW v2.2.0) ─────────────────────────
-   *
-   *  Gets the raw message text EXCLUDING our injected [A_VIEW] div.
-   *  This is needed because:
-   *  - msgEl.textContent would include both hidden original text AND
-   *    the rendered view text, giving corrupt content.
-   *  - We need the ORIGINAL message text for change-detection and
-   *    for re-rendering after a branch switch.
-   * ─────────────────────────────────────────────────────────────── */
+  /* ── SOURCE TEXT ─────────────────────────────────────────────── */
   function getSourceText(msgEl) {
-    let text = '';
+    let text='';
     for (const child of msgEl.childNodes) {
-      // Skip our injected view div
-      if (child.nodeType === Node.ELEMENT_NODE && child.hasAttribute(A_VIEW)) continue;
-      text += child.textContent;
+      if (child.nodeType===Node.ELEMENT_NODE&&child.hasAttribute(A_VIEW)) continue;
+      text+=child.textContent;
     }
     return text.trim();
+  }
+
+  /* ── MESSAGE UUID HELPER ─────────────────────────────────────── */
+  function getMsgUUID(msgEl) {
+    const rb=msgEl.closest('[data-element-id="response-block"]');
+    const btn=rb?.querySelector('button[id^="message-timestamp-"]');
+    return btn?.id?.replace('message-timestamp-','') || null;
+  }
+
+  /* ── BRANCH HISTORY PRESERVATION ────────────────────────────────
+   *
+   *  TM's own edit flow REPLACES threads[] with a single entry
+   *  (the immediate predecessor) on every new edit. After n edits,
+   *  only v(n) [active] and v(n-1) [in threads] remain — all
+   *  earlier versions are silently lost.
+   *
+   *  Fix: snapshot the full threads structure BEFORE the edit
+   *  executes. After the edit completes and render() re-runs,
+   *  compare the new threads with the snapshot and restore any
+   *  entries that TM dropped.
+   * ─────────────────────────────────────────────────────────────── */
+  let _editSnapshot = null; // { uuid, chatID, existingThreads }
+
+  function snapshotBeforeEdit(msgEl) {
+    const uuid = getMsgUUID(msgEl);
+    if (!uuid) return;
+
+    // If a different message starts editing, discard the old snapshot
+    if (_editSnapshot && _editSnapshot.uuid !== uuid) _editSnapshot = null;
+    if (_editSnapshot?.uuid === uuid) return; // already snapshotted
+
+    const cs = umrGetChatState();
+    if (!cs?.state) return;
+
+    const msg = cs.state.messages.find(m => m.uuid === uuid);
+    if (!msg) return;
+
+    _editSnapshot = {
+      uuid,
+      chatID:          cs.state.chatID,
+      existingThreads: JSON.parse(JSON.stringify(msg.threads || []))
+    };
+  }
+
+  async function mergeHistoryAfterEdit(uuid, snap) {
+    if (!snap.existingThreads.length) return; // nothing to preserve
+
+    const cs = umrGetChatState();
+    if (!cs?.state) return;
+
+    const msg = cs.state.messages.find(m => m.uuid === uuid);
+    if (!msg) return;
+
+    // Build a set of content fingerprints currently in threads
+    const nowKeys = new Set(
+      (msg.threads || []).map(t => extractText(t.userMessageContent).trim().slice(0, 60))
+    );
+
+    // Find threads that existed before but TM dropped on this edit
+    const lostThreads = snap.existingThreads.filter(t =>
+      !nowKeys.has(extractText(t.userMessageContent).trim().slice(0, 60))
+    );
+
+    if (!lostThreads.length) return; // TM preserved everything — nothing to merge
+
+    const mergedMsg   = { ...msg, threads: [...(msg.threads || []), ...lostThreads] };
+    const newMessages = cs.state.messages.map(m => m.uuid === uuid ? mergedMsg : m);
+    const newState    = { ...cs.state, messages: newMessages };
+
+    // Update React state immediately for correct graph display
+    if (cs.dispatch) {
+      try { cs.dispatch(newState); }
+      catch (e) { console.warn('[TM-UserMD] dispatch:', e.message); }
+    }
+
+    // Persist to IDB for durability across reloads
+    await umrPersistMessages(snap.chatID, newMessages);
+
+    console.info(`[TM-UserMD] Branch history merged: ${lostThreads.length} version(s) preserved for ${uuid}`);
   }
 
   /* ── RENDER ──────────────────────────────────────────────────── */
   function render(msgEl) {
     if (!parser.fn) return;
-    if (isEditing(msgEl)) { unrender(msgEl); return; }
+
+    if (isEditing(msgEl)) {
+      // Snapshot full thread history BEFORE TM overwrites it on submit
+      snapshotBeforeEdit(msgEl);
+      unrender(msgEl);
+      return;
+    }
 
     if (msgEl.hasAttribute(A_DONE)) {
       const view = msgEl.querySelector('[' + A_VIEW + ']');
       if (!view) {
-        // View was removed (React reconciliation). Reset and re-render.
+        // View removed by React reconciliation → reset and re-render
         msgEl.removeAttribute(A_DONE);
         msgEl.removeAttribute(A_SRC);
       } else {
-        // FIX v2.2.0: Content-change detection.
-        // After a branch switch, [A_VIEW] might still exist but the
-        // underlying message text has changed. Compare stored source
-        // text (data-umr-src) with the current source text. If they
-        // differ, the view is STALE — unrender and re-render.
+        // Content-change detection (v2.2.0 fix preserved):
+        // If underlying message text changed (e.g., after branch switch),
+        // the stored fingerprint won't match → unrender and re-render.
         const currentSrc = getSourceText(msgEl).slice(0, 100);
         const storedSrc  = msgEl.getAttribute(A_SRC) || '';
-        if (currentSrc === storedSrc) return; // unchanged → skip
-        // Content changed — unrender stale view and fall through to fresh render
-        unrender(msgEl);
+        if (currentSrc === storedSrc) return; // unchanged
+        unrender(msgEl); // stale view — fall through to fresh render
       }
     }
 
@@ -223,13 +344,24 @@
     view.setAttribute(A_VIEW, '1');
     view.innerHTML = html;
     view.querySelectorAll('img').forEach(img =>
-      img.addEventListener('error', () => { img.style.opacity = '0.3'; }, { once: true })
+      img.addEventListener('error', () => { img.style.opacity='0.3'; }, { once:true })
     );
 
-    // Store source fingerprint for future change detection
     msgEl.setAttribute(A_SRC, rawText.slice(0, 100));
     msgEl.setAttribute(A_DONE, '1');
     msgEl.appendChild(view);
+
+    // After a successful re-render: check if this message was just edited
+    // and if TM dropped any branch history. Merge asynchronously.
+    const uuid = getMsgUUID(msgEl);
+    if (uuid && _editSnapshot?.uuid === uuid) {
+      const snap = _editSnapshot;
+      _editSnapshot = null;
+      // Use setTimeout to let TM fully commit its state before we merge
+      setTimeout(() => mergeHistoryAfterEdit(uuid, snap).catch(e =>
+        console.warn('[TM-UserMD] merge error:', e.message)
+      ), 120);
+    }
   }
 
   /* ── UNRENDER ────────────────────────────────────────────────── */
@@ -241,24 +373,23 @@
     msgEl.removeAttribute(A_SRC);
   }
 
-  /* ── PROCESS / OBSERVE ───────────────────────────────────────── */
+  /* ── OBSERVE & ATTACH ────────────────────────────────────────── */
   function processAll(chatArea) {
     chatArea.querySelectorAll(CFG.sel.userMsg).forEach(render);
   }
 
   const _observed = new WeakSet();
-
   function observe(chatArea) {
     if (_observed.has(chatArea)) return;
     _observed.add(chatArea);
     let rafId = null;
     new MutationObserver(() => {
       if (rafId) cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => { rafId = null; processAll(chatArea); });
+      rafId = requestAnimationFrame(() => { rafId=null; processAll(chatArea); });
     }).observe(chatArea, {
       childList:     true,
       subtree:       true,
-      characterData: true,  // FIX v2.2.0: catch React's in-place text node updates
+      characterData: true, // catch React's in-place text node updates
     });
   }
 
@@ -270,22 +401,13 @@
   }
 
   function reRenderAll() {
-    // Unrender + re-render everything to pick up new message content
     document.querySelectorAll(`${CFG.sel.userMsg}[${A_DONE}]`)
       .forEach(msg => { unrender(msg); render(msg); });
   }
 
-  /* ── BRANCH SWITCH INTEGRATION (NEW v2.2.0) ─────────────────────
-   *
-   *  The graph script dispatches 'tmg:branchSwitched' after every
-   *  successful branch switch. This listener triggers an immediate
-   *  force-rerender of ALL visible user messages so the new branch
-   *  content is reflected without waiting for the MutationObserver.
-   * ─────────────────────────────────────────────────────────────── */
+  // Graph script coordination: force re-render after branch switch
   document.addEventListener('tmg:branchSwitched', () => {
-    console.info('[TM-UserMD] Branch switched — force re-rendering all user messages');
     reRenderAll();
-    // Attach to re-observe in case TM remounted the chat area
     attach();
   });
 
@@ -296,7 +418,7 @@
     let marked;
     try {
       marked = await loadScript(CFG.cdn.marked, 'marked');
-      marked.use({ breaks: true, gfm: true });
+      marked.use({ breaks:true, gfm:true });
     } catch (e) {
       console.error('[TM-UserMD] marked.js failed —', e.message); return;
     }
@@ -309,8 +431,8 @@
     };
 
     attach();
-    new MutationObserver(() => attach()).observe(document.body, { childList: true });
-    console.info('[TM-UserMD] ✅ v2.2 — Markdown ON');
+    new MutationObserver(() => attach()).observe(document.body, { childList:true });
+    console.info('[TM-UserMD] ✅ v2.3 — Markdown ON');
 
     injectKatexCss();
     try {
@@ -323,7 +445,7 @@
         return tmp.innerHTML;
       };
       reRenderAll();
-      console.info('[TM-UserMD] ✅ v2.2 — Math (KaTeX) ON');
+      console.info('[TM-UserMD] ✅ v2.3 — Math (KaTeX) ON');
     } catch (e) {
       console.warn('[TM-UserMD] KaTeX not loaded:', e.message);
     }
