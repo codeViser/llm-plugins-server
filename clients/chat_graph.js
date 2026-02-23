@@ -51,6 +51,70 @@
   }
 
   /* ── SCROLL ──────────────────────────────────────────────────── */
+  function findMessageBlock(tsBtn) {
+    if (!tsBtn) return null;
+    const selectors = [
+      '[data-element-id="response-block"]',
+      '[data-element-id="request-block"]',
+      '[data-element-id="message-block"]',
+      '[data-element-id*="message"]',
+      '[data-element-id*="block"]'
+    ];
+    for (const sel of selectors) {
+      const el = tsBtn.closest(sel);
+      if (el) return el;
+    }
+    // Avoid absolute/fixed hover toolbars; climb to a normal-flow container
+    let el = tsBtn.parentElement;
+    for (let i = 0; i < 12 && el; i++, el = el.parentElement) {
+      const st = window.getComputedStyle(el);
+      if (st.position !== 'absolute' && st.position !== 'fixed') return el;
+    }
+    return tsBtn;
+  }
+
+  function findScrollContainer(el) {
+    let p = el?.parentElement;
+    while (p && p !== document.documentElement) {
+      const oy = window.getComputedStyle(p).overflowY;
+      if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') &&
+          p.scrollHeight > p.clientHeight + 1) {
+        return p;
+      }
+      p = p.parentElement;
+    }
+    return document.scrollingElement || document.documentElement;
+  }
+
+  function scrollBlockToCenter(block) {
+    const scroller = findScrollContainer(block);
+    if (!scroller) return false;
+
+    const sr = scroller.getBoundingClientRect();
+    const br = block.getBoundingClientRect();
+
+    const Epos = br.top - sr.top + scroller.scrollTop;
+    let target = Epos - (scroller.clientHeight / 2) + (br.height / 2);
+
+    // Topmost handling
+    if (Epos <= br.height || target < 0) target = 0;
+
+    target = Math.max(0, Math.min(target, scroller.scrollHeight - scroller.clientHeight));
+
+    const prev = scroller.scrollTop;
+    scroller.scrollTo({ top: target, behavior: 'auto' });
+
+    // Fallback if scrollTop did not move (some PWA layouts)
+    if (Math.abs(scroller.scrollTop - prev) < 1) {
+      block.scrollIntoView({
+        block: target === 0 ? 'start' : 'center',
+        inline: 'nearest',
+        behavior: 'auto'
+      });
+    }
+    return true;
+  }
+
   function scrollToMessage(uuid, doHighlight) {
     // Guard synthetic IDs: __t = branch variant heads, __meta = tool meta nodes
     if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return false;
@@ -58,52 +122,35 @@
     const tsBtn = document.getElementById(`message-timestamp-${uuid}`);
     if (!tsBtn) return false;
 
-    const block = tsBtn.closest('[data-element-id="response-block"]') || tsBtn.parentElement;
+    const block = findMessageBlock(tsBtn);
     if (!block) return false;
 
-    try { block.scrollIntoView({ behavior: 'instant', block: 'center' }); } catch (_) {}
-
-    let el = block.parentElement;
-    while (el && el !== document.documentElement) {
-      const oy = window.getComputedStyle(el).overflowY;
-      if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') &&
-           el.scrollHeight > el.clientHeight + 1) {
-        const sr = el.getBoundingClientRect(), br = block.getBoundingClientRect();
-        const t  = el.scrollTop + (br.top - sr.top) - el.clientHeight / 2 + br.height / 2;
-        el.scrollTop = Math.max(0, Math.min(t, el.scrollHeight - el.clientHeight));
-        break;
-      }
-      el = el.parentElement;
-    }
-
+    const ok = scrollBlockToCenter(block);
     if (doHighlight) highlightBlock(block);
-    return true;
+    return ok;
+  }
+
+  function scrollWithRetry(uuid, { max = 24, delay = 120, highlight = true } = {}) {
+    let attempts = 0;
+    const tick = () => {
+      const ok = scrollToMessage(uuid, false);
+      if (ok) {
+        if (highlight) setTimeout(() => scrollToMessage(uuid, true), 350);
+        return;
+      }
+      if (++attempts < max) setTimeout(tick, delay);
+    };
+    requestAnimationFrame(() => requestAnimationFrame(tick));
   }
 
   function scrollAfterClose(uuid) {
     if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return;
-    Promise.resolve().then(() => scrollToMessage(uuid, false));
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        scrollToMessage(uuid, false);
-        setTimeout(() => scrollToMessage(uuid, false), 300);
-        setTimeout(() => scrollToMessage(uuid, true),  800);
-      });
-    });
+    scrollWithRetry(uuid, { max: 24, delay: 120, highlight: true });
   }
 
   function scrollAfterReload(uuid) {
     if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return;
-    let attempts = 0;
-    function tryOnce() {
-      if (scrollToMessage(uuid, false)) {
-        setTimeout(() => scrollToMessage(uuid, false), 1200);
-        setTimeout(() => scrollToMessage(uuid, true),  2800);
-        return;
-      }
-      if (++attempts < 30) setTimeout(tryOnce, 400);
-    }
-    setTimeout(tryOnce, 1500);
+    setTimeout(() => scrollWithRetry(uuid, { max: 40, delay: 200, highlight: true }), 700);
   }
 
   /* ── STYLES ──────────────────────────────────────────────────── */
@@ -461,7 +508,7 @@
 
       // Badge
       const badgeText = isMeta
-        ? `\u00d7${n.toolMessages.length}`     // ×N  (e.g. ×3)
+        ? `×${n.toolMessages.length}`     // ×N  (e.g. ×3)
         : (n.role==='user'?'USER':n.role==='ai'?'AI':'TOOL');
       const badgeW = isMeta ? 28 : (n.role==='user'?34:n.role==='ai'?20:32);
       ctx.fillStyle = getBbg(n.role, ia);
@@ -474,7 +521,7 @@
       // Label
       ctx.fillStyle = ia ? C.txA : C.txI;
       ctx.font = `${ia?500:400} 10px system-ui`;
-      let lbl = (isMeta ? '\u2699 ' : '') + (n.label || '(empty)');   // ⚙ prefix for meta
+      let lbl = (isMeta ? '⚙ ' : '') + (n.label || '(empty)');   // ⚙ prefix for meta
       const maxW = n.w - 16;
       while (ctx.measureText(lbl).width > maxW && lbl.length > 6) lbl = lbl.slice(0,-4) + '…';
       ctx.fillText(lbl, n.x+8, n.y+38);
@@ -486,7 +533,7 @@
       // Multi-step depth indicator
       if (!ia && n.switchPath?.length > 1) {
         ctx.fillStyle='rgba(245,158,11,.7)'; ctx.font='bold 8px system-ui'; ctx.textAlign='right';
-        ctx.fillText(`${n.switchPath.length}\u2193`, n.x+n.w-5, n.y+n.h-6);
+        ctx.fillText(`${n.switchPath.length}↓`, n.x+n.w-5, n.y+n.h-6);
       }
     });
     ctx.restore();
@@ -516,7 +563,7 @@
     const isMeta = !!node.isMeta;
 
     // --- Head row ---
-    const roleLabels = { user:'USER', ai:'AI Response', tool: isMeta ? `Tool Calls (\u00d7${node.toolMessages?.length||1})` : 'Tool Call' };
+    const roleLabels = { user:'USER', ai:'AI Response', tool: isMeta ? `Tool Calls (×${node.toolMessages?.length||1})` : 'Tool Call' };
     const dotColors  = { user:ia?'#00a884':'#3a7a56', ai:ia?'#1ea4d4':'#2a5a70', tool:ia?'#5a6a76':'#2a3a46' };
 
     const phead = panelEl.querySelector('.phead');
@@ -533,9 +580,9 @@
     let badgeText;
     if (isMeta) {
       badgeClass = 'meta';
-      badgeText = ia ? '\u2699 Aggregated tool calls (active chain)' : `\u2699 ${steps > 1 ? steps + ' switches to activate' : '1 switch to activate'}`;
+      badgeText = ia ? '⚙ Aggregated tool calls (active chain)' : `⚙ ${steps > 1 ? steps + ' switches to activate' : '1 switch to activate'}`;
     } else {
-      badgeText = ia ? '\u2713 Currently active in chat' : (steps===1?'\u2B51 1 switch to activate':`\u26A1 ${steps} switches to activate`);
+      badgeText = ia ? '✓ Currently active in chat' : (steps===1?'⭐ 1 switch to activate':`⚡ ${steps} switches to activate`);
     }
 
     // --- Body content ---
@@ -561,14 +608,14 @@
     if (ia) {
       const b = document.createElement('button');
       b.className = EXT + '-pbtn primary';
-      b.textContent = isMeta ? '\u2193 Go to First Tool Call' : '\u2193 Go to This Message';
+      b.textContent = isMeta ? '↓ Go to First Tool Call' : '↓ Go to This Message';
       const scrollTarget = isMeta ? node.scrollUUID : node.id;
       b.onclick = () => { closePreview(panelEl); closeOverlay(); scrollAfterClose(scrollTarget); };
       pfoot.appendChild(b);
     } else if (steps > 0) {
       const b = document.createElement('button');
       b.className = EXT + '-pbtn apply';
-      b.textContent = steps > 1 ? `\u26A1 Apply Changes (${steps} steps)` : '\u2B51 Apply Changes';
+      b.textContent = steps > 1 ? `⚡ Apply Changes (${steps} steps)` : '⭐ Apply Changes';
       b.onclick = () => applyAndReload(node);
       pfoot.appendChild(b);
     }
@@ -748,7 +795,7 @@
     let r=10; const retry=()=>{ if(document.querySelector('#'+EXT+'-btn'))return; tryInject(); if(--r>0)setTimeout(retry,650); };
     setTimeout(retry,400);
     new MutationObserver(tryInject).observe(document.body,{childList:true,subtree:true});
-    console.log('[TM Chat Graph] \u2705 v2.4.0');
+    console.log('[TM Chat Graph] ✅ v2.4.0');
   }
   init();
 })();
