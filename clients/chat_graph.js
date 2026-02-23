@@ -807,6 +807,21 @@
     const sm=msgs[si],tgt=sm.threads?.[bi]; if(!tgt)throw new Error(`threads[${bi}] missing`);
     return [...msgs.slice(0,si),{...sm,content:tgt.userMessageContent,threads:[...sm.threads.filter((_,i)=>i!==bi),{userMessageContent:sm.content,messages:msgs.slice(si+1),createdAt:new Date().toISOString()}],updatedAt:new Date().toISOString()},...(tgt.messages||[])];
   }
+
+  function getScrollTargetFromNode(node) {
+    if (!node) return null;
+    if (node.isMeta && node.scrollUUID) return node.scrollUUID;
+    if (node.id && !node.id.includes('__t') && !node.id.includes('__meta')) return node.id;
+    if (node.sourceUUID) return node.sourceUUID;
+    let c = node.children?.[0];
+    while (c) {
+      if (c.isMeta && c.scrollUUID) return c.scrollUUID;
+      if (c.id && !c.id.includes('__t') && !c.id.includes('__meta')) return c.id;
+      c = c.children?.[0];
+    }
+    return null;
+  }
+
   async function applyAndReload(node) {
     if (!node||!node.switchPath?.length||node.active) return;
     const cs=getChatState(); if(!cs?.state?.chatID){showToast('Cannot read chat state','err');return;}
@@ -815,7 +830,10 @@
       let msgs=cs.state.messages;
       for (const step of node.switchPath) msgs=computeSingleSwitch(msgs,step.sourceUUID,step.branchIdx);
       await persistMessages(cs.state.chatID,msgs);
-      sessionStorage.setItem(SCROLL_KEY, node.switchPath[0].sourceUUID);
+
+      const scrollTarget = getScrollTargetFromNode(node) || node.switchPath[0].sourceUUID;
+      sessionStorage.setItem(SCROLL_KEY, scrollTarget);
+
       closeOverlay(); window.location.reload();
     } catch(err) { console.warn('[TM Graph]',err.message); showToast('Error: '+err.message.slice(0,55),'err'); }
   }
