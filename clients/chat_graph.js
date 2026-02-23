@@ -51,6 +51,78 @@
   }
 
   /* ── SCROLL ──────────────────────────────────────────────────── */
+  const LOC_TOAST_ID = EXT + '-loc-toast';
+  let locToastTmr = null;
+
+  function showLocateToast(msg, type='ok') {
+    let el = document.getElementById(LOC_TOAST_ID);
+    if (!el) {
+      el = document.createElement('div');
+      el.id = LOC_TOAST_ID;
+      el.style.cssText = 'position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483647;padding:7px 14px;border-radius:16px;font-size:12px;font-weight:700;color:#0b141a;background:#00a884;box-shadow:0 6px 18px rgba(0,0,0,.35);opacity:0;transition:opacity .2s, transform .2s;pointer-events:none;white-space:nowrap;';
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.background = type==='ok' ? '#00a884' : type==='warn' ? '#f59e0b' : '#ef4444';
+    el.style.color = type==='err' ? '#fff' : '#0b141a';
+    el.style.opacity = '1';
+    el.style.transform = 'translateX(-50%) translateY(0)';
+    clearTimeout(locToastTmr);
+    locToastTmr = setTimeout(() => {
+      el.style.opacity = '0';
+      el.style.transform = 'translateX(-50%) translateY(8px)';
+      setTimeout(() => { if (el) el.remove(); }, 260);
+    }, 1400);
+  }
+
+  function isScrollable(el) {
+    if (!el) return false;
+    const oy = window.getComputedStyle(el).overflowY;
+    return (oy === 'auto' || oy === 'scroll' || oy === 'overlay') && el.scrollHeight > el.clientHeight + 1;
+  }
+
+  function getScrollableAncestors(el) {
+    const list = [];
+    let p = el?.parentElement;
+    while (p && p !== document.documentElement) {
+      if (isScrollable(p)) list.push(p);
+      p = p.parentElement;
+    }
+    return list;
+  }
+
+  function pickBestScroller(list) {
+    if (!list || list.length === 0) return null;
+    return list.reduce((best, cur) => {
+      const b = (best.scrollHeight - best.clientHeight);
+      const c = (cur.scrollHeight - cur.clientHeight);
+      return c > b ? cur : best;
+    }, list[0]);
+  }
+
+  function getChatScroller(preferredEl=null) {
+    const fromEl = preferredEl ? getScrollableAncestors(preferredEl) : [];
+    if (fromEl.length) return pickBestScroller(fromEl);
+
+    const chatSpace = document.querySelector('[data-element-id="chat-space-middle-part"]');
+    if (chatSpace) {
+      const candidates = [];
+      if (isScrollable(chatSpace)) candidates.push(chatSpace);
+      const nodes = chatSpace.querySelectorAll('[data-element-id], [class], [style], div, section');
+      for (const n of nodes) if (isScrollable(n)) candidates.push(n);
+      const best = pickBestScroller(candidates);
+      if (best) return best;
+    }
+
+    return document.scrollingElement || document.documentElement;
+  }
+
+  function normalizeBlock(el) {
+    if (!el || el.closest('#' + EXT + '-ov')) return null;
+    const block = el.closest('[data-element-id="response-block"], [data-element-id="request-block"], [data-element-id="message-block"], [data-element-id*="block"], [data-element-id*="message"], [data-element-id*="response"], [data-element-id*="request"]');
+    return block || el;
+  }
+
   function findMessageBlock(tsBtn) {
     if (!tsBtn) return null;
     const selectors = [
@@ -73,21 +145,88 @@
     return tsBtn;
   }
 
-  function findScrollContainer(el) {
-    let p = el?.parentElement;
-    while (p && p !== document.documentElement) {
-      const oy = window.getComputedStyle(p).overflowY;
-      if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay') &&
-          p.scrollHeight > p.clientHeight + 1) {
-        return p;
+  function scanDomForUuid(uuid) {
+    const attrs = ['data-message-id','data-uuid','data-id','data-message-uuid','data-element-id','id'];
+    const chatSpace = document.querySelector('[data-element-id="chat-space-middle-part"]');
+    const nodes = document.querySelectorAll('[data-message-id],[data-uuid],[data-id],[data-message-uuid],[data-element-id],[id]');
+    for (const el of nodes) {
+      if (chatSpace && !chatSpace.contains(el)) continue;
+      if (el.closest('#' + EXT + '-ov')) continue;
+      for (const a of attrs) {
+        const v = el.getAttribute(a);
+        if (v && v.includes(uuid)) return el;
       }
-      p = p.parentElement;
     }
-    return document.scrollingElement || document.documentElement;
+    return null;
+  }
+
+  function locateMessageBlock(uuid) {
+    // 1) Timestamp button
+    const tsBtn = document.getElementById(`message-timestamp-${uuid}`);
+    if (tsBtn) {
+      const block = findMessageBlock(tsBtn);
+      if (block) return { block, method: 'timestamp' };
+    }
+
+    // 2) Exact attribute matches
+    const exactSelectors = [
+      `[data-message-id="${uuid}"]`,
+      `[data-uuid="${uuid}"]`,
+      `[data-message-uuid="${uuid}"]`,
+      `[data-id="${uuid}"]`,
+      `[id="${uuid}"]`
+    ];
+    for (const sel of exactSelectors) {
+      const el = document.querySelector(sel);
+      const block = normalizeBlock(el);
+      if (block) return { block, method: 'attr-exact' };
+    }
+
+    // 3) Partial attribute matches
+    const partialSelectors = [
+      `[data-element-id*="${uuid}"]`,
+      `[id*="${uuid}"]`
+    ];
+    for (const sel of partialSelectors) {
+      const el = document.querySelector(sel);
+      const block = normalizeBlock(el);
+      if (block) return { block, method: 'attr-partial' };
+    }
+
+    // 4) Scan DOM for any attribute containing uuid
+    const scanned = scanDomForUuid(uuid);
+    const block = normalizeBlock(scanned);
+    if (block) return { block, method: 'scan' };
+
+    return null;
+  }
+
+  function getMessageIndexInfo(uuid) {
+    const cs = getChatState();
+    if (!cs?.state?.messages) return { idx: -1, total: 0 };
+    const msgs = cs.state.messages;
+    const idx = msgs.findIndex(m => m.uuid === uuid);
+    return { idx, total: msgs.length };
+  }
+
+  function computeJumpTarget(scroller, idx, total) {
+    if (!scroller || total <= 1 || idx < 0) return null;
+    const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const ratio = total <= 1 ? 0 : idx / (total - 1);
+    return Math.max(0, Math.min(max, max * ratio));
+  }
+
+  function nudgeScroller(ctx) {
+    if (!ctx.scroller) return;
+    const delta = ctx.scroller.clientHeight * 0.6;
+    let dir = 1;
+    if (ctx.jumpTarget != null) dir = ctx.scroller.scrollTop > ctx.jumpTarget ? -1 : 1;
+    else dir = (ctx.nudgeCount % 2 === 0) ? 1 : -1;
+    ctx.scroller.scrollBy({ top: dir * delta, behavior: 'auto' });
   }
 
   function scrollBlockToCenter(block) {
-    const scroller = findScrollContainer(block);
+    const scroller = getChatScroller(block);
     if (!scroller) return false;
 
     const sr = scroller.getBoundingClientRect();
@@ -117,40 +256,73 @@
 
   function scrollToMessage(uuid, doHighlight) {
     // Guard synthetic IDs: __t = branch variant heads, __meta = tool meta nodes
-    if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return false;
+    if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return { ok:false };
 
-    const tsBtn = document.getElementById(`message-timestamp-${uuid}`);
-    if (!tsBtn) return false;
+    const found = locateMessageBlock(uuid);
+    if (!found?.block) return { ok:false };
 
-    const block = findMessageBlock(tsBtn);
-    if (!block) return false;
-
-    const ok = scrollBlockToCenter(block);
-    if (doHighlight) highlightBlock(block);
-    return ok;
+    const ok = scrollBlockToCenter(found.block);
+    if (doHighlight) highlightBlock(found.block);
+    return { ok, method: found.method };
   }
 
-  function scrollWithRetry(uuid, { max = 24, delay = 120, highlight = true } = {}) {
-    let attempts = 0;
+  function scrollWithRetry(uuid, { max = 28, delay = 140, highlight = true } = {}) {
+    const idxInfo = getMessageIndexInfo(uuid);
+    const ctx = {
+      uuid,
+      attempts: 0,
+      idx: idxInfo.idx,
+      total: idxInfo.total,
+      didJump: false,
+      nudgeCount: 0,
+      maxNudge: 6,
+      scroller: null,
+      jumpTarget: null,
+      lastAction: ''
+    };
+
     const tick = () => {
-      const ok = scrollToMessage(uuid, false);
-      if (ok) {
-        if (highlight) setTimeout(() => scrollToMessage(uuid, true), 350);
+      const res = scrollToMessage(uuid, false);
+      if (res.ok) {
+        const method = ctx.lastAction ? `${ctx.lastAction} → ${res.method}` : res.method;
+        showLocateToast(`Locate: ${method} ✓`, 'ok');
+        if (highlight) setTimeout(() => scrollToMessage(uuid, true), 250);
         return;
       }
-      if (++attempts < max) setTimeout(tick, delay);
+
+      if (!ctx.scroller) ctx.scroller = getChatScroller(null);
+
+      if (!ctx.didJump && ctx.idx >= 0 && ctx.scroller) {
+        ctx.jumpTarget = computeJumpTarget(ctx.scroller, ctx.idx, ctx.total);
+        if (ctx.jumpTarget != null) {
+          ctx.scroller.scrollTo({ top: ctx.jumpTarget, behavior: 'auto' });
+          ctx.didJump = true;
+          ctx.lastAction = 'index-jump';
+        }
+      } else if (ctx.scroller && ctx.nudgeCount < ctx.maxNudge) {
+        nudgeScroller(ctx);
+        ctx.nudgeCount++;
+        ctx.lastAction = 'nudge-scan';
+      }
+
+      if (++ctx.attempts >= max) {
+        showLocateToast('Locate: failed (not in DOM)', 'err');
+        return;
+      }
+      setTimeout(tick, delay);
     };
+
     requestAnimationFrame(() => requestAnimationFrame(tick));
   }
 
   function scrollAfterClose(uuid) {
     if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return;
-    scrollWithRetry(uuid, { max: 24, delay: 120, highlight: true });
+    scrollWithRetry(uuid, { max: 28, delay: 140, highlight: true });
   }
 
   function scrollAfterReload(uuid) {
     if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return;
-    setTimeout(() => scrollWithRetry(uuid, { max: 40, delay: 200, highlight: true }), 700);
+    setTimeout(() => scrollWithRetry(uuid, { max: 44, delay: 220, highlight: true }), 700);
   }
 
   /* ── STYLES ──────────────────────────────────────────────────── */
