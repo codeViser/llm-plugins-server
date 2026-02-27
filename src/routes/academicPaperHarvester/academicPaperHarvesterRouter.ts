@@ -200,6 +200,12 @@ academicPaperHarvesterRegistry.registerPath({
 export const academicPaperHarvesterRouter: Router = (() => {
   const router = express.Router();
 
+  // Lightweight connectivity probe — lets the plugin verify the server is reachable and
+  // CORS headers are present before attempting a full search.
+  router.get('/ping', (_req: Request, res: Response) => {
+    res.status(StatusCodes.OK).json({ ok: true, service: 'academic-paper-harvester' });
+  });
+
   router.post(
     '/search',
     validateRequest(z.object({ body: AcademicPaperHarvesterRequestBodySchema })),

@@ -37,6 +37,26 @@ const app: Express = express();
 
 // Set the application to trust the reverse proxy
 app.set('trust proxy', true);
+
+// Academic paper harvester needs open CORS for all TypingMind origins.
+// This must be registered BEFORE app.use(cors(...)) so that:
+//   1. OPTIONS preflight is answered here (204 + wildcard) and never reaches the global handler
+//   2. For POST/GET, CORS headers are pre-set on `res` so they survive even if the global
+//      cors() callback errors (e.g. a restrictive CORS_ORIGIN env var on the deployment)
+// Express 5 (path-to-regexp v8) requires a regex or named wildcard — bare '*' is invalid.
+app.options(/^\/academic-paper-harvester/, (_req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+  res.status(204).end();
+});
+app.use(/^\/academic-paper-harvester/, (_req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+  next();
+});
+
 // Middlewares
 const corsOriginValue = env.CORS_ORIGIN || '*'; // Default to * if undefined
 const allowedOriginsFromEnv = corsOriginValue.split(',').map((s) => s.trim());
