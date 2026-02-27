@@ -19,6 +19,7 @@ import {
   academicPaperHarvesterRouter,
 } from '@/routes/academicPaperHarvester/academicPaperHarvesterRouter';
 import { healthCheckRegistry, healthCheckRouter } from '@/routes/healthCheck/healthCheckRouter';
+import { paperDiscoveryRegistry, paperDiscoveryRouter } from '@/routes/paperDiscovery/paperDiscoveryRouter';
 import { tavilyCrawlRegistry, tavilyCrawlRouter } from '@/routes/tavilyCrawl';
 import { tavilyExtractRegistry, tavilyExtractRouter } from '@/routes/tavilyExtract';
 import { tavilyMapRegistry, tavilyMapRouter } from '@/routes/tavilyMap';
@@ -55,6 +56,21 @@ app.use(
   },
   express.json(),
   academicPaperHarvesterRouter
+);
+
+app.use(
+  '/paper-discovery',
+  (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Accept, Content-Type');
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  },
+  paperDiscoveryRouter
 );
 
 // Middlewares
@@ -146,6 +162,7 @@ const allRegistries = [
   tavilyExtractRegistry,
   tavilyMapRegistry,
   academicPaperHarvesterRegistry,
+  paperDiscoveryRegistry,
   // Ensure other registries like excelGeneratorRegistry etc., are included here
   // if they were present in the original hardcoded list in openAPIDocumentGenerator.ts
 ];
