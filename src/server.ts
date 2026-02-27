@@ -41,6 +41,24 @@ app.set('trust proxy', true);
 const corsOriginValue = env.CORS_ORIGIN || '*'; // Default to * if undefined
 const allowedOriginsFromEnv = corsOriginValue.split(',').map((s) => s.trim());
 const isWildcardOriginConfig = allowedOriginsFromEnv.includes('*');
+const trustedTypingMindOriginRegexes = [
+  /^https:\/\/([a-z0-9-]+\.)?typingmind\.com$/i,
+  /^https:\/\/cloud\d+\.typingmind\.com$/i,
+  /^app:\/\/typingmind$/i,
+  /^capacitor:\/\/localhost$/i,
+];
+
+const wildcardPatternToRegex = (pattern: string) => {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+  return new RegExp(`^${escaped}$`);
+};
+
+const allowedOriginRegexes = allowedOriginsFromEnv
+  .filter((pattern) => pattern.length > 0 && pattern !== '*')
+  .map((pattern) => wildcardPatternToRegex(pattern));
+
+const isTrustedTypingMindOrigin = (requestOrigin: string) =>
+  trustedTypingMindOriginRegexes.some((regex) => regex.test(requestOrigin));
 
 app.use(
   cors({
@@ -57,8 +75,14 @@ app.use(
       }
 
       // If CORS_ORIGIN is configured with specific domain(s).
-      // Allow if the requestOrigin matches one of the specified domains OR if the requestOrigin is 'null' (for sandboxed iframes).
-      if (allowedOriginsFromEnv.includes(requestOrigin) || requestOrigin === 'null') {
+      // Allow if:
+      // - requestOrigin matches one of the specified domains exactly
+      // - requestOrigin matches one of the configured wildcard origin patterns
+      // - requestOrigin is 'null' (sandboxed iframes)
+      // - requestOrigin is a trusted TypingMind origin
+      const matchesConfiguredOrigin = allowedOriginsFromEnv.includes(requestOrigin);
+      const matchesConfiguredPattern = allowedOriginRegexes.some((regex) => regex.test(requestOrigin));
+      if (matchesConfiguredOrigin || matchesConfiguredPattern || requestOrigin === 'null' || isTrustedTypingMindOrigin(requestOrigin)) {
         return callback(null, true);
       }
 
