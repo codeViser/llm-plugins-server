@@ -14,10 +14,6 @@ import errorHandler from '@/common/middleware/errorHandler';
 import requestLogger from '@/common/middleware/requestLogger';
 import { env } from '@/common/utils/envConfig';
 import { mcpRouter } from '@/mcp/mcp.router';
-import {
-  academicPaperHarvesterRegistry,
-  academicPaperHarvesterRouter,
-} from '@/routes/academicPaperHarvester/academicPaperHarvesterRouter';
 import { healthCheckRegistry, healthCheckRouter } from '@/routes/healthCheck/healthCheckRouter';
 import { paperDiscoveryRegistry, paperDiscoveryRouter } from '@/routes/paperDiscovery/paperDiscoveryRouter';
 import { tavilyCrawlRegistry, tavilyCrawlRouter } from '@/routes/tavilyCrawl';
@@ -38,25 +34,6 @@ const app: Express = express();
 
 // Set the application to trust the reverse proxy
 app.set('trust proxy', true);
-
-// Academic paper harvester is intentionally mounted before global CORS middleware.
-// Some deployments block OPTIONS or have restrictive CORS settings; this route should
-// still work for TypingMind web clients.
-app.use(
-  '/academic-paper-harvester',
-  (req, res, next) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
-    if (req.method === 'OPTIONS') {
-      res.status(204).end();
-      return;
-    }
-    next();
-  },
-  express.json(),
-  academicPaperHarvesterRouter
-);
 
 app.use(
   '/paper-discovery',
@@ -161,7 +138,6 @@ const allRegistries = [
   tavilyCrawlRegistry,
   tavilyExtractRegistry,
   tavilyMapRegistry,
-  academicPaperHarvesterRegistry,
   paperDiscoveryRegistry,
   // Ensure other registries like excelGeneratorRegistry etc., are included here
   // if they were present in the original hardcoded list in openAPIDocumentGenerator.ts
