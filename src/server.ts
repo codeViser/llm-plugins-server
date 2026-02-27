@@ -14,6 +14,10 @@ import errorHandler from '@/common/middleware/errorHandler';
 import requestLogger from '@/common/middleware/requestLogger';
 import { env } from '@/common/utils/envConfig';
 import { mcpRouter } from '@/mcp/mcp.router';
+import {
+  academicPaperHarvesterRegistry,
+  academicPaperHarvesterRouter,
+} from '@/routes/academicPaperHarvester/academicPaperHarvesterRouter';
 import { healthCheckRegistry, healthCheckRouter } from '@/routes/healthCheck/healthCheckRouter';
 import { tavilyCrawlRegistry, tavilyCrawlRouter } from '@/routes/tavilyCrawl';
 import { tavilyExtractRegistry, tavilyExtractRouter } from '@/routes/tavilyExtract';
@@ -86,6 +90,7 @@ app.use('/word-generator', wordGeneratorRouter);
 app.use('/excel-generator', excelGeneratorRouter);
 app.use('/notion-database', notionDatabaseRouter);
 app.use('/google-places', googlePlacesRouter);
+app.use('/academic-paper-harvester', academicPaperHarvesterRouter);
 app.use('/api/tavily/extract', tavilyExtractRouter);
 app.use('/api/tavily/crawl', tavilyCrawlRouter);
 app.use('/api/tavily/map', tavilyMapRouter);
@@ -97,6 +102,7 @@ const allRegistries = [
   tavilyCrawlRegistry,
   tavilyExtractRegistry,
   tavilyMapRegistry,
+  academicPaperHarvesterRegistry,
   // Ensure other registries like excelGeneratorRegistry etc., are included here
   // if they were present in the original hardcoded list in openAPIDocumentGenerator.ts
 ];
