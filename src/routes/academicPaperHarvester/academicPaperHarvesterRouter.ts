@@ -1,6 +1,5 @@
 import { OpenAPIRegistry } from '@asteasolutions/zod-to-openapi';
 import express, { Request, Response, Router } from 'express';
-import got from 'got';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -55,6 +54,17 @@ class UpstreamRequestError extends Error {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const AcademicPaperHarvesterSearchQuerySchema = z.object({
+  query: z.string().min(1),
+  max_results: z.coerce.number().int().min(1).max(100).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+  fields: z.string().optional(),
+  apiKey: z.string().optional(),
+  api_key: z.string().optional(),
+  request_timeout_ms: z.coerce.number().int().min(3000).max(60000).optional(),
+  retry_count: z.coerce.number().int().min(0).max(3).optional(),
+});
+
 const isRetryableResponse = (statusCode: number) => statusCode === StatusCodes.TOO_MANY_REQUESTS || statusCode >= 500;
 
 const getFromCache = (cacheKey: string) => {
@@ -105,21 +115,27 @@ const getSemanticScholarData = async (requestBody: AcademicPaperHarvesterRequest
   const totalAttempts = upstreamRetryCount + 1;
   for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
     try {
-      const response = await got.get(SEMANTIC_SCHOLAR_SEARCH_URL, {
-        searchParams: {
-          query: requestBody.query,
-          limit: maxResults.toString(),
-          offset: offset.toString(),
-          fields,
-        },
-        headers,
-        timeout: { request: upstreamTimeoutMs },
-        throwHttpErrors: false,
-        responseType: 'text',
-      });
+      const queryUrl = new URL(SEMANTIC_SCHOLAR_SEARCH_URL);
+      queryUrl.searchParams.set('query', requestBody.query);
+      queryUrl.searchParams.set('limit', maxResults.toString());
+      queryUrl.searchParams.set('offset', offset.toString());
+      queryUrl.searchParams.set('fields', fields);
 
-      const statusCode = response.statusCode;
-      const responseText = response.body ?? '';
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), upstreamTimeoutMs);
+      let response: globalThis.Response;
+      try {
+        response = await fetch(queryUrl.toString(), {
+          method: 'GET',
+          headers,
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      const statusCode = response.status;
+      const responseText = await response.text();
       let responseBody: any = null;
       try {
         responseBody = responseText ? JSON.parse(responseText) : null;
@@ -183,6 +199,40 @@ const getSemanticScholarData = async (requestBody: AcademicPaperHarvesterRequest
   throw new UpstreamRequestError('Semantic Scholar request failed for an unknown reason.');
 };
 
+const handleSearchRequest = async (requestBody: AcademicPaperHarvesterRequestBody, res: Response): Promise<void> => {
+  try {
+    const result = await getSemanticScholarData(requestBody);
+    const serviceResponse = new ServiceResponse(
+      ResponseStatus.Success,
+      'Papers retrieved successfully',
+      result,
+      StatusCodes.OK
+    );
+    handleServiceResponse(serviceResponse, res);
+  } catch (error: unknown) {
+    const typedError = error as UpstreamRequestError;
+    logger.error(
+      { message: typedError.message, statusCode: typedError.statusCode },
+      'Academic paper harvester proxy request failed'
+    );
+
+    const statusCode =
+      typedError.statusCode === StatusCodes.TOO_MANY_REQUESTS
+        ? StatusCodes.TOO_MANY_REQUESTS
+        : typedError.statusCode && typedError.statusCode >= 400 && typedError.statusCode < 500
+          ? StatusCodes.BAD_GATEWAY
+          : StatusCodes.BAD_GATEWAY;
+
+    const message =
+      typedError.statusCode === StatusCodes.TOO_MANY_REQUESTS
+        ? `${typedError.message} Configure a Semantic Scholar API key in plugin settings to improve limits.`
+        : typedError.message || 'Failed to retrieve papers from Semantic Scholar.';
+
+    const serviceResponse = new ServiceResponse(ResponseStatus.Failed, message, null, statusCode);
+    handleServiceResponse(serviceResponse, res);
+  }
+};
+
 export const academicPaperHarvesterRegistry = new OpenAPIRegistry();
 academicPaperHarvesterRegistry.register('AcademicPaperHarvesterResponse', AcademicPaperHarvesterResponseSchema);
 
@@ -196,6 +246,16 @@ academicPaperHarvesterRegistry.registerPath({
   },
   responses: createApiResponse(AcademicPaperHarvesterResponseSchema, 'Success'),
 });
+academicPaperHarvesterRegistry.registerPath({
+  method: 'get',
+  path: '/academic-paper-harvester/search',
+  tags: ['Academic Paper Harvester'],
+  summary: 'Searches Semantic Scholar using query params (CORS-safe, no preflight)',
+  request: {
+    query: AcademicPaperHarvesterSearchQuerySchema,
+  },
+  responses: createApiResponse(AcademicPaperHarvesterResponseSchema, 'Success'),
+});
 
 export const academicPaperHarvesterRouter: Router = (() => {
   const router = express.Router();
@@ -206,42 +266,39 @@ export const academicPaperHarvesterRouter: Router = (() => {
     res.status(StatusCodes.OK).json({ ok: true, service: 'academic-paper-harvester' });
   });
 
+  // GET route is intentionally provided to avoid CORS preflight in browser-based plugin runtimes.
+  router.get('/search', async (req: Request, res: Response) => {
+    const parsedQuery = AcademicPaperHarvesterSearchQuerySchema.safeParse(req.query);
+    if (!parsedQuery.success) {
+      const serviceResponse = new ServiceResponse(
+        ResponseStatus.Failed,
+        'Invalid query parameters',
+        { errors: parsedQuery.error.errors },
+        StatusCodes.BAD_REQUEST
+      );
+      handleServiceResponse(serviceResponse, res);
+      return;
+    }
+
+    const query = parsedQuery.data;
+    const requestBody = AcademicPaperHarvesterRequestBodySchema.parse({
+      query: query.query,
+      max_results: query.max_results,
+      offset: query.offset,
+      fields: query.fields,
+      apiKey: query.apiKey || query.api_key,
+      request_timeout_ms: query.request_timeout_ms,
+      retry_count: query.retry_count,
+    });
+    await handleSearchRequest(requestBody, res);
+  });
+
   router.post(
     '/search',
     validateRequest(z.object({ body: AcademicPaperHarvesterRequestBodySchema })),
     async (req: Request, res: Response) => {
-      try {
-        const requestBody = req.body as AcademicPaperHarvesterRequestBody;
-        const result = await getSemanticScholarData(requestBody);
-        const serviceResponse = new ServiceResponse(
-          ResponseStatus.Success,
-          'Papers retrieved successfully',
-          result,
-          StatusCodes.OK
-        );
-        return handleServiceResponse(serviceResponse, res);
-      } catch (error: unknown) {
-        const typedError = error as UpstreamRequestError;
-        logger.error(
-          { message: typedError.message, statusCode: typedError.statusCode },
-          'Academic paper harvester proxy request failed'
-        );
-
-        const statusCode =
-          typedError.statusCode === StatusCodes.TOO_MANY_REQUESTS
-            ? StatusCodes.TOO_MANY_REQUESTS
-            : typedError.statusCode && typedError.statusCode >= 400 && typedError.statusCode < 500
-              ? StatusCodes.BAD_GATEWAY
-              : StatusCodes.BAD_GATEWAY;
-
-        const message =
-          typedError.statusCode === StatusCodes.TOO_MANY_REQUESTS
-            ? `${typedError.message} Configure a Semantic Scholar API key in plugin settings to improve limits.`
-            : typedError.message || 'Failed to retrieve papers from Semantic Scholar.';
-
-        const serviceResponse = new ServiceResponse(ResponseStatus.Failed, message, null, statusCode);
-        return handleServiceResponse(serviceResponse, res);
-      }
+      const requestBody = req.body as AcademicPaperHarvesterRequestBody;
+      await handleSearchRequest(requestBody, res);
     }
   );
 
