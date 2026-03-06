@@ -1,25 +1,23 @@
 // ================================================================
-//  TypingMind — Compact Context Extension                v1.4.0
+//  TypingMind — Compact Context Extension                v1.5.0
 // ================================================================
 //
-//  ROOT CAUSE FIX vs all prior versions:
+//  ROOT CAUSE (confirmed by G3 debug data):
+//  TM's native Clear Context correctly excludes pre-clear messages
+//  from API calls in-session (G3: only 2 messages sent). But on
+//  reload, TM rebuilds state from IDB without re-deriving the
+//  context-start index from the {clear-context} marker. Filtering
+//  resets to "include everything."
 //
-//  Every previous version tried to ANNOTATE the message history
-//  (insert a clear-context marker) and relied on TM's renderer to
-//  exclude pre-marker messages from API calls. This is a session-
-//  only view effect: on reload, TM rebuilds state from IDB/cloud
-//  which still contains all 95 old messages. Annotations don't
-//  survive because they depend on TM's internal grey-out logic.
+//  THE FIX: A fetch interceptor filter that reads LIVE React state
+//  on every outgoing API call, finds the last {type:'clear-context'}
+//  marker, and trims the messages array to only include post-clear
+//  content. This runs on every call, every page load, independently
+//  of TM's internal session state.
 //
-//  The correct operation is REPLACEMENT, not annotation.
-//
-//  After generating the summary, replace the chat's entire messages
-//  array in IDB with a single summary message. TM reads messages
-//  from IDB on every reload and API-call build. If there is only
-//  [summaryMsg], that IS the full context, permanently.
-//
-//  No TM keyboard shortcut needed. No grey-out polling. No markers.
-//  The old messages cease to exist in the data model.
+//  KEY PROPERTY: if nonSystem.length <= keepCount+1 (TM already
+//  filtered correctly in-session), the filter is a no-op. It only
+//  acts when TM sends more messages than it should on reload.
 //
 // ================================================================
 
@@ -27,11 +25,13 @@
   'use strict';
 
   const ID      = 'tm-ctx-compact';
-  const VERSION = '1.4.0';
+  const VERSION = '1.5.0';
   const ATTR    = `data-${ID}`;
 
-  const MAX_CHARS  = 80_000;   // tail-truncate transcript
-  const TOOL_MAX   = 1_500;    // per-tool-result cap in transcript
+  const MAX_CHARS  = 80_000;
+  const TOOL_MAX   = 1_500;
+  const CLEAR_POLL = 80;      // ms between polls after triggering Clear Context
+  const CLEAR_WAIT = 4_000;   // max ms to wait
 
   /* ── PROMPT ─────────────────────────────────────────────────── */
   const PROMPT = `You are resuming an active session that has hit the context window limit. Produce a structured compaction summary that enables a new AI instance to continue this work with minimal information loss.
@@ -148,9 +148,9 @@ Maximum 5 bullets. Omit this section entirely if no aspect is likely to affect t
 Include only what directly affects how to respond going forward: communication depth preference, domain expertise level observed, environment or tooling constraints, and any sensitive context requiring careful handling.`;
 
   /* ══════════════════════════════════════════════════════════════
-   *  FETCH INTERCEPT
+   *  FETCH HOOK  —  config capture  +  reload context filter
    * ══════════════════════════════════════════════════════════════ */
-  const _RAW = window.fetch.bind(window);   // before any hook — used for our own calls
+  const _RAW = window.fetch.bind(window);
 
   let _BASE      = null;
   let _CHAT_CFGS = {};
@@ -160,6 +160,64 @@ Include only what directly affects how to respond going forward: communication d
     const c = localStorage.getItem(`${ID}_chats`); if (c) _CHAT_CFGS = JSON.parse(c);
   } catch (_) {}
 
+  /* ──────────────────────────────────────────────────────────────
+   *  _applyReloadFilter
+   *
+   *  Called on every outgoing API call. Uses live React state to:
+   *  1. Find the last {type:'clear-context'} marker in the current
+   *     chat's message array.
+   *  2. Count how many post-clear messages exist in React state
+   *     (the "keepCount" — summary + any subsequent exchanges).
+   *  3. If the outgoing API body has MORE non-system messages than
+   *     keepCount+1, trim back to the last keepCount+1.
+   *     (keepCount from React state + 1 for the current user msg)
+   *
+   *  The guard condition `nonSystem.length <= keepCount + 1` ensures
+   *  this is a no-op when TM already filtered correctly in-session.
+   *  It only activates when TM sends more than it should (reload).
+   *
+   *  This approach is self-calibrating: as the user adds more
+   *  messages post-compaction, keepCount grows automatically because
+   *  React state always reflects the current message array.
+   * ────────────────────────────────────────────────────────────── */
+  function _applyReloadFilter(reqBody) {
+    const msgs = reqBody?.messages;
+    if (!Array.isArray(msgs) || msgs.length === 0) return reqBody;
+
+    // Read live React state — the ground truth for current messages
+    const cs = _chatState();
+    const liveMsgs = cs?.s?.messages;
+    if (!Array.isArray(liveMsgs) || liveMsgs.length === 0) return reqBody;
+
+    // Find the last clear-context marker (most recent compaction point)
+    let lastClearIdx = -1;
+    for (let i = liveMsgs.length - 1; i >= 0; i--) {
+      if (liveMsgs[i].type === 'clear-context') { lastClearIdx = i; break; }
+    }
+    if (lastClearIdx < 0) return reqBody; // No compaction in this chat — pass through
+
+    // Count post-clear messages that have a role (= valid chat turns)
+    const keepCount = liveMsgs.slice(lastClearIdx + 1).filter(m => m.role).length;
+
+    // Split incoming API messages
+    const sysMsgs   = msgs.filter(m => m.role === 'system');
+    const nonSystem = msgs.filter(m => m.role !== 'system');
+
+    // keepCount (post-clear in IDB/state) + 1 (current outgoing user message)
+    const keepTotal = keepCount + 1;
+
+    // Guard: if TM already sent the right amount (in-session correct state),
+    // nonSystem.length === keepTotal. Don't touch it.
+    if (nonSystem.length <= keepTotal) return reqBody;
+
+    // Reload case: TM sent too many (all pre-clear messages included).
+    // Trim to the last keepTotal non-system messages.
+    const filtered = [...sysMsgs, ...nonSystem.slice(-keepTotal)];
+    _log(`↩ Filter: ${nonSystem.length} → ${filtered.length - sysMsgs.length} non-sys msgs`
+        + ` (keepCount=${keepCount}, chatID=${cs.s.chatID})`);
+    return { ...reqBody, messages: filtered };
+  }
+
   function _hookFetch() {
     const _prev = window.fetch;
     window.fetch = function (url, opts = {}) {
@@ -167,24 +225,32 @@ Include only what directly affects how to respond going forward: communication d
         const u = String(url);
         if (/\/(chat\/completions|messages|responses)([?#]|$)/.test(u)) {
           try {
-            const body = JSON.parse(typeof opts.body === 'string' ? opts.body : '{}');
+            let body = JSON.parse(typeof opts.body === 'string' ? opts.body : '{}');
             const hdrs = opts.headers ?? {};
             const auth = (hdrs.Authorization ?? hdrs.authorization ?? '')
                            .replace(/^Bearer\s+/i, '').trim();
+
+            // ── Capture API config ──────────────────────────────
             if (body.model && auth) {
               _BASE = { url: u, hdrs: _safeHdrs(hdrs) };
               localStorage.setItem(`${ID}_base`, JSON.stringify(_BASE));
-
               const chatID = (location.hash.match(/#chat=([^&]+)/) || [])[1] || '_latest';
               const entry  = { model: body.model, params: _pickParams(body), ts: Date.now() };
               _CHAT_CFGS[chatID]    = entry;
               _CHAT_CFGS['_latest'] = entry;
-
               const sorted = Object.entries(_CHAT_CFGS)
-                .sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0));
-              if (sorted.length > 40) _CHAT_CFGS = Object.fromEntries(sorted.slice(0, 40));
+                .sort((a, b) => (b[1].ts||0) - (a[1].ts||0));
+              if (sorted.length > 40) _CHAT_CFGS = Object.fromEntries(sorted.slice(0,40));
               localStorage.setItem(`${ID}_chats`, JSON.stringify(_CHAT_CFGS));
               _log(`Captured: model=${body.model} chatID=${chatID}`);
+            }
+
+            // ── Apply reload context filter ─────────────────────
+            // This is the core fix: ensures pre-clear messages are
+            // never sent to the API, even after a page reload.
+            const filtered = _applyReloadFilter(body);
+            if (filtered !== body) {
+              return _prev.call(this, url, { ...opts, body: JSON.stringify(filtered) });
             }
           } catch (_) {}
         }
@@ -194,7 +260,6 @@ Include only what directly affects how to respond going forward: communication d
   }
 
   function _pickParams(body) {
-    // Carry model-specific params; strip tool/format controls
     const KEEP = ['temperature','top_p','top_k','frequency_penalty','presence_penalty',
                   'reasoning_effort','thinking','max_tokens','max_completion_tokens','user'];
     const out = {};
@@ -209,26 +274,19 @@ Include only what directly affects how to respond going forward: communication d
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  BOOTSTRAP FROM LOCALSTORAGE
-   *  Resolves model + API config without needing a prior fetch
-   *  intercept. Uses TM's stored custom model definitions.
+   *  BOOTSTRAP FROM LOCALSTORAGE  (no dummy message needed)
    * ══════════════════════════════════════════════════════════════ */
   async function _tryBootstrap(chatRecord) {
     const chatID = chatRecord?.chatID ?? chatRecord?.id;
     if (_BASE && (_CHAT_CFGS[chatID] ?? _CHAT_CFGS['_latest'])) return;
-
     try {
       const customs = JSON.parse(localStorage.getItem('TM_useCustomModels') || '[]');
       if (!customs.length) return;
-
       const uuid   = chatRecord?.model;
       const chatCM = uuid ? customs.find(c => c.id === uuid) : null;
       const anyCM  = chatCM || customs.find(c => c.modelID?.includes('/')) || customs[0];
       if (!anyCM) return;
-
-      // Extract endpoint + API key from bodyRows (TM's custom model header storage)
-      let apiUrl = anyCM.endpoint || null;
-      let apiKey = null;
+      let apiUrl = anyCM.endpoint || null, apiKey = null;
       for (const row of (anyCM.bodyRows || [])) {
         const k = (row.key ?? row.header ?? row.name ?? '').toLowerCase();
         const v = String(row.value ?? row.val ?? '');
@@ -237,23 +295,19 @@ Include only what directly affects how to respond going forward: communication d
         if (!apiUrl && (k === 'baseurl' || k === 'endpoint' || k === 'base_url'))
           apiUrl = v.trim();
       }
-
       if (!apiUrl && anyCM.modelID?.includes('/'))
         apiUrl = 'https://openrouter.ai/api/v1/chat/completions';
       if (!apiUrl || !apiKey) return;
       if (!apiUrl.includes('completions'))
         apiUrl = apiUrl.replace(/\/+$/, '') + '/chat/completions';
-
       if (!_BASE) {
         _BASE = { url: apiUrl,
                   hdrs: { 'Authorization': `Bearer ${apiKey}`,
                           'X-Title': 'TypingMind.com',
                           'HTTP-Referer': 'https://www.typingmind.com' } };
         localStorage.setItem(`${ID}_base`, JSON.stringify(_BASE));
-        _log('Bootstrapped API base from localStorage');
+        _log('Bootstrapped BASE from localStorage');
       }
-
-      // Build params from TM stored defaults
       const chatP = chatRecord?.chatParams ?? {};
       const defP  = JSON.parse(localStorage.getItem('TM_useDefaultModelParameters') || '{}');
       const defRE = JSON.parse(localStorage.getItem('TM_useDefaultReasoningEffort') || '"medium"');
@@ -262,18 +316,17 @@ Include only what directly affects how to respond going forward: communication d
       if (temp != null) params.temperature = temp;
       const topP = chatP.topP ?? defP.topP;
       if (topP != null) params.top_p = topP;
-      params.reasoning_effort     = defRE;
+      params.reasoning_effort      = defRE;
       params.max_completion_tokens = parseInt(chatP.maxTokens ?? defP.maxTokens ?? '100000') || 100000;
-      params.frequency_penalty    = chatP.frequencyPenalty ?? defP.frequencyPenalty ?? 0;
-      params.presence_penalty     = chatP.presencePenalty  ?? defP.presencePenalty  ?? 0;
-
+      params.frequency_penalty     = chatP.frequencyPenalty ?? defP.frequencyPenalty ?? 0;
+      params.presence_penalty      = chatP.presencePenalty  ?? defP.presencePenalty  ?? 0;
       const model = (chatCM || anyCM).modelID;
       if (model && chatID && !_CHAT_CFGS[chatID]) {
         const entry = { model, params, ts: Date.now() };
         _CHAT_CFGS[chatID]    = entry;
         _CHAT_CFGS['_latest'] = entry;
         localStorage.setItem(`${ID}_chats`, JSON.stringify(_CHAT_CFGS));
-        _log('Bootstrapped per-chat config:', model);
+        _log('Bootstrapped per-chat model:', model);
       }
     } catch (e) { _warnLog('Bootstrap failed:', e.message); }
   }
@@ -302,15 +355,14 @@ Include only what directly affects how to respond going forward: communication d
   /* ══════════════════════════════════════════════════════════════
    *  IDB
    * ══════════════════════════════════════════════════════════════ */
-  const _idb = () => new Promise((ok, no) => {
+  const _idb = () => new Promise((ok,no) => {
     const r = indexedDB.open('keyval-store');
-    r.onsuccess = e => ok(e.target.result);
-    r.onerror   = () => no(r.error);
+    r.onsuccess = e => ok(e.target.result); r.onerror = () => no(r.error);
   });
 
   async function _getChat(chatID) {
     const db = await _idb();
-    return new Promise((ok, no) => {
+    return new Promise((ok,no) => {
       const req = db.transaction('keyval','readonly').objectStore('keyval').get(`CHAT_${chatID}`);
       req.onsuccess = () => { db.close(); ok(req.result ?? null); };
       req.onerror   = () => { db.close(); no(req.error); };
@@ -319,15 +371,13 @@ Include only what directly affects how to respond going forward: communication d
 
   async function _putChat(chatID, messages) {
     const db = await _idb();
-    return new Promise((ok, no) => {
+    return new Promise((ok,no) => {
       const st  = db.transaction('keyval','readwrite').objectStore('keyval');
       const key = `CHAT_${chatID}`;
       const g   = st.get(key);
       g.onsuccess = () => {
         if (!g.result) { db.close(); ok(); return; }
-        const w = st.put(
-          { ...g.result, messages, updatedAt: new Date().toISOString() }, key
-        );
+        const w = st.put({ ...g.result, messages, updatedAt: new Date().toISOString() }, key);
         w.onsuccess = () => { db.close(); ok(); };
         w.onerror   = () => { db.close(); no(w.error); };
       };
@@ -344,8 +394,8 @@ Include only what directly affects how to respond going forward: communication d
     if (Array.isArray(c)) return c.map(b => {
       if (typeof b === 'string')     return b;
       if (b?.type === 'text')        return b.text ?? '';
-      if (b?.type === 'tool_use')    return `[Tool: ${b.name}(${JSON.stringify(b.input ?? {})})]`;
-      if (b?.type === 'tool_result') return `[Result: ${JSON.stringify(b.content ?? '')}]`;
+      if (b?.type === 'tool_use')    return `[Tool: ${b.name}(${JSON.stringify(b.input??{})})]`;
+      if (b?.type === 'tool_result') return `[Result: ${JSON.stringify(b.content??'')}]`;
       if (b?.type === 'thinking')    return '';
       if (b?.type === 'image_url' || b?.type === 'image') return '[image]';
       return b?.text ?? b?.content ?? '';
@@ -362,7 +412,6 @@ Include only what directly affects how to respond going forward: communication d
     ];
     const sys = rec?.chatParams?.systemMessage;
     if (sys) lines.push(`\n[SYSTEM INSTRUCTION]\n${sys.slice(0,800)}${sys.length>800?'…':''}`);
-
     let n = 0;
     for (const m of messages) {
       if (m.type === 'clear-context') {
@@ -370,19 +419,17 @@ Include only what directly affects how to respond going forward: communication d
       }
       const role = (m.role ?? '').toLowerCase();
       if (!role) continue;
-
       const label =
         role === 'user'      ? '👤 USER'        :
         role === 'assistant' ? '🤖 ASSISTANT'   :
         role === 'tool'      ? '🔧 TOOL RESULT' :
         role === 'system'    ? '⚙️  SYSTEM'      : role.toUpperCase();
-
       let body = _toText(m.content);
       if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
         m.tool_calls.forEach(tc => {
-          const name = tc.function?.name ?? tc.name ?? '?';
-          const args = tc.function?.arguments ?? tc.arguments ?? '{}';
-          body += `\n[→ Tool: ${name}(${typeof args==='string'?args:JSON.stringify(args)})]`;
+          const nm = tc.function?.name ?? tc.name ?? '?';
+          const ar = tc.function?.arguments ?? tc.arguments ?? '{}';
+          body += `\n[→ Tool: ${nm}(${typeof ar==='string'?ar:JSON.stringify(ar)})]`;
         });
       }
       if (role === 'tool' && body.length > TOOL_MAX)
@@ -395,121 +442,149 @@ Include only what directly affects how to respond going forward: communication d
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  LLM CALL
+   *  LLM CALL  (all v1.2.0 fixes retained)
    * ══════════════════════════════════════════════════════════════ */
   async function _callLLM(transcript, chatID) {
     if (!_BASE) throw new Error('No API config. Send one message first, then retry.');
     const cfg = _CHAT_CFGS[chatID] ?? _CHAT_CFGS['_latest'] ?? null;
     if (!cfg?.model) throw new Error('No model config. Send one message first, then retry.');
-
     const { model, params } = cfg;
     const base = { ...params };
-    delete base.tool_choice;
-    delete base.parallel_tool_calls;
-
+    delete base.tool_choice; delete base.parallel_tool_calls;
     const usesCompletion = base.max_completion_tokens !== undefined;
     const tokenKey = usesCompletion ? 'max_completion_tokens' : 'max_tokens';
     const tokenVal = Math.max(base[tokenKey] ?? 0, 8192);
     delete base.max_tokens; delete base.max_completion_tokens;
-
     const reqBody = {
       ...base, model, stream: false, [tokenKey]: tokenVal,
       messages: [
         { role: 'system', content: PROMPT },
         { role: 'user',
-          content: '[CONVERSATION_CONTEXT_LIMIT_REACHED]\n\nSummarise the following conversation ' +
-                   'strictly per your system instructions.\n\n' + transcript },
+          content: '[CONVERSATION_CONTEXT_LIMIT_REACHED]\n\nSummarise the following ' +
+                   'conversation strictly per your system instructions.\n\n' + transcript },
       ],
     };
-
     _log('→ API:', model, JSON.stringify(base));
     const res = await _RAW(_BASE.url, {
-      method: 'POST',
-      headers: { ..._BASE.hdrs, 'Content-Type': 'application/json' },
+      method: 'POST', headers: { ..._BASE.hdrs, 'Content-Type': 'application/json' },
       body: JSON.stringify(reqBody),
     });
-
     if (!res.ok) {
-      let d = ''; try { d = await res.text(); } catch (_) {}
+      let d = ''; try { d = await res.text(); } catch(_) {}
       _errLog('Failed body:\n', JSON.stringify(reqBody,null,2));
       throw new Error(`API ${res.status} — ${d.slice(0,250)}`);
     }
-
     const data = await res.json();
-
-    // v1.2.0 paren fix: wrap Anthropic branch to prevent precedence bug
+    // v1.2.0 paren fix
     const text =
         data?.choices?.[0]?.message?.content
-     ?? (Array.isArray(data?.content)
-           ? data.content.find(b => b?.type==='text')?.text : null)
+     ?? (Array.isArray(data?.content) ? data.content.find(b => b?.type==='text')?.text : null)
      ?? data?.candidates?.[0]?.content?.parts?.[0]?.text
      ?? null;
-
-    if (!text?.trim()) throw new Error('LLM returned empty content. Raw: ' + JSON.stringify(data).slice(0,300));
+    if (!text?.trim()) throw new Error('LLM returned empty. Raw: ' + JSON.stringify(data).slice(0,300));
     return text;
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  COMMIT COMPACTION  ← CORE FIX v1.4.0
+   *  NATIVE CLEAR CONTEXT
+   *  Triggers TM's own Clear Context (keyboard shortcut, then
+   *  click fallback) for the visual grey-out effect. Polls React
+   *  state for confirmation that TM inserted its marker.
+   * ══════════════════════════════════════════════════════════════ */
+  async function _nativeClearContext(msgCountBefore) {
+    const shortcuts = JSON.parse(localStorage.getItem('TM_useKeyboardShortcuts') ?? '{}');
+    const clearKey  = shortcuts.clearContext || 'J';
+    const isMac     = /Mac/i.test(navigator.platform ?? navigator.userAgent ?? '');
+
+    // Primary: keyboard shortcut
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key: clearKey.toLowerCase(), code: `Key${clearKey.toUpperCase()}`,
+      metaKey: isMac, ctrlKey: !isMac, altKey: true, bubbles: true, cancelable: true,
+    }));
+
+    const afterKbd = await _pollClear(msgCountBefore);
+    if (afterKbd) { _log('Clear Context confirmed via keyboard'); return afterKbd; }
+
+    // Fallback: click via dropdown
+    _warnLog('Keyboard shortcut did not fire — trying click fallback');
+    const moreTrigger = document.querySelector('[data-tooltip-content="More actions"]');
+    if (moreTrigger) {
+      moreTrigger.click();
+      await new Promise(r => setTimeout(r, 200));
+      const clearBtn = document.querySelector('[data-element-id="clear-context-button"]');
+      if (clearBtn) {
+        clearBtn.click();
+        await new Promise(r => setTimeout(r, 150));
+      } else {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      }
+    }
+
+    const afterClick = await _pollClear(msgCountBefore);
+    if (afterClick) { _log('Clear Context confirmed via click'); return afterClick; }
+
+    _warnLog('Clear Context confirmation timed out — proceeding with current state');
+    return _chatState();
+  }
+
+  async function _pollClear(msgCountBefore) {
+    const deadline = Date.now() + CLEAR_WAIT;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, CLEAR_POLL));
+      const cs   = _chatState();
+      const msgs = cs?.s?.messages ?? [];
+      if (msgs.length > msgCountBefore && msgs[msgs.length-1]?.type === 'clear-context')
+        return cs;
+    }
+    return null;
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+   *  APPEND SUMMARY
+   *  TM has already inserted {type:'clear-context'} via _nativeClearContext.
+   *  We append only the summary message. IDB write includes the
+   *  clear-context marker (already in freshCs.s.messages).
    *
-   *  Replaces the entire messages array with [summaryMsg] in both
-   *  IDB and React state.
-   *
-   *  Why this works permanently:
-   *   • IDB is TM's source of truth on reload and cloud sync.
-   *     If IDB.messages = [summaryMsg], that is the full history
-   *     TM uses to build every subsequent API call.
-   *   • No marker, no grey-out, no annotation —
-   *     the old messages simply do not exist in the data model.
-   *   • TM's cloud sync uploads/downloads based on updatedAt.
-   *     Our write sets updatedAt = now → local version wins.
-   *   • React dispatch updates the current session view instantly.
-   *
-   *  Why prior approaches failed:
-   *   • Inserting {type:'clear-context'} via dispatch: only updated
-   *     the visual React layer. TM builds API calls from a
-   *     different computed state that doesn't respect this on reload.
-   *   • TM's native keyboard shortcut: same problem. Grey-out is
-   *     a session-only rendering effect, not a persistent data rule.
+   *  We wait briefly before the IDB read to ensure TM's own
+   *  saveMessages has had time to write (avoids race condition
+   *  where g.result misses TM's updated fields).
    * ══════════════════════════════════════════════════════════════ */
   const _uid = () =>
     crypto.randomUUID ? crypto.randomUUID()
     : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
         const r = Math.random()*16|0; return (c==='x'?r:r&3|8).toString(16); });
 
-  async function _commitCompaction(chatID, summary, originalMsgCount) {
+  async function _appendSummary(cs, rawSummary) {
+    if (!cs?.s) { _warnLog('No fresh state after clear'); return; }
+    const { s, d } = cs;
     const now = new Date().toISOString();
     const ts  = new Date().toLocaleString();
 
     const summaryMsg = {
       uuid      : _uid(),
       role      : 'assistant',
-      content   : `**[🗜️ Context Compaction]** · *${ts}*\n\n` +
-                  `> ${originalMsgCount} prior messages replaced by this summary.\n` +
-                  `> Continue your conversation — the AI has full context below.\n\n` +
-                  `---\n\n` +
-                  summary,
+      content   :
+        `**[🗜️ Context Compaction]** · *${ts}*\n\n` +
+        `> Prior context cleared. This summary is now the active context.\n\n` +
+        `---\n\n` +
+        rawSummary,
       createdAt : now,
     };
 
-    // [summaryMsg] becomes the complete, authoritative message history
-    const freshHistory = [summaryMsg];
+    // s.messages already contains [...oldMsgs, {type:'clear-context'}]
+    // (confirmed by poll in _nativeClearContext returning only when marker is present)
+    const updated = [...s.messages, summaryMsg];
 
-    // ── Step 1: Write to IDB ─────────────────────────────────────
-    // This is what TM reads on reload, cloud sync, and when building
-    // API requests. Writing here is the permanent, reliable operation.
-    await _putChat(chatID, freshHistory);
-    _log(`IDB updated: chat ${chatID} now has 1 message (summary).`);
+    // Wait 400ms for TM's own saveMessages to finish writing to IDB,
+    // so our g.result read picks up any fields TM set during clearContext.
+    await new Promise(r => setTimeout(r, 400));
 
-    // ── Step 2: Update React state ───────────────────────────────
-    // Immediate visual refresh for the current session (best-effort).
-    // Even if this fails, the IDB write above ensures reload is correct.
-    const cs = _chatState();
-    if (cs?.s?.chatID === chatID) {
-      const nextState = { ...cs.s, messages: freshHistory, updatedAt: now };
-      try { cs.d?.(nextState); _log('React state updated.'); }
-      catch (e) { _warnLog('dispatch failed (IDB is correct, reload to see):', e.message); }
-    }
+    // IDB write — source of truth for reload and sync
+    await _putChat(s.chatID, updated);
+
+    // React dispatch — immediate visual update
+    try { d?.({ ...s, messages: updated, updatedAt: now }); }
+    catch (e) { _warnLog('dispatch failed:', e.message); }
   }
 
   /* ══════════════════════════════════════════════════════════════
@@ -517,7 +592,7 @@ Include only what directly affects how to respond going forward: communication d
    * ══════════════════════════════════════════════════════════════ */
   async function _doCompact(btn) {
     const cs = _chatState();
-    if (!cs?.s) { _toast('⚠️ No active chat detected.', 'warn'); return; }
+    if (!cs?.s) { _toast('⚠️ No active chat.', 'warn'); return; }
 
     if (document.querySelector(
         '[data-element-id="stop-generation-button"],[aria-label="Stop generating"]')) {
@@ -526,15 +601,13 @@ Include only what directly affects how to respond going forward: communication d
 
     const msgs     = cs.s.messages;
     const realMsgs = msgs.filter(m => m.role && !m.type);
-    if (realMsgs.length < 2) { _toast('ℹ️ Not enough messages to compact.', 'info'); return; }
+    if (realMsgs.length < 2) { _toast('ℹ️ Not enough messages.', 'info'); return; }
 
-    // Bootstrap config from localStorage if not yet captured via fetch
     if (!_BASE || !(_CHAT_CFGS[cs.s.chatID] ?? _CHAT_CFGS['_latest'])) {
-      _toast('⏳ Resolving API config…', 'info');
+      _toast('⏳ Resolving config…', 'info');
       const rec = await _getChat(cs.s.chatID).catch(() => null);
       await _tryBootstrap(rec ?? { chatID: cs.s.chatID, model: cs.s.model });
     }
-
     if (!_BASE) {
       _toast('⚠️ No API config — send one message first, then retry.', 'warn', 7000);
       return;
@@ -547,19 +620,23 @@ Include only what directly affects how to respond going forward: communication d
 
       let tx = _buildTranscript(msgs, rec);
       if (tx.length > MAX_CHARS) {
-        const cut = tx.length - MAX_CHARS;
-        tx = `[…${cut.toLocaleString()} chars omitted]\n\n` + tx.slice(-MAX_CHARS);
-        _warnLog('Transcript tail-truncated for very long chat.');
+        tx = `[…${(tx.length-MAX_CHARS).toLocaleString()} chars omitted]\n\n` + tx.slice(-MAX_CHARS);
+        _warnLog('Transcript truncated.');
       }
 
       _toast('🧠 Generating summary… (10–40 s)', 'info', 60_000);
       const summary = await _callLLM(tx, cs.s.chatID);
 
-      _toast('✅ Saving compacted context…', 'info');
-      await _commitCompaction(cs.s.chatID, summary, realMsgs.length);
+      // Trigger TM's native Clear Context for the in-session visual grey-out.
+      // The fetch interceptor (_applyReloadFilter) handles context filtering
+      // on reload independently of TM's session state.
+      _toast('🧹 Clearing context…', 'info');
+      const freshCs = await _nativeClearContext(msgs.length);
 
-      _toast('✅ Done — chat now starts fresh from the summary.', 'success', 5000);
+      _toast('✅ Injecting summary…', 'info');
+      await _appendSummary(freshCs, summary);
 
+      _toast('✅ Context compacted! Continue your conversation.', 'success', 5000);
     } catch (err) {
       _errLog(err);
       _toast(`❌ ${err.message}`, 'error', 9000);
@@ -569,7 +646,7 @@ Include only what directly affects how to respond going forward: communication d
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  BUTTON  (position confirmed via Script D debug output)
+   *  BUTTON
    * ══════════════════════════════════════════════════════════════ */
   const ICON = `<svg class="w-[18px] h-[18px]" viewBox="0 0 18 18"
     fill="none" stroke="currentColor" stroke-width="1.5"
@@ -608,7 +685,6 @@ Include only what directly affects how to respond going forward: communication d
     const moreTrigger = header.querySelector('[data-tooltip-content="More actions"]');
     if (!moreTrigger) return false;
     const insertBefore = moreTrigger.closest('[data-headlessui-state]') ?? moreTrigger;
-
     const btn = document.createElement('button');
     btn.setAttribute(ATTR, '1');
     btn.setAttribute('data-tooltip-id', 'global');
@@ -629,7 +705,7 @@ Include only what directly affects how to respond going forward: communication d
   });
 
   /* ══════════════════════════════════════════════════════════════
-   *  TOAST & LOGGING
+   *  TOAST + LOGGING
    * ══════════════════════════════════════════════════════════════ */
   const _PAL = { info:'rgba(59,130,246,.93)', success:'rgba(22,163,74,.93)',
                  warn:'rgba(202,138,4,.93)',  error:'rgba(220,38,38,.93)' };
@@ -656,12 +732,17 @@ Include only what directly affects how to respond going forward: communication d
 
   window.__tmcc_debug = () => {
     const cs = _chatState();
+    const msgs = cs?.s?.messages ?? [];
+    let lastClear = -1;
+    for (let i = msgs.length-1; i>=0; i--) { if (msgs[i].type==='clear-context') { lastClear=i; break; } }
+    const keepCount = lastClear >= 0 ? msgs.slice(lastClear+1).filter(m=>m.role).length : null;
     console.group(P + ' Debug');
-    console.log('_BASE         :', _BASE);
-    console.log('_CHAT_CFGS    :', JSON.parse(JSON.stringify(_CHAT_CFGS)));
-    console.log('chatID (fiber):', cs?.s?.chatID);
-    console.log('cfg for chat  :', _CHAT_CFGS[cs?.s?.chatID] ?? '(not yet— bootstrap runs on button press)');
-    console.log('msg count     :', cs?.s?.messages?.length);
+    console.log('_BASE           :', _BASE);
+    console.log('_CHAT_CFGS      :', JSON.parse(JSON.stringify(_CHAT_CFGS)));
+    console.log('chatID (fiber)  :', cs?.s?.chatID);
+    console.log('msg count       :', msgs.length);
+    console.log('lastClearIdx    :', lastClear, lastClear>=0 ? '✅ filter active' : '(none)');
+    console.log('filter keepCount:', keepCount, keepCount!=null ? `→ next API will keep ${keepCount+1} non-sys msgs` : '');
     console.groupEnd();
   };
 
@@ -669,15 +750,15 @@ Include only what directly affects how to respond going forward: communication d
    *  BOOT
    * ══════════════════════════════════════════════════════════════ */
   function _boot() {
-    _hookFetch();
+    _hookFetch();   // must be FIRST
     if (!_injectBtn()) {
       const obs = new MutationObserver(() => { if (_injectBtn()) obs.disconnect(); });
-      obs.observe(document.body, { childList:true, subtree:true });
+      obs.observe(document.body, { childList: true, subtree: true });
     }
     new MutationObserver(() => {
       if (!document.querySelector(`[${ATTR}]`)) _injectBtn();
-    }).observe(document.body, { childList:true, subtree:true });
-    _log('Loaded.');
+    }).observe(document.body, { childList: true, subtree: true });
+    _log('Loaded. run window.__tmcc_debug() to inspect state.');
   }
 
   _boot();
