@@ -1,42 +1,37 @@
 // ================================================================
-//  TypingMind — Compact Context Extension                v1.2.0
+//  TypingMind — Compact Context Extension                v1.3.0
 // ================================================================
 //
-//  INSTALL: Preferences → Advanced Settings → Extensions → URL
-//  TRIGGER: 🗜 button in chat header, or ⌘⌥K / Ctrl+Alt+K
-//  FIRST RUN: Send any message once to capture API config.
+//  CHANGES vs v1.2.0:
 //
-//  FIXES vs v1.1.0 (confirmed via live debug data):
+//  BUG FIX — Clear Context not sticking on large chats
+//    My dispatch-injected {type:'clear-context'} marker only updated
+//    the visual React layer. TM rebuilds API request messages from IDB
+//    or a synced computed state, so pre-summary messages were still
+//    included in the next API call. The fix uses TM's *native* Clear
+//    Context keyboard shortcut, then polls for confirmation, then
+//    appends only the summary into the now-cleared state.
 //
-//  1. "Cannot read 'find' of undefined"
-//     JS operator precedence bug: `a ?? b ? c : d` parses as
-//     `(a ?? b) ? c : d`. When `choices[0].message.content` was a
-//     non-null string, it became the ternary condition, then called
-//     `.find()` on `data.content` which is undefined in the
-//     OpenRouter/OpenAI response format.
-//     FIX: wrap the Anthropic branch in explicit parens.
-//
-//  2. Wrong model sent to API
-//     IDB `chat.model` = `3dad2089-3310-472e-a13d-f3e78973c70e`
-//     (TM's internal UUID), NOT the OpenRouter model string.
-//     FIX: always use model from _CHAT_CFGS (captured from fetch).
-//
-//  3. tool_choice / parallel_tool_calls sent with no tools
-//     TM sends these for normal chat (46 plugin tools). Our
-//     summarisation call has no tools — stripped before sending.
+//  IMPROVEMENT — No dummy message required after first-ever use
+//    Added _tryBootstrap() which resolves model ID + API config from
+//    TM_useCustomModels in localStorage, so pressing the button on
+//    a pre-existing chat works immediately after the first-ever init.
 //
 // ================================================================
 
 (() => {
   'use strict';
 
-  const ID        = 'tm-ctx-compact';
-  const VERSION   = '1.2.0';
-  const ATTR      = `data-${ID}`;
-  const MAX_CHARS = 80_000;           // tail-truncate very long transcripts
-  const TOOL_MAX  = 1_500;            // per-tool-result character cap in transcript
+  const ID       = 'tm-ctx-compact';
+  const VERSION  = '1.3.0';
+  const ATTR     = `data-${ID}`;
 
-  /* ── PROMPT ─────────────────────────────────────────────────── */
+  const MAX_CHARS   = 80_000;  // tail-truncate transcript if longer
+  const TOOL_MAX    = 1_500;   // cap per tool-result in transcript
+  const CLEAR_POLL  = 80;      // ms between polls after Clear Context
+  const CLEAR_WAIT  = 4_000;   // max ms to wait for TM to process Clear Context
+
+  /* ── PROMPT (verbatim) ───────────────────────────────────────── */
   const PROMPT = `You are resuming an active session that has hit the context window limit. Produce a structured compaction summary that enables a new AI instance to continue this work with minimal information loss.
 
 Write in structured, telegraphic form. This is not a narrative retelling — every token must earn its place.
@@ -151,17 +146,14 @@ Maximum 5 bullets. Omit this section entirely if no aspect is likely to affect t
 Include only what directly affects how to respond going forward: communication depth preference, domain expertise level observed, environment or tooling constraints, and any sensitive context requiring careful handling.`;
 
   /* ══════════════════════════════════════════════════════════════
-   *  FETCH INTERCEPT
-   *  Saves the real fetch BEFORE hooking so our own API calls
-   *  bypass every interceptor.  Updates on every API call so
-   *  per-chat model changes are always reflected.
+   *  FETCH INTERCEPT — captures API config passively
+   *  _RAW_FETCH saved first so our summarisation calls bypass it.
    * ══════════════════════════════════════════════════════════════ */
-  const _RAW = window.fetch.bind(window);   // true original — used for summarisation
+  const _RAW = window.fetch.bind(window);
 
-  let _BASE       = null;    // { url, hdrs }  — provider endpoint + auth
-  let _CHAT_CFGS  = {};      // chatID → { model, params, ts }
+  let _BASE      = null;   // { url, hdrs }
+  let _CHAT_CFGS = {};     // chatID → { model, params, ts }
 
-  // Restore persisted config from previous page loads
   try {
     const b = localStorage.getItem(`${ID}_base`);
     if (b) _BASE = JSON.parse(b);
@@ -180,32 +172,22 @@ Include only what directly affects how to respond going forward: communication d
             const hdrs = opts.headers ?? {};
             const auth = (hdrs.Authorization ?? hdrs.authorization ?? '')
                            .replace(/^Bearer\s+/i, '').trim();
-
             if (body.model && auth) {
-              // ── Update provider-level config ─────────────────
               _BASE = { url: u, hdrs: _safeHdrs(hdrs) };
               localStorage.setItem(`${ID}_base`, JSON.stringify(_BASE));
 
-              // ── Per-chat config, keyed by chatID from URL hash
-              const chatID = (location.hash.match(/#chat=([^&]+)/) || [])[1]
-                             || '_latest';
+              const chatID = (location.hash.match(/#chat=([^&]+)/) || [])[1] || '_latest';
+              const entry  = { model: body.model, params: _pickParams(body), ts: Date.now() };
 
-              const entry = {
-                model  : body.model,          // 'google/gemini-3-flash-preview' etc.
-                params : _pickParams(body),   // reasoning_effort, temperature, etc.
-                ts     : Date.now(),
-              };
               _CHAT_CFGS[chatID]    = entry;
-              _CHAT_CFGS['_latest'] = entry;  // always keep a fallback
+              _CHAT_CFGS['_latest'] = entry;
 
-              // Prune to latest 40 chats
               const sorted = Object.entries(_CHAT_CFGS)
                 .sort((a, b) => (b[1].ts || 0) - (a[1].ts || 0));
               if (sorted.length > 40) _CHAT_CFGS = Object.fromEntries(sorted.slice(0, 40));
               localStorage.setItem(`${ID}_chats`, JSON.stringify(_CHAT_CFGS));
 
-              _log(`Captured: model=${body.model} chatID=${chatID}`,
-                   `params=${JSON.stringify(entry.params)}`);
+              _log(`Captured: model=${body.model} chatID=${chatID}`);
             }
           } catch (_) {}
         }
@@ -215,45 +197,118 @@ Include only what directly affects how to respond going forward: communication d
   }
 
   /**
-   * Params to replay verbatim from TM's call.
-   *
-   * EXCLUDED intentionally:
-   *   tools, tool_choice, parallel_tool_calls  — our call has no tools
-   *   messages, stream, n, stop, seed          — we override these
-   *   response_format                           — we need plain markdown
+   * Params to carry from TM's call.
+   * Explicitly excluded: tools, tool_choice, parallel_tool_calls,
+   * messages, stream, n, stop, seed, response_format.
    */
   function _pickParams(body) {
-    const KEEP = [
-      'temperature',              // required at 1.0 for some Anthropic models
-      'top_p', 'top_k',
-      'frequency_penalty', 'presence_penalty',
-      'reasoning_effort',         // OpenAI / OpenRouter reasoning models (critical)
-      'thinking',                 // Anthropic extended thinking
-      'max_tokens',               // anthropic / fallback
-      'max_completion_tokens',    // OpenAI newer models
-      'user',
-    ];
+    const KEEP = ['temperature','top_p','top_k','frequency_penalty',
+                  'presence_penalty','reasoning_effort','thinking',
+                  'max_tokens','max_completion_tokens','user'];
     const out = {};
-    for (const k of KEEP) {
-      if (body[k] !== undefined) out[k] = body[k];
-    }
+    for (const k of KEEP) if (body[k] !== undefined) out[k] = body[k];
     return out;
   }
 
   function _safeHdrs(h) {
-    const KEEP = new Set([
-      'authorization', 'x-api-key',
-      'http-referer', 'x-title',
-      'anthropic-version', 'x-goog-api-key', 'openai-organization',
-    ]);
-    return Object.fromEntries(
-      Object.entries(h).filter(([k]) => KEEP.has(k.toLowerCase()))
-    );
+    const K = new Set(['authorization','x-api-key','http-referer','x-title',
+                       'anthropic-version','x-goog-api-key','openai-organization']);
+    return Object.fromEntries(Object.entries(h).filter(([k]) => K.has(k.toLowerCase())));
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  REACT FIBER  (identical to chat_user_msg_preview.js pattern)
-   *  Confirmed working via Script A debug output.
+   *  BOOTSTRAP FROM LOCALSTORAGE
+   *  Resolves model ID + API config from TM's stored custom models
+   *  so the button works on pre-existing chats without a prior
+   *  intercepted fetch in the current session.
+   * ══════════════════════════════════════════════════════════════ */
+  async function _tryBootstrap(chatRecord) {
+    // Already have everything we need?
+    const chatID = chatRecord?.chatID ?? chatRecord?.id;
+    if (_BASE && (_CHAT_CFGS[chatID] || _CHAT_CFGS['_latest'])) return;
+
+    try {
+      const customs = JSON.parse(localStorage.getItem('TM_useCustomModels') || '[]');
+      if (!customs.length) return;
+
+      const uuid     = chatRecord?.model;
+      const chatCM   = uuid ? customs.find(c => c.id === uuid) : null;
+      const anyCM    = chatCM || customs.find(c => c.modelID?.includes('/')) || customs[0];
+      if (!anyCM) return;
+
+      // ── Extract endpoint + API key from bodyRows ─────────────
+      // TM stores custom model HTTP headers/body as bodyRows.
+      // Known formats: { key, value } or { header, value }
+      let apiUrl = anyCM.endpoint || null;
+      let apiKey = null;
+
+      for (const row of (anyCM.bodyRows || [])) {
+        const k = (row.key ?? row.header ?? row.name ?? '').toLowerCase();
+        const v = row.value ?? row.val ?? '';
+        if (!apiKey && (k === 'authorization' || k === 'x-api-key')) {
+          apiKey = String(v).replace(/^Bearer\s+/i, '').trim();
+        }
+        if (!apiUrl && (k === 'baseurl' || k === 'endpoint' || k === 'base_url')) {
+          apiUrl = String(v).trim();
+        }
+      }
+
+      // Fallback: if model contains '/', assume OpenRouter
+      if (!apiUrl && anyCM.modelID?.includes('/')) {
+        apiUrl = 'https://openrouter.ai/api/v1/chat/completions';
+      }
+      if (!apiUrl || !apiKey) return;
+
+      // Normalise URL to the completions endpoint
+      if (!apiUrl.includes('completions')) {
+        apiUrl = apiUrl.replace(/\/+$/, '') + '/chat/completions';
+      }
+
+      if (!_BASE) {
+        _BASE = {
+          url  : apiUrl,
+          hdrs : {
+            'Authorization' : `Bearer ${apiKey}`,
+            'X-Title'       : 'TypingMind.com',
+            'HTTP-Referer'  : 'https://www.typingmind.com',
+          },
+        };
+        localStorage.setItem(`${ID}_base`, JSON.stringify(_BASE));
+        _log('Bootstrapped API base from localStorage custom models');
+      }
+
+      // Build params from TM defaults + per-chat settings
+      const chatP      = chatRecord?.chatParams ?? {};
+      const defP       = JSON.parse(localStorage.getItem('TM_useDefaultModelParameters') || '{}');
+      const defRE      = JSON.parse(localStorage.getItem('TM_useDefaultReasoningEffort') || '"medium"');
+      const defMaxTok  = parseInt(localStorage.getItem('TM_useDefaultMaxTokens') || '100000');
+
+      const params = {};
+      const temp = chatP.temperature ?? defP.temperature;
+      if (temp !== null && temp !== undefined) params.temperature = temp;
+      const topP = chatP.topP ?? defP.topP;
+      if (topP !== null && topP !== undefined) params.top_p = topP;
+      params.reasoning_effort    = defRE;
+      params.max_completion_tokens = parseInt(chatP.maxTokens ?? defP.maxTokens ?? defMaxTok) || 100000;
+      params.frequency_penalty   = chatP.frequencyPenalty ?? defP.frequencyPenalty ?? 0;
+      params.presence_penalty    = chatP.presencePenalty  ?? defP.presencePenalty  ?? 0;
+
+      const model = (chatCM || anyCM).modelID;
+      if (model && chatID && !_CHAT_CFGS[chatID]) {
+        const entry = { model, params, ts: Date.now() };
+        _CHAT_CFGS[chatID]    = entry;
+        _CHAT_CFGS['_latest'] = entry;
+        localStorage.setItem(`${ID}_chats`, JSON.stringify(_CHAT_CFGS));
+        _log('Bootstrapped per-chat config from localStorage:', model);
+      }
+
+    } catch (e) {
+      _warnLog('Bootstrap from localStorage failed:', e.message);
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+   *  REACT FIBER
    * ══════════════════════════════════════════════════════════════ */
   function _chatState() {
     const el = document.querySelector('[data-element-id="chat-space-middle-part"]');
@@ -265,17 +320,16 @@ Include only what directly affects how to respond going forward: communication d
       let hs = f.memoizedState, i = 0;
       for (; hs && i < 6; hs = hs.next, i++) {
         const v = hs.memoizedState;
-        if (
-          v && typeof v === 'object' && !Array.isArray(v) &&
-          Array.isArray(v.messages) && v.chatID
-        ) return { s: v, d: hs.queue?.dispatch };
+        if (v && typeof v === 'object' && !Array.isArray(v) &&
+            Array.isArray(v.messages) && v.chatID)
+          return { s: v, d: hs.queue?.dispatch };
       }
     }
     return null;
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  IDB  (confirmed: db='keyval-store', store='keyval', key=`CHAT_${id}`)
+   *  IDB
    * ══════════════════════════════════════════════════════════════ */
   const _idb = () => new Promise((ok, no) => {
     const r = indexedDB.open('keyval-store');
@@ -302,8 +356,7 @@ Include only what directly affects how to respond going forward: communication d
       g.onsuccess = () => {
         if (!g.result) { db.close(); ok(); return; }
         const w = st.put(
-          { ...g.result, messages, updatedAt: new Date().toISOString() },
-          key
+          { ...g.result, messages, updatedAt: new Date().toISOString() }, key
         );
         w.onsuccess = () => { db.close(); ok(); };
         w.onerror   = () => { db.close(); no(w.error); };
@@ -314,40 +367,18 @@ Include only what directly affects how to respond going forward: communication d
 
   /* ══════════════════════════════════════════════════════════════
    *  TRANSCRIPT BUILDER
-   *
-   *  Confirmed TM internal message structures (from debug):
-   *
-   *  User message:
-   *    { role:'user', uuid, content: [{type:'text',text:'...'},...], createdAt }
-   *
-   *  Assistant (final text response):
-   *    { role:'assistant', uuid, model, content: string, tool_calls:[], ... }
-   *
-   *  Assistant (tool-calling turn):
-   *    { role:'assistant', uuid, model, content: null, tool_calls:[...],
-   *      reasoning, reasoning_details, ... }
-   *
-   *  Tool response:
-   *    { role:'tool', type:'tool-response', uuid, name, content: [{type:'text',text:'...'}],
-   *      tool_call_id, pluginResponse, ... }
-   *
-   *  Clear-context marker:
-   *    { type:'clear-context', uuid, createdAt }
    * ══════════════════════════════════════════════════════════════ */
-
-  /** Flatten any content shape to a plain string */
   function _toText(c) {
     if (c === null || c === undefined) return '';
     if (typeof c === 'string')         return c;
     if (Array.isArray(c)) {
       return c.map(b => {
-        if (typeof b === 'string')       return b;
-        if (b?.type === 'text')          return b.text ?? '';
-        if (b?.type === 'tool_use')      return `[Tool: ${b.name}(${JSON.stringify(b.input ?? {})})]`;
-        if (b?.type === 'tool_result')   return `[Result: ${JSON.stringify(b.content ?? '')}]`;
-        if (b?.type === 'image_url')     return '[image]';
-        if (b?.type === 'image')         return '[image]';
-        if (b?.type === 'thinking')      return '';  // skip internal thinking blocks
+        if (typeof b === 'string')     return b;
+        if (b?.type === 'text')        return b.text ?? '';
+        if (b?.type === 'tool_use')    return `[Tool: ${b.name}(${JSON.stringify(b.input ?? {})})]`;
+        if (b?.type === 'tool_result') return `[Result: ${JSON.stringify(b.content ?? '')}]`;
+        if (b?.type === 'thinking')    return '';
+        if (b?.type === 'image_url' || b?.type === 'image') return '[image]';
         return b?.text ?? b?.content ?? '';
       }).join('\n').trim();
     }
@@ -358,108 +389,75 @@ Include only what directly affects how to respond going forward: communication d
   function _buildTranscript(messages, rec) {
     const lines = [
       '===== CONVERSATION TRANSCRIPT =====',
-      `Title  : ${rec?.chatTitle ?? '(untitled)'}`,
+      `Title   : ${rec?.chatTitle ?? '(untitled)'}`,
       `Messages: ${messages.filter(m => m.role || m.type === 'clear-context').length}`,
     ];
-
-    // System message from chatParams (not in messages array - added by TM at call-time)
     const sys = rec?.chatParams?.systemMessage;
-    if (sys) lines.push(`\n[CONFIGURED SYSTEM INSTRUCTION]\n${sys.slice(0, 800)}${sys.length > 800 ? '…' : ''}`);
+    if (sys) lines.push(`\n[SYSTEM INSTRUCTION]\n${sys.slice(0, 800)}${sys.length > 800 ? '…' : ''}`);
 
     let n = 0;
     for (const m of messages) {
-
-      // ── Clear-context markers (TM's own previous compactions) ─────────
       if (m.type === 'clear-context') {
-        lines.push('\n── [CONTEXT CLEARED HERE — earlier messages no longer visible to AI] ──\n');
+        lines.push('\n── [CONTEXT CLEARED HERE — earlier messages excluded from AI context] ──\n');
         continue;
       }
-
       const role = (m.role ?? '').toLowerCase();
-      if (!role) continue;   // skip any unrecognised marker objects
+      if (!role) continue;
 
       const label =
-        role === 'user'      ? '👤 USER'         :
-        role === 'assistant' ? '🤖 ASSISTANT'    :
-        role === 'tool'      ? '🔧 TOOL RESULT'  :
-        role === 'system'    ? '⚙️  SYSTEM'       :
+        role === 'user'      ? '👤 USER'        :
+        role === 'assistant' ? '🤖 ASSISTANT'   :
+        role === 'tool'      ? '🔧 TOOL RESULT' :
+        role === 'system'    ? '⚙️  SYSTEM'      :
         role.toUpperCase();
 
-      // ── Extract message body ──────────────────────────────────────────
       let body = _toText(m.content);
 
-      // Tool calls on assistant messages (content may be null for these)
       if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
         m.tool_calls.forEach(tc => {
           const name = tc.function?.name ?? tc.name ?? '?';
           const args = tc.function?.arguments ?? tc.arguments ?? '{}';
-          body += `\n[→ Tool Call: ${name}(${typeof args === 'string' ? args : JSON.stringify(args)})]`;
+          body += `\n[→ Tool: ${name}(${typeof args === 'string' ? args : JSON.stringify(args)})]`;
         });
       }
 
-      // Tool results can be very long — cap per-result to keep transcript manageable
+      // Cap long tool results to keep transcript manageable
       if (role === 'tool' && body.length > TOOL_MAX) {
         body = body.slice(0, TOOL_MAX)
              + `\n[…result truncated, ${(body.length - TOOL_MAX).toLocaleString()} chars omitted]`;
       }
 
-      if (!body.trim()) continue;   // skip truly empty messages
+      if (!body.trim()) continue;
       lines.push(`\n[${++n}] ${label}:\n${body}`);
     }
-
-    lines.push(`\n===== END OF TRANSCRIPT (${n} messages shown) =====`);
+    lines.push(`\n===== END (${n} messages) =====`);
     return lines.join('\n');
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  API CALL
-   *
-   *  KEY FIX v1.2.0:
-   *  Response text extraction now uses explicit parens to prevent
-   *  the operator-precedence bug that caused `.find on undefined`.
-   *
-   *  Previous (buggy):
-   *    data?.choices?.[0]?.message?.content    ← if string, becomes
-   *    ?? Array.isArray(...)                      the ternary condition!
-   *        ? data.content.find(...)            ← data.content undefined
-   *        : null
-   *
-   *  Fixed:
-   *    data?.choices?.[0]?.message?.content
-   *    ?? (Array.isArray(data?.content)        ← parens isolate branch
-   *          ? data.content.find(...)
-   *          : null)
+   *  LLM CALL (v1.2.0 parens fix retained)
    * ══════════════════════════════════════════════════════════════ */
   async function _callLLM(transcript, chatID) {
-    if (!_BASE) {
-      throw new Error('No API config captured yet. Send one message first, then retry.');
-    }
+    if (!_BASE) throw new Error('No API config. Send one message first, then retry.');
 
-    // Use per-chat config (model captured from actual fetch — NOT IDB UUID)
     const cfg = _CHAT_CFGS[chatID] ?? _CHAT_CFGS['_latest'] ?? null;
-    if (!cfg?.model) {
-      throw new Error('No model captured for this chat. Send one message first, then retry.');
-    }
+    if (!cfg?.model) throw new Error('No model config for this chat. Send one message first, then retry.');
 
     const { model, params } = cfg;
-
-    // ── Build base params from TM's own call ─────────────────────────
     const base = { ...params };
 
-    // FIX: Strip tool-routing params — our call has no tools
+    // Strip tool-routing params — our call has no tools
     delete base.tool_choice;
     delete base.parallel_tool_calls;
 
-    // ── Token limit — keep whichever key TM uses, minimum 8192 ───────
     const usesCompletion = base.max_completion_tokens !== undefined;
     const tokenKey = usesCompletion ? 'max_completion_tokens' : 'max_tokens';
     const tokenVal = Math.max(base[tokenKey] ?? 0, 8192);
     delete base.max_tokens;
     delete base.max_completion_tokens;
 
-    // ── Final request body ─────────────────────────────────────────────
     const reqBody = {
-      ...base,              // temperature, reasoning_effort, thinking, etc. — exact from TM
+      ...base,
       model,
       stream     : false,
       [tokenKey] : tokenVal,
@@ -467,15 +465,14 @@ Include only what directly affects how to respond going forward: communication d
         { role: 'system', content: PROMPT },
         {
           role    : 'user',
-          content :
-            '[CONVERSATION_CONTEXT_LIMIT_REACHED]\n\n' +
-            'Summarise the following conversation strictly per your system instructions above.\n\n' +
-            transcript,
+          content : '[CONVERSATION_CONTEXT_LIMIT_REACHED]\n\n' +
+                    'Summarise the following conversation strictly per your system instructions.\n\n' +
+                    transcript,
         },
       ],
     };
 
-    _log('→ API:', model, '| params:', JSON.stringify(base));
+    _log('→ API:', model, '| base params:', JSON.stringify(base));
 
     const res = await _RAW(_BASE.url, {
       method  : 'POST',
@@ -484,40 +481,123 @@ Include only what directly affects how to respond going forward: communication d
     });
 
     if (!res.ok) {
-      let detail = '';
-      try { detail = await res.text(); } catch (_) {}
-      _errLog('Request body that caused error:\n' + JSON.stringify(reqBody, null, 2));
-      throw new Error(`API ${res.status} — ${detail.slice(0, 250)}`);
+      let d = '';
+      try { d = await res.text(); } catch (_) {}
+      _errLog('Failed request body:\n' + JSON.stringify(reqBody, null, 2));
+      throw new Error(`API ${res.status} — ${d.slice(0, 250)}`);
     }
 
     const data = await res.json();
 
-    // ── Text extraction — FIX: explicit parens around Anthropic branch ─
+    // FIX v1.2.0: explicit parens prevent .find-on-undefined precedence bug
     const text =
-        data?.choices?.[0]?.message?.content           // OpenAI / OpenRouter ✓
-     ?? (Array.isArray(data?.content)                   // Anthropic ✓ (parens fix)
+        data?.choices?.[0]?.message?.content
+     ?? (Array.isArray(data?.content)
            ? data.content.find(b => b?.type === 'text')?.text
            : null)
-     ?? data?.candidates?.[0]?.content?.parts?.[0]?.text  // Gemini ✓
+     ?? data?.candidates?.[0]?.content?.parts?.[0]?.text
      ?? null;
 
-    if (!text?.trim()) {
-      throw new Error(
-        'LLM returned empty content. Raw response: ' +
-        JSON.stringify(data).slice(0, 300)
-      );
-    }
+    if (!text?.trim()) throw new Error('LLM returned empty content. Raw: ' + JSON.stringify(data).slice(0, 300));
     return text;
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  STATE MUTATION
-   *  Inserts clear-context marker + summary via React dispatch
-   *  (immediate UI update) and IDB (persists across reload).
+   *  NATIVE CLEAR CONTEXT  ← THE CORE FIX IN v1.3.0
    *
-   *  Confirmed message structures from debug:
-   *   clear-context: { uuid, type:'clear-context', createdAt }
-   *   assistant:     { uuid, role:'assistant', content:string, createdAt }
+   *  Instead of injecting our own {type:'clear-context'} via
+   *  dispatch (which only updates the visual React layer but not
+   *  TM's internal API-request construction state), we trigger
+   *  TM's OWN Clear Context operation via its keyboard shortcut.
+   *
+   *  This goes through TM's complete clear-context code path,
+   *  which properly greys out messages AND updates whatever
+   *  internal state TM uses when building subsequent API calls.
+   *
+   *  Flow:
+   *   1. Dispatch keyboard event for TM's shortcut (⌘⌥J / Ctrl+Alt+J)
+   *   2. Poll React state for the clear-context marker TM inserts
+   *   3. If keyboard shortcut fails, fall back to clicking the button
+   *      via "More actions" dropdown
+   * ══════════════════════════════════════════════════════════════ */
+  async function _nativeClearContext(msgCountBefore) {
+    // Read the shortcut key from TM's settings (default: 'J')
+    const shortcuts  = JSON.parse(localStorage.getItem('TM_useKeyboardShortcuts') ?? '{}');
+    const clearKey   = shortcuts.clearContext || 'J';
+    const isMac      = /Mac/i.test(navigator.platform ?? navigator.userAgent ?? '');
+
+    // ── Primary: keyboard shortcut ────────────────────────────
+    document.dispatchEvent(new KeyboardEvent('keydown', {
+      key        : clearKey.toLowerCase(),
+      code       : `Key${clearKey.toUpperCase()}`,
+      metaKey    : isMac,
+      ctrlKey    : !isMac,
+      altKey     : true,
+      shiftKey   : false,
+      bubbles    : true,
+      cancelable : true,
+    }));
+
+    const afterKbd = await _pollForClearCtx(msgCountBefore);
+    if (afterKbd) {
+      _log(`Native Clear Context confirmed via keyboard after ${CLEAR_POLL}ms polling`);
+      return afterKbd;
+    }
+
+    // ── Fallback: click via dropdown ──────────────────────────
+    _warnLog('Keyboard shortcut did not trigger Clear Context — trying click fallback');
+    await _clickClearCtxBtn();
+
+    const afterClick = await _pollForClearCtx(msgCountBefore);
+    if (afterClick) {
+      _log('Native Clear Context confirmed via click fallback');
+      return afterClick;
+    }
+
+    _warnLog('Clear Context did not confirm — using current state as fallback');
+    return _chatState();
+  }
+
+  /** Poll React state until TM inserts a clear-context marker */
+  async function _pollForClearCtx(msgCountBefore) {
+    const deadline = Date.now() + CLEAR_WAIT;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, CLEAR_POLL));
+      const cs   = _chatState();
+      const msgs = cs?.s?.messages ?? [];
+      const last = msgs[msgs.length - 1];
+      if (msgs.length > msgCountBefore && last?.type === 'clear-context') {
+        return cs;
+      }
+    }
+    return null;
+  }
+
+  /** Click the Clear Context button inside the More Actions dropdown */
+  async function _clickClearCtxBtn() {
+    // Open the More Actions dropdown
+    const moreTrigger = document.querySelector('[data-tooltip-content="More actions"]');
+    if (!moreTrigger) { _warnLog('More actions button not found'); return; }
+    moreTrigger.click();
+    await new Promise(r => setTimeout(r, 200));
+
+    // Click Clear Context inside the now-open dropdown
+    const clearBtn = document.querySelector('[data-element-id="clear-context-button"]');
+    if (clearBtn) {
+      clearBtn.click();
+      await new Promise(r => setTimeout(r, 150));
+    } else {
+      // Close the dropdown if clear context button wasn't found
+      _warnLog('clear-context-button not found in dropdown');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+   *  APPEND SUMMARY
+   *  Appends ONLY the summary assistant message.
+   *  TM's native Clear Context already inserted the {type:'clear-context'}
+   *  marker above, so we do NOT insert it again here.
    * ══════════════════════════════════════════════════════════════ */
   const _uid = () =>
     crypto.randomUUID
@@ -527,32 +607,27 @@ Include only what directly affects how to respond going forward: communication d
           return (c === 'x' ? r : (r & 3) | 8).toString(16);
         });
 
-  async function _applyCompaction(cs, rawSummary) {
+  async function _appendSummary(cs, rawSummary) {
+    if (!cs?.s) { _warnLog('No chat state for summary injection'); return; }
+
     const { s, d } = cs;
-    const now = new Date().toISOString();
-    const ts  = new Date().toLocaleString();
+    const now      = new Date().toISOString();
+    const ts       = new Date().toLocaleString();
 
-    const header =
+    const content =
       `**[🗜️ Context Compaction]** · *${ts}*\n\n` +
-      `> All prior messages summarised and cleared from active context.\n` +
-      `> This summary is now the starting point. Continue your conversation.\n\n` +
-      `---\n\n`;
+      `> Prior context cleared. This summary is now the starting point.\n\n` +
+      `---\n\n` +
+      rawSummary;
 
-    const updated = [
-      ...s.messages,
-      // TM treats this as a context-reset boundary (same as ⌘⌥J)
-      { uuid: _uid(), type: 'clear-context', createdAt: now },
-      // Summary visible in chat and included in subsequent API calls
-      { uuid: _uid(), role: 'assistant', content: header + rawSummary, createdAt: now },
-    ];
-
+    const updated   = [...s.messages, { uuid: _uid(), role: 'assistant', content, createdAt: now }];
     const nextState = { ...s, messages: updated, updatedAt: now };
 
-    // 1. Update React UI immediately
+    // 1. Update React UI
     try { d?.(nextState); }
-    catch (e) { _warnLog('dispatch failed (IDB will still persist):', e.message); }
+    catch (e) { _warnLog('dispatch failed:', e.message); }
 
-    // 2. Persist to IDB (survives reload)
+    // 2. Persist to IDB
     await _putChat(s.chatID, updated);
   }
 
@@ -561,16 +636,11 @@ Include only what directly affects how to respond going forward: communication d
    * ══════════════════════════════════════════════════════════════ */
   async function _doCompact(btn) {
     const cs = _chatState();
-    if (!cs?.s) {
-      _toast('⚠️ No active chat detected.', 'warn');
-      return;
-    }
+    if (!cs?.s) { _toast('⚠️ No active chat detected.', 'warn'); return; }
 
-    // Don't interrupt an active stream
-    const streaming = !!document.querySelector(
-      '[data-element-id="stop-generation-button"], [aria-label="Stop generating"]'
-    );
-    if (streaming) {
+    // Don't interrupt a live stream
+    if (document.querySelector(
+        '[data-element-id="stop-generation-button"], [aria-label="Stop generating"]')) {
       _toast('⚠️ Wait for the AI to finish first.', 'warn');
       return;
     }
@@ -581,31 +651,44 @@ Include only what directly affects how to respond going forward: communication d
       return;
     }
 
+    // Try to bootstrap config from localStorage if not yet captured
+    const rec = await _getChat(cs.s.chatID).catch(() => null);
+    if (!_BASE || !(_CHAT_CFGS[cs.s.chatID] ?? _CHAT_CFGS['_latest'])) {
+      _toast('⏳ Resolving model config…', 'info');
+      await _tryBootstrap(rec ?? { chatID: cs.s.chatID, model: cs.s.model });
+    }
+
     if (!_BASE) {
-      _toast('⚠️ No API config yet — send one message first, then retry.', 'warn', 6000);
+      _toast('⚠️ No API config. Send one message in this chat first, then retry.', 'warn', 7000);
       return;
     }
 
     _btnLoading(btn, true);
     try {
+      // ── Step 1: build transcript from CURRENT messages ──────
       _toast('📖 Reading conversation…', 'info');
-      const rec = await _getChat(cs.s.chatID);
-      // NOTE: rec.model is TM's internal UUID — NOT used for the API call.
-      // The actual model ID (e.g. 'google/gemini-3-flash-preview') comes
-      // from _CHAT_CFGS which captures the real OpenRouter model from fetch.
-
       let tx = _buildTranscript(msgs, rec);
       if (tx.length > MAX_CHARS) {
         const cut = tx.length - MAX_CHARS;
         tx = `[…${cut.toLocaleString()} chars of earlier history omitted]\n\n` + tx.slice(-MAX_CHARS);
-        _warnLog('Transcript truncated — conversation very long.');
+        _warnLog('Transcript truncated.');
       }
 
+      // ── Step 2: generate summary ─────────────────────────────
       _toast('🧠 Generating summary… (10–40 s)', 'info', 60_000);
       const summary = await _callLLM(tx, cs.s.chatID);
 
+      // ── Step 3: trigger TM's NATIVE Clear Context ────────────
+      // This is the critical fix: TM's own code path properly updates
+      // all internal state (not just the visual React layer) so that
+      // subsequent API requests exclude pre-summary messages.
+      _toast('🧹 Clearing context (via TM native)…', 'info');
+      const msgCountBefore = msgs.length;
+      const freshCs = await _nativeClearContext(msgCountBefore);
+
+      // ── Step 4: append summary to now-cleared context ────────
       _toast('✅ Injecting summary…', 'info');
-      await _applyCompaction(cs, summary);
+      await _appendSummary(freshCs, summary);
 
       _toast('✅ Context compacted! Continue your conversation.', 'success', 5000);
 
@@ -618,11 +701,7 @@ Include only what directly affects how to respond going forward: communication d
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  BUTTON
-   *  Confirmed working from Script D — correct injection position.
-   *  "More actions" button itself has data-headlessui-state,
-   *  so closest() returns the button; its parentNode is the
-   *  wrapper div where our button lives alongside it.
+   *  BUTTON  (confirmed working position from Script D)
    * ══════════════════════════════════════════════════════════════ */
   const ICON = `<svg class="w-[18px] h-[18px]" viewBox="0 0 18 18"
     fill="none" stroke="currentColor" stroke-width="1.5"
@@ -635,12 +714,9 @@ Include only what directly affects how to respond going forward: communication d
     <line x1="15.5" y1="9" x2="11" y2="9"/>
   </svg>`;
 
-  const SPIN = `<svg class="w-[16px] h-[16px] animate-spin"
-    viewBox="0 0 24 24" fill="none">
-    <circle class="opacity-25" cx="12" cy="12" r="10"
-      stroke="currentColor" stroke-width="4"/>
-    <path class="opacity-75" fill="currentColor"
-      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+  const SPIN = `<svg class="w-[16px] h-[16px] animate-spin" viewBox="0 0 24 24" fill="none">
+    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
   </svg>`;
 
   const BTN_CLS = [
@@ -659,15 +735,10 @@ Include only what directly affects how to respond going forward: communication d
 
   function _injectBtn() {
     if (document.querySelector(`[${ATTR}]`)) return true;
-    const header  = document.querySelector('[data-element-id="chat-space-beginning-part"]');
-    if (!header)  return false;
-
-    // The "More actions" button itself has data-headlessui-state (confirmed Script D).
-    // closest() returns the button itself; insertBefore puts our button before it
-    // inside its parent div — exactly where the DOM shows it working.
+    const header = document.querySelector('[data-element-id="chat-space-beginning-part"]');
+    if (!header) return false;
     const moreTrigger = header.querySelector('[data-tooltip-content="More actions"]');
     if (!moreTrigger) return false;
-
     const insertBefore = moreTrigger.closest('[data-headlessui-state]') ?? moreTrigger;
 
     const btn = document.createElement('button');
@@ -677,12 +748,10 @@ Include only what directly affects how to respond going forward: communication d
     btn.className = BTN_CLS;
     btn.innerHTML = ICON;
     btn.addEventListener('click', () => _doCompact(btn));
-
     insertBefore.parentNode.insertBefore(btn, insertBefore);
     return true;
   }
 
-  /* ── Keyboard shortcut: ⌘⌥K (Mac) / Ctrl+Alt+K ─────────────── */
   document.addEventListener('keydown', e => {
     const mac = /Mac/i.test(navigator.platform ?? navigator.userAgent ?? '');
     if ((mac ? e.metaKey : e.ctrlKey) && e.altKey && e.key.toLowerCase() === 'k') {
@@ -694,53 +763,41 @@ Include only what directly affects how to respond going forward: communication d
   /* ══════════════════════════════════════════════════════════════
    *  TOAST
    * ══════════════════════════════════════════════════════════════ */
-  const _PAL = {
-    info   : 'rgba(59,130,246,.93)',
-    success: 'rgba(22,163,74,.93)',
-    warn   : 'rgba(202,138,4,.93)',
-    error  : 'rgba(220,38,38,.93)',
-  };
+  const _PAL = { info:'rgba(59,130,246,.93)', success:'rgba(22,163,74,.93)',
+                 warn:'rgba(202,138,4,.93)',  error:'rgba(220,38,38,.93)' };
   let _tid = null;
   function _toast(msg, type = 'info', ms = 3400) {
     let el = document.getElementById(`${ID}-toast`);
     if (!el) {
-      el = document.createElement('div');
-      el.id = `${ID}-toast`;
-      el.style.cssText =
-        'position:fixed;bottom:76px;left:50%;transform:translateX(-50%);' +
-        'z-index:99999;padding:8px 20px;border-radius:8px;font-size:13px;' +
-        'font-weight:500;pointer-events:none;transition:opacity .3s ease;' +
-        'max-width:90vw;color:#fff;white-space:nowrap;text-align:center;' +
-        'opacity:0;box-shadow:0 4px 16px rgba(0,0,0,.35);';
+      el = document.createElement('div'); el.id = `${ID}-toast`;
+      el.style.cssText = 'position:fixed;bottom:76px;left:50%;transform:translateX(-50%);' +
+        'z-index:99999;padding:8px 20px;border-radius:8px;font-size:13px;font-weight:500;' +
+        'pointer-events:none;transition:opacity .3s;max-width:90vw;color:#fff;' +
+        'white-space:nowrap;text-align:center;opacity:0;box-shadow:0 4px 16px rgba(0,0,0,.35);';
       document.body.appendChild(el);
     }
     el.style.background = _PAL[type] ?? _PAL.info;
-    el.textContent      = msg;
-    el.style.opacity    = '1';
+    el.textContent = msg; el.style.opacity = '1';
     clearTimeout(_tid);
     _tid = setTimeout(() => { el.style.opacity = '0'; }, ms);
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  LOGGING
+   *  LOGGING + DEBUG HELPER
    * ══════════════════════════════════════════════════════════════ */
-  const _P    = `[${ID} v${VERSION}]`;
-  const _log    = (...a) => console.info(_P,  ...a);
-  const _warnLog = (...a) => console.warn(_P, ...a);
-  const _errLog  = (...a) => console.error(_P, ...a);
+  const P = `[${ID} v${VERSION}]`;
+  const _log    = (...a) => console.info(P,  ...a);
+  const _warnLog = (...a) => console.warn(P, ...a);
+  const _errLog  = (...a) => console.error(P, ...a);
 
-  /* ══════════════════════════════════════════════════════════════
-   *  DEBUG HELPER  (run window.__tmcc_debug() in console anytime)
-   * ══════════════════════════════════════════════════════════════ */
   window.__tmcc_debug = () => {
     const cs = _chatState();
-    console.group(_P + ' Debug');
-    console.log('_BASE      :', _BASE);
-    console.log('_CHAT_CFGS :', JSON.parse(JSON.stringify(_CHAT_CFGS)));
+    console.group(P + ' Debug');
+    console.log('_BASE         :', _BASE);
+    console.log('_CHAT_CFGS    :', JSON.parse(JSON.stringify(_CHAT_CFGS)));
     console.log('chatID (fiber):', cs?.s?.chatID);
-    console.log('chatID (hash) :', (location.hash.match(/#chat=([^&]+)/) || [])[1]);
-    console.log('cfg for chat  :', _CHAT_CFGS[cs?.s?.chatID] ?? '(none captured yet)');
-    console.log('msg count (fiber):', cs?.s?.messages?.length);
+    console.log('cfg for chat  :', _CHAT_CFGS[cs?.s?.chatID] ?? '(not captured yet — bootstrap will run on button press)');
+    console.log('msg count     :', cs?.s?.messages?.length);
     console.groupEnd();
   };
 
@@ -748,19 +805,17 @@ Include only what directly affects how to respond going forward: communication d
    *  BOOT
    * ══════════════════════════════════════════════════════════════ */
   function _boot() {
-    _hookFetch();   // must be FIRST — before TM fires any requests
+    _hookFetch();
 
     if (!_injectBtn()) {
       const obs = new MutationObserver(() => { if (_injectBtn()) obs.disconnect(); });
       obs.observe(document.body, { childList: true, subtree: true });
     }
-
-    // Re-inject after chat navigation (header rebuilt when switching chats)
     new MutationObserver(() => {
       if (!document.querySelector(`[${ATTR}]`)) _injectBtn();
     }).observe(document.body, { childList: true, subtree: true });
 
-    _log(`Loaded — send any message to initialise API capture.`);
+    _log('Loaded.');
   }
 
   _boot();
