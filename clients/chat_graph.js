@@ -1,43 +1,35 @@
 // ================================================================
-//  TypingMind — Chat Branch Graph  v2.7.0
+//  TypingMind — Chat Branch Graph  v2.8.0
 //
-//  Changes from v2.6.0:
-//    Deterministic three-phase chat-unit locator:
+//  Changes from v2.7.0 — color-only, zero functional changes:
 //
-//    Phase 1 — Direct DOM lookup (3 × 80 ms)
-//      Finds message-timestamp-<uuid> immediately if the target
-//      is already in the viewport (fastest path, most common case).
+//  Layer 1: In-context vs Out-of-context coloring (active chain)
+//    Detected via message.contextClearedAt field.
+//    OOC nodes on the active chain render in amber/warm tones,
+//    visually distinct from both active in-context and inactive.
+//    Tool-call meta nodes gain a third state (partial OOC) in a
+//    muted teal-green, separate from all-OOC bronze and in-ctx slate.
 //
-//    Phase 2 — Index-jump + patient retry (300 ms + 6 × 200 ms)
-//      Scrolls to a position estimated from the message's index in
-//      the React state, then waits generously for React's virtual
-//      list to render the element into the DOM.
+//  Layer 2: Summary Message nodes (special AI subtype)
+//    Detected by <CONVERSATION_SUMMARY> tag in assistant content.
+//    Rendered in purple across all chain/context states.
+//    Badge text: "SUM". Label prefix: "∑".
 //
-//    Phase 3 — TM Minimap native navigation (deterministic)
-//      Opens TypingMind's built-in Search/Minimap panel, finds the
-//      matching result button by content, and clicks it. TM's own
-//      navigation handles virtualisation internally — this path
-//      always works for user and AI-response messages regardless of
-//      scroll position.  Tool-response messages (meta nodes) are
-//      not listed in the minimap and fall back to Phase 1+2 only.
+//  New preview panel badge classes: ooc, summary, ooc-summary,
+//    partial-ooc — each with matching colour and label text.
 //
-//    Additional:
-//    — scrollAfterReload looks up rawContent from React state so
-//      the minimap fallback is also available after branch-switch
-//      reloads.
-//    — Active/inactive (contextClearedAt) messages are unaffected;
-//      their UUID and DOM structure are unchanged by context status.
+//  Legend updated to cover full 9-state colour matrix.
 //
-//  All features from v2.6.0 (view-state persistence, ↑/↓ nav,
-//  zoom retention, parent/child navigation, reload-scroll fix)
-//  are unchanged.
+//  No changes to: node selection, navigation, scroll/locate,
+//  branch switching, active-chain calculation, view-state, or
+//  any other functional behaviour from v2.7.0.
 // ================================================================
 (() => {
   'use strict';
   const EXT        = 'tmChatGraph';
   const SCROLL_KEY = 'tmg_scroll_uuid';
 
-  /* ── PERSISTENT VIEW STATE (module-level, resets on reload) ─── */
+  /* ── PERSISTENT VIEW STATE ───────────────────────────────────── */
   let savedViewState = null;
 
   function saveViewState() {
@@ -122,24 +114,17 @@
     const oy = window.getComputedStyle(el).overflowY;
     return (oy === 'auto' || oy === 'scroll' || oy === 'overlay') && el.scrollHeight > el.clientHeight + 1;
   }
-
   function getScrollableAncestors(el) {
     const list = [];
     let p = el?.parentElement;
-    while (p && p !== document.documentElement) {
-      if (isScrollable(p)) list.push(p);
-      p = p.parentElement;
-    }
+    while (p && p !== document.documentElement) { if (isScrollable(p)) list.push(p); p = p.parentElement; }
     return list;
   }
-
   function pickBestScroller(list) {
     if (!list || list.length === 0) return null;
     return list.reduce((best, cur) =>
-      (cur.scrollHeight - cur.clientHeight) > (best.scrollHeight - best.clientHeight) ? cur : best
-    , list[0]);
+      (cur.scrollHeight - cur.clientHeight) > (best.scrollHeight - best.clientHeight) ? cur : best, list[0]);
   }
-
   function getChatScroller(preferredEl=null) {
     const fromEl = preferredEl ? getScrollableAncestors(preferredEl) : [];
     if (fromEl.length) return pickBestScroller(fromEl);
@@ -155,27 +140,16 @@
     return document.scrollingElement || document.documentElement;
   }
 
-  /* ── BLOCK RESOLUTION HELPERS ────────────────────────────────── */
+  /* ── BLOCK RESOLUTION ────────────────────────────────────────── */
   function normalizeBlock(el) {
     if (!el || el.closest('#' + EXT + '-ov')) return null;
     const block = el.closest('[data-element-id="response-block"],[data-element-id="request-block"],[data-element-id="message-block"],[data-element-id*="block"],[data-element-id*="message"],[data-element-id*="response"],[data-element-id*="request"]');
     return block || el;
   }
-
   function findMessageBlock(tsBtn) {
     if (!tsBtn) return null;
-    const selectors = [
-      '[data-element-id="response-block"]',
-      '[data-element-id="request-block"]',
-      '[data-element-id="message-block"]',
-      '[data-element-id*="message"]',
-      '[data-element-id*="block"]'
-    ];
-    for (const sel of selectors) {
-      const el = tsBtn.closest(sel);
-      if (el) return el;
-    }
-    // Skip absolute/fixed hover toolbars; climb to normal-flow container
+    const selectors = ['[data-element-id="response-block"]','[data-element-id="request-block"]','[data-element-id="message-block"]','[data-element-id*="message"]','[data-element-id*="block"]'];
+    for (const sel of selectors) { const el = tsBtn.closest(sel); if (el) return el; }
     let el = tsBtn.parentElement;
     for (let i = 0; i < 12 && el; i++, el = el.parentElement) {
       const st = window.getComputedStyle(el);
@@ -183,7 +157,6 @@
     }
     return tsBtn;
   }
-
   function scanDomForUuid(uuid) {
     const attrs = ['data-message-id','data-uuid','data-id','data-message-uuid','data-element-id','id'];
     const chatSpace = document.querySelector('[data-element-id="chat-space-middle-part"]');
@@ -191,55 +164,38 @@
     for (const el of nodes) {
       if (chatSpace && !chatSpace.contains(el)) continue;
       if (el.closest('#' + EXT + '-ov')) continue;
-      for (const a of attrs) {
-        const v = el.getAttribute(a);
-        if (v && v.includes(uuid)) return el;
-      }
+      for (const a of attrs) { const v = el.getAttribute(a); if (v && v.includes(uuid)) return el; }
     }
     return null;
   }
-
   function locateMessageBlock(uuid) {
-    // 1) Timestamp button (primary)
     const tsBtn = document.getElementById(`message-timestamp-${uuid}`);
-    if (tsBtn) {
-      const block = findMessageBlock(tsBtn);
-      if (block) return { block, method: 'ts' };
-    }
-    // 2) Exact attribute matches
+    if (tsBtn) { const block = findMessageBlock(tsBtn); if (block) return { block, method: 'ts' }; }
     for (const sel of [`[data-message-id="${uuid}"]`,`[data-uuid="${uuid}"]`,`[data-message-uuid="${uuid}"]`,`[data-id="${uuid}"]`,`[id="${uuid}"]`]) {
-      const block = normalizeBlock(document.querySelector(sel));
-      if (block) return { block, method: 'attr-exact' };
+      const block = normalizeBlock(document.querySelector(sel)); if (block) return { block, method: 'attr-exact' };
     }
-    // 3) Partial attribute matches
     for (const sel of [`[data-element-id*="${uuid}"]`,`[id*="${uuid}"]`]) {
-      const block = normalizeBlock(document.querySelector(sel));
-      if (block) return { block, method: 'attr-partial' };
+      const block = normalizeBlock(document.querySelector(sel)); if (block) return { block, method: 'attr-partial' };
     }
-    // 4) Full DOM scan
     const block = normalizeBlock(scanDomForUuid(uuid));
     if (block) return { block, method: 'scan' };
     return null;
   }
-
   function getMessageIndexInfo(uuid) {
     const cs = getChatState();
     if (!cs?.state?.messages) return { idx: -1, total: 0 };
     const msgs = cs.state.messages;
     return { idx: msgs.findIndex(m => m.uuid === uuid), total: msgs.length };
   }
-
   function computeJumpTarget(scroller, idx, total) {
     if (!scroller || total <= 1 || idx < 0) return null;
     const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
     return Math.max(0, Math.min(max, max * (idx / (total - 1))));
   }
-
   function scrollBlockToCenter(block) {
     const scroller = getChatScroller(block);
     if (!scroller) return false;
-    const sr = scroller.getBoundingClientRect();
-    const br = block.getBoundingClientRect();
+    const sr = scroller.getBoundingClientRect(), br = block.getBoundingClientRect();
     const Epos = br.top - sr.top + scroller.scrollTop;
     let target = Epos - (scroller.clientHeight / 2) + (br.height / 2);
     if (Epos <= br.height || target < 0) target = 0;
@@ -251,7 +207,6 @@
     }
     return true;
   }
-
   function scrollToMessage(uuid, doHighlight) {
     if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return { ok:false };
     const found = locateMessageBlock(uuid);
@@ -261,113 +216,73 @@
     return { ok, method: found.method };
   }
 
-  /* ── MINIMAP NAVIGATION (Phase 3 — deterministic fallback) ──── */
-
+  /* ── MINIMAP NAVIGATION ──────────────────────────────────────── */
   async function openMinimapPanel() {
-    // Already open — nothing to do
     if (document.querySelector('[data-element-id="chat-minimap-content"]')) return true;
-
-    // Locate the "More actions" kebab button
     let moreBtn = document.querySelector('button[data-tooltip-content="More actions"]');
     if (!moreBtn) {
-      // Fallback: any menu-trigger button in the chat title bar
       const titleArea = document.querySelector('[data-element-id="current-chat-title"]');
       if (titleArea) moreBtn = titleArea.querySelector('button[aria-haspopup="menu"]');
     }
     if (!moreBtn) return false;
-
     moreBtn.click();
     await new Promise(r => setTimeout(r, 200));
-
-    // Click "Search in chat" from the now-open menu
     const minimapBtn = document.querySelector('[data-element-id="minimap-button"]');
-    if (!minimapBtn) {
-      document.body.click(); // close menu if open but item not found
-      return false;
-    }
+    if (!minimapBtn) { document.body.click(); return false; }
     minimapBtn.click();
     await new Promise(r => setTimeout(r, 280));
-
     return !!document.querySelector('[data-element-id="chat-minimap-content"]');
   }
-
   function closeMinimapPanel() {
     if (!document.querySelector('[data-element-id="chat-minimap-content"]')) return;
-    // Click on the chat content area — reliably outside the minimap header panel
-    const target =
-      document.querySelector('[data-element-id="chat-space-middle-part"]') ||
-      document.querySelector('[data-element-id="chat-body"]') ||
-      document.querySelector('main');
+    const target = document.querySelector('[data-element-id="chat-space-middle-part"]') ||
+                   document.querySelector('[data-element-id="chat-body"]') || document.querySelector('main');
     if (target) { target.click(); return; }
-    // Fallback: escape key
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   }
-
   function findMinimapButton(rawContent) {
     const minimap = document.querySelector('[data-element-id="chat-minimap-content"]');
     if (!minimap || !rawContent) return null;
-
     const targetText = extractText(rawContent).replace(/\s+/g, ' ').trim();
     if (targetText.length < 4) return null;
-
     const buttons = minimap.querySelectorAll('button[type="button"]');
     if (!buttons.length) return null;
-
-    // Try progressively shorter prefixes — handles minimap truncation gracefully
     for (const snippetLen of [38, 22, 12]) {
       const snippet = targetText.slice(0, snippetLen).toLowerCase();
       if (snippet.length < 4) continue;
       for (const btn of buttons) {
         const p = btn.querySelector('p');
         if (!p) continue;
-        const btnTxt = p.textContent.replace(/\s+/g, ' ').trim().toLowerCase();
-        if (btnTxt.includes(snippet)) return btn;
+        if (p.textContent.replace(/\s+/g, ' ').trim().toLowerCase().includes(snippet)) return btn;
       }
     }
     return null;
   }
-
   async function tryMinimapNavigation(uuid, rawContent) {
     try {
-      // If minimap already open and has a stale search term, clear it first
       const existingInput = document.querySelector('[data-element-id="search-input"]');
       if (existingInput && existingInput.value) {
         existingInput.value = '';
         existingInput.dispatchEvent(new Event('input', { bubbles: true }));
         await new Promise(r => setTimeout(r, 150));
       }
-
       const opened = await openMinimapPanel();
       if (!opened) return false;
-
-      // Clear any search filter that appeared in the newly opened panel
       const searchInput = document.querySelector('[data-element-id="search-input"]');
       if (searchInput && searchInput.value) {
         searchInput.value = '';
         searchInput.dispatchEvent(new Event('input', { bubbles: true }));
         await new Promise(r => setTimeout(r, 150));
       }
-
       const btn = findMinimapButton(rawContent);
       if (!btn) { closeMinimapPanel(); return false; }
-
-      // Click — TM's native navigation handles scroll + virtualisation
       btn.click();
-      // Close the panel after TM finishes navigating
       setTimeout(closeMinimapPanel, 850);
       return true;
-    } catch (e) {
-      console.warn('[TM Graph] minimap nav error:', e);
-      return false;
-    }
+    } catch (e) { console.warn('[TM Graph] minimap nav error:', e); return false; }
   }
 
   /* ── THREE-PHASE SCROLL-WITH-RETRY ───────────────────────────── */
-  //
-  //  Phase 1  Direct DOM lookup          3 × 80 ms  = 240 ms
-  //  Phase 2  Index-jump + patient retry 300 + 6×200 ms ≈ 1.5 s
-  //  Phase 3  TM Minimap native click    async, ~0.8–1.5 s
-  //
   function scrollWithRetry(uuid, { highlight = true, rawContent = null } = {}) {
     const idxInfo = getMessageIndexInfo(uuid);
     const scroller = getChatScroller(null);
@@ -380,51 +295,33 @@
 
     const tick = () => {
       const res = scrollToMessage(uuid, false);
-      if (res.ok) {
-        onFound(phase === 2 ? 'idx-jump' : phase === 3 ? 'minimap' : '', res.method);
-        return;
-      }
+      if (res.ok) { onFound(phase === 2 ? 'idx-jump' : phase === 3 ? 'minimap' : '', res.method); return; }
 
-      // ── Phase 1: fast direct polling ────────────────────────────
       if (phase === 1) {
         if (++p1 < 3) { setTimeout(tick, 80); return; }
-        // Advance to Phase 2: scroll to index-estimated position
         phase = 2;
         if (scroller && idxInfo.idx >= 0) {
           const t = computeJumpTarget(scroller, idxInfo.idx, idxInfo.total);
           if (t != null) scroller.scrollTo({ top: t, behavior: 'auto' });
         }
-        // First retry after jump with longer wait for React to re-render
-        setTimeout(tick, 300);
-        return;
+        setTimeout(tick, 300); return;
       }
 
-      // ── Phase 2: patient polling after index jump ────────────────
       if (phase === 2) {
         if (++p2 < 6) { setTimeout(tick, 200); return; }
-        // Advance to Phase 3: TM minimap native navigation
         phase = 3;
       }
 
-      // ── Phase 3: minimap fallback (runs once) ────────────────────
       if (!minimapTried) {
         minimapTried = true;
         if (rawContent) {
           tryMinimapNavigation(uuid, rawContent).then(ok => {
-            if (ok) {
-              showLocateToast('Locate: minimap ✓', 'ok');
-              // After TM navigates, element is now in DOM — highlight it
-              setTimeout(() => scrollToMessage(uuid, true), 1500);
-            } else {
-              showLocateToast('Locate: failed', 'err');
-            }
+            if (ok) { showLocateToast('Locate: minimap ✓', 'ok'); setTimeout(() => scrollToMessage(uuid, true), 1500); }
+            else    { showLocateToast('Locate: failed', 'err'); }
           });
-        } else {
-          showLocateToast('Locate: failed (not in DOM)', 'err');
-        }
+        } else { showLocateToast('Locate: failed (not in DOM)', 'err'); }
       }
     };
-
     requestAnimationFrame(() => requestAnimationFrame(tick));
   }
 
@@ -432,11 +329,9 @@
     if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return;
     scrollWithRetry(uuid, { highlight: true, rawContent });
   }
-
   function scrollAfterReload(uuid) {
     if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return;
     setTimeout(() => {
-      // Look up rawContent from React state so minimap fallback is available
       const cs = getChatState();
       const msg = cs?.state?.messages?.find(m => m.uuid === uuid);
       const rawContent = msg?.content ?? null;
@@ -477,9 +372,13 @@
       .${EXT}-phead { display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0;gap:8px; }
       .${EXT}-pbody { flex:1;overflow-y:auto;padding:12px 12px 6px;font-size:13px;line-height:1.65;color:#e9edef;-webkit-overflow-scrolling:touch;min-height:0; }
       .${EXT}-sbadge { display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:4px 10px;border-radius:20px;border:1px solid; }
-      .${EXT}-sbadge.active   { color:#00a884;background:rgba(0,168,132,.1);border-color:rgba(0,168,132,.3); }
-      .${EXT}-sbadge.inactive { color:#f59e0b;background:rgba(245,158,11,.1);border-color:rgba(245,158,11,.3); }
-      .${EXT}-sbadge.meta     { color:#8696a0;background:rgba(130,150,160,.08);border-color:rgba(130,150,160,.25); }
+      .${EXT}-sbadge.active      { color:#00a884;background:rgba(0,168,132,.1);border-color:rgba(0,168,132,.3); }
+      .${EXT}-sbadge.inactive    { color:#f59e0b;background:rgba(245,158,11,.1);border-color:rgba(245,158,11,.3); }
+      .${EXT}-sbadge.meta        { color:#8696a0;background:rgba(130,150,160,.08);border-color:rgba(130,150,160,.25); }
+      .${EXT}-sbadge.ooc         { color:#c47800;background:rgba(196,120,0,.1);border-color:rgba(196,120,0,.35); }
+      .${EXT}-sbadge.summary     { color:#a855f7;background:rgba(168,85,247,.1);border-color:rgba(168,85,247,.35); }
+      .${EXT}-sbadge.ooc-summary { color:#7a50cc;background:rgba(122,80,204,.1);border-color:rgba(122,80,204,.3); }
+      .${EXT}-sbadge.partial-ooc { color:#2e8a68;background:rgba(46,138,104,.1);border-color:rgba(46,138,104,.3); }
       .${EXT}-divider { display:flex;align-items:center;gap:8px;margin:12px 0 10px; }
       .${EXT}-divider::before,.${EXT}-divider::after { content:'';flex:1;height:1px;background:rgba(255,255,255,.12); }
       .${EXT}-divider-label { font-size:8.5px;font-weight:700;color:rgba(255,255,255,.3);letter-spacing:1.3px;text-transform:uppercase;white-space:nowrap; }
@@ -569,7 +468,87 @@
     return 'tool';
   }
 
-  /* ── META NODE HELPERS ───────────────────────────────────────── */
+  /* ── CONTEXT / SUMMARY HELPERS ───────────────────────────────── */
+
+  // A message is out-of-context when TypingMind has stamped contextClearedAt on it.
+  // This covers both individual exclusion (Select Mode) and bulk Clear Context.
+  function isSummaryMessage(content) {
+    return extractText(content).includes('<CONVERSATION_SUMMARY>');
+  }
+
+  // For a collapsed tool-call meta node: determine aggregate context status.
+  function getMetaContextStatus(toolMessages) {
+    const n = toolMessages.filter(m => m.contextClearedAt).length;
+    if (n === 0) return 'in';
+    if (n === toolMessages.length) return 'out';
+    return 'partial';
+  }
+
+  /* ── CANVAS COLOR SYSTEM ─────────────────────────────────────── */
+  const C = {
+    // ── User ─────────────────────────────────────────────────────
+    uA:   '#004d3a', uAb:   '#00a884', // active, in-context  (teal-green)
+    uI:   '#1a2e23', uIb:   '#2a4532', // inactive chain       (dark green)
+    uOoc: '#302500', uOocb: '#c47800', // active, OOC          (amber)
+    // ── AI Response ──────────────────────────────────────────────
+    aiA:   '#0d3b4f', aiAb:   '#1ea4d4', // active, in-context (blue)
+    aiI:   '#152530', aiIb:   '#1d3a4d', // inactive chain      (dark blue)
+    aiOoc: '#1d1130', aiOocb: '#8866cc', // active, OOC         (violet)
+    // ── Tool Calls (collapsed meta) ───────────────────────────────
+    tA:   '#222c34', tAb:   '#3c4e5a', // active, all in-ctx   (slate)
+    tI:   '#141c22', tIb:   '#1e2831', // inactive chain        (dark slate)
+    tOoc: '#281c08', tOocb: '#a07030', // active, all OOC       (bronze)
+    tPar: '#0c1e18', tParb: '#2e8a68', // active, partial OOC   (teal-green)
+    // ── Summary (special AI subtype) ──────────────────────────────
+    sumA:   '#1e0c38', sumAb:   '#a855f7', // active, in-ctx    (purple)
+    sumI:   '#130820', sumIb:   '#2e1840', // inactive chain     (dark purple)
+    sumOoc: '#190928', sumOocb: '#6a3aaa', // active, OOC        (muted purple)
+    // ── Edges / text / interaction ────────────────────────────────
+    eA: '#00a884', eI: 'rgba(40,60,70,.55)',
+    txA: '#e9edef', txI: '#3a5262',
+    hov: '#f59e0b', dot: '#f59e0b', sel: '#3b82f6'
+  };
+
+  // Unified style resolver — replaces the four separate getBg/getBdr/getBbg/getBc helpers.
+  function getNodeStyle(n) {
+    const ia    = n.active;
+    const isMeta = !!n.isMeta;
+    const isSum  = !!(n.isSummary);
+    const isOoc  = ia && !!(n.isOoc);    // OOC only relevant on active chain
+    const ctxSt  = n.contextStatus;      // 'in' | 'out' | 'partial'
+    const role   = n.role;
+
+    // ── Collapsed tool-call meta node ─────────────────────────────
+    if (isMeta) {
+      if (!ia) return { bg:C.tI, bdr:C.tIb, bbg:'rgba(255,255,255,.04)', bc:'#284050' };
+      if (ctxSt === 'out')     return { bg:C.tOoc, bdr:C.tOocb, bbg:'rgba(160,112,48,.14)', bc:'#b48040' };
+      if (ctxSt === 'partial') return { bg:C.tPar, bdr:C.tParb, bbg:'rgba(46,138,104,.12)', bc:'#2e8a68' };
+      return { bg:C.tA, bdr:C.tAb, bbg:'rgba(255,255,255,.05)', bc:'#5a6a76' };
+    }
+    // ── Summary message (AI subtype) ──────────────────────────────
+    if (isSum) {
+      if (!ia) return { bg:C.sumI, bdr:C.sumIb, bbg:'rgba(46,24,64,.3)',     bc:'#4e2880' };
+      if (isOoc) return { bg:C.sumOoc, bdr:C.sumOocb, bbg:'rgba(106,58,170,.14)', bc:'#7a50cc' };
+      return { bg:C.sumA, bdr:C.sumAb, bbg:'rgba(168,85,247,.18)', bc:'#a855f7' };
+    }
+    // ── User message ──────────────────────────────────────────────
+    if (role === 'user') {
+      if (!ia) return { bg:C.uI,   bdr:C.uIb,   bbg:'rgba(42,100,70,.35)',    bc:'#3a7a56' };
+      if (isOoc) return { bg:C.uOoc, bdr:C.uOocb, bbg:'rgba(196,120,0,.14)',   bc:'#c07800' };
+      return { bg:C.uA, bdr:C.uAb, bbg:'rgba(0,168,132,.28)', bc:'#00a884' };
+    }
+    // ── AI response ───────────────────────────────────────────────
+    if (role === 'ai') {
+      if (!ia) return { bg:C.aiI,   bdr:C.aiIb,   bbg:'rgba(29,58,77,.45)',       bc:'#2a5a70' };
+      if (isOoc) return { bg:C.aiOoc, bdr:C.aiOocb, bbg:'rgba(136,102,204,.14)',   bc:'#8866cc' };
+      return { bg:C.aiA, bdr:C.aiAb, bbg:'rgba(30,164,212,.2)', bc:'#1ea4d4' };
+    }
+    // ── Generic fallback ──────────────────────────────────────────
+    return ia ? { bg:C.tA, bdr:C.tAb, bbg:'rgba(255,255,255,.05)', bc:'#5a6a76' }
+              : { bg:C.tI, bdr:C.tIb, bbg:'rgba(255,255,255,.04)', bc:'#284050' };
+  }
+
+  /* ── META NODE PREVIEW HELPERS ───────────────────────────────── */
   function getMetaLabel(toolMsgs) {
     const names = [];
     for (const m of toolMsgs) {
@@ -586,9 +565,7 @@
     }
     return toolMsgs.length === 1 ? '1 tool call' : `${toolMsgs.length} tool calls`;
   }
-
   function escH(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
   function buildMetaPreviewHtml(toolMsgs) {
     const parts = toolMsgs.map(m => {
       if (m.role === 'assistant' && m.tool_calls?.length > 0) {
@@ -598,23 +575,18 @@
           try { args = JSON.stringify(JSON.parse(tc.function?.arguments || '{}'), null, 2); }
           catch (_) { args = tc.function?.arguments || ''; }
           const argsPreview = args.slice(0, 400) + (args.length > 400 ? '\n…' : '');
-          return `<div class="tmg-meta-fn">${escH(name)}()</div>
-            ${argsPreview ? `<div class="tmg-meta-args">${escH(argsPreview)}</div>` : ''}`;
+          return `<div class="tmg-meta-fn">${escH(name)}()</div>${argsPreview ? `<div class="tmg-meta-args">${escH(argsPreview)}</div>` : ''}`;
         }).join('');
-        return `<div class="tmg-meta-group">
-          <div class="tmg-meta-section-label tmg-meta-invoke-label">🔧 Tool Invoke</div>${calls}</div>`;
+        return `<div class="tmg-meta-group"><div class="tmg-meta-section-label tmg-meta-invoke-label">🔧 Tool Invoke</div>${calls}</div>`;
       }
       if (m.role === 'tool') {
         const raw = extractText(m.content), preview = raw.slice(0, 350);
-        return `<div class="tmg-meta-group">
-          <div class="tmg-meta-section-label tmg-meta-result-label">📤 Tool Result</div>
-          <div class="tmg-meta-output">${escH(preview)}${raw.length > 350 ? '\n…' : ''}</div></div>`;
+        return `<div class="tmg-meta-group"><div class="tmg-meta-section-label tmg-meta-result-label">📤 Tool Result</div><div class="tmg-meta-output">${escH(preview)}${raw.length > 350 ? '\n…' : ''}</div></div>`;
       }
       return '';
     }).filter(Boolean).join('');
     return parts || '<em style="opacity:.45">(no content)</em>';
   }
-
   function renderForPreview(content) {
     const text = extractText(content);
     if (!text.trim()) return '<em style="opacity:.45">(empty)</em>';
@@ -633,28 +605,39 @@
     const m = msgs[start];
     const cls = classifyMsg(m);
 
+    // ── Collapse consecutive tool run into one META node ──────────
     if (cls === 'tool') {
       let end = start;
       const toolMsgs = [];
       while (end < msgs.length && classifyMsg(msgs[end]) === 'tool') { toolMsgs.push(msgs[end]); end++; }
+      const ctxStatus = getMetaContextStatus(toolMsgs);
       const metaNode = {
         id: `${toolMsgs[0].uuid}__meta`, role:'tool', isMeta:true, toolMessages:toolMsgs,
         label: getMetaLabel(toolMsgs), scrollUUID: toolMsgs[0].uuid,
         active: isActive, switchPath: isActive ? [] : sp,
         sourceUUID: sp.length > 0 ? sp[sp.length-1].sourceUUID : toolMsgs[0].uuid,
         branchIdx:  sp.length > 0 ? sp[sp.length-1].branchIdx  : null,
+        isOoc: ctxStatus !== 'in',  // true when any tool msg is OOC
+        isSummary: false,
+        contextStatus: ctxStatus,
         x:0, y:0, w:0, h:0, children:[], variants:[]
       };
       metaNode.children = buildChain(msgs, end, isActive, sp);
       return [metaNode];
     }
 
+    // ── Normal (non-tool) node ────────────────────────────────────
+    const isOoc    = !!(m.contextClearedAt);
+    const isSummary = cls === 'ai' && isSummaryMessage(m.content);
     const node = {
       id: m.uuid, role: cls,
       label: extractText(m.content).replace(/\s+/g,' ').slice(0, 82),
       rawContent: m.content, active: isActive, switchPath: isActive ? [] : sp,
       sourceUUID: sp.length > 0 ? sp[sp.length-1].sourceUUID : m.uuid,
       branchIdx:  sp.length > 0 ? sp[sp.length-1].branchIdx  : null,
+      isOoc,
+      isSummary,
+      contextStatus: isOoc ? 'out' : 'in',
       x:0, y:0, w:0, h:0, children:[], variants:[]
     };
 
@@ -666,6 +649,7 @@
           label: extractText(thread.userMessageContent).replace(/\s+/g,' ').slice(0,82),
           rawContent: thread.userMessageContent, active: false, switchPath: vp,
           sourceUUID: vp[vp.length-1].sourceUUID, branchIdx: vp[vp.length-1].branchIdx,
+          isOoc: false, isSummary: false, contextStatus: 'in',
           x:0, y:0, w:0, h:0, children:[], variants:[]
         };
         hd.children = buildChain(thread.messages || [], 0, false, vp);
@@ -674,7 +658,6 @@
       node.children = isActive ? buildChain(msgs, start+1, true, []) : buildChain(msgs, start+1, false, sp);
       return [node];
     }
-
     node.children = buildChain(msgs, start+1, isActive, sp);
     return [node];
   }
@@ -717,20 +700,7 @@
     return { all, edges, bounds:{minX,maxX,maxY} };
   }
 
-  /* ── CANVAS COLORS ───────────────────────────────────────────── */
-  const C = {
-    uA:'#004d3a', uAb:'#00a884', uI:'#1a2e23', uIb:'#2a4532',
-    aiA:'#0d3b4f', aiAb:'#1ea4d4', aiI:'#152530', aiIb:'#1d3a4d',
-    tA:'#222c34', tAb:'#3c4e5a', tI:'#141c22', tIb:'#1e2831',
-    eA:'#00a884', eI:'rgba(40,60,70,.55)',
-    txA:'#e9edef', txI:'#3a5262',
-    hov:'#f59e0b', dot:'#f59e0b', sel:'#3b82f6'
-  };
-  function getBg(r,a)  { return r==='user'?a?C.uA:C.uI:r==='ai'?a?C.aiA:C.aiI:a?C.tA:C.tI; }
-  function getBdr(r,a) { return r==='user'?a?C.uAb:C.uIb:r==='ai'?a?C.aiAb:C.aiIb:a?C.tAb:C.tIb; }
-  function getBbg(r,a) { return r==='user'?a?'rgba(0,168,132,.28)':'rgba(42,100,70,.35)':r==='ai'?a?'rgba(30,164,212,.2)':'rgba(29,58,77,.45)':'rgba(255,255,255,.05)'; }
-  function getBc(r,a)  { return r==='user'?a?'#00a884':'#3a7a56':r==='ai'?a?'#1ea4d4':'#2a5a70':a?'#5a6a76':'#284050'; }
-
+  /* ── CANVAS RENDERER ─────────────────────────────────────────── */
   function rr(ctx,x,y,w,h,r) {
     ctx.beginPath();
     ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.quadraticCurveTo(x+w,y,x+w,y+r);
@@ -739,7 +709,6 @@
     ctx.lineTo(x,y+r);ctx.quadraticCurveTo(x,y,x+r,y);ctx.closePath();
   }
 
-  /* ── CANVAS RENDERER ─────────────────────────────────────────── */
   function doRender(canvas, all, edges, tr, hoverId, selectedId) {
     const dpr=window.devicePixelRatio||1, W=canvas.clientWidth, H=canvas.clientHeight;
     if (!W||!H) return;
@@ -759,34 +728,52 @@
     sorted.forEach(n => {
       const ia=n.active, isMeta=!!n.isMeta;
       const isSel=n.id===selectedId, isHov=n.id===hoverId&&!isSel;
-      const bg  = getBg(n.role, ia);
-      const bdr = isSel ? C.sel : isHov ? C.hov : getBdr(n.role, ia);
 
+      // ── Resolve per-node style (v2.8: uses getNodeStyle) ─────────
+      const style = getNodeStyle(n);
+      const bg    = style.bg;
+      const bdr   = isSel ? C.sel : isHov ? C.hov : style.bdr;
+
+      // ── Node fill ────────────────────────────────────────────────
       ctx.shadowColor='rgba(0,0,0,.35)'; ctx.shadowBlur=isSel?22:isHov?14:ia?6:3; ctx.shadowOffsetY=isSel?5:2;
       rr(ctx,n.x,n.y,n.w,n.h,10); ctx.fillStyle=bg; ctx.fill();
       ctx.shadowColor='transparent'; ctx.shadowBlur=0; ctx.shadowOffsetY=0;
 
+      // ── Border (dashed for meta; solid otherwise) ─────────────────
       if (isMeta) ctx.setLineDash([5,3]);
       rr(ctx,n.x,n.y,n.w,n.h,10);
-      ctx.strokeStyle=bdr; ctx.lineWidth=(isSel||isHov)?2.5:(ia?1.5:1); ctx.stroke(); ctx.setLineDash([]);
+      ctx.strokeStyle=bdr; ctx.lineWidth=(isSel||isHov)?2.5:(ia?1.5:1);
+      ctx.stroke(); ctx.setLineDash([]);
 
-      const badgeText = isMeta ? `×${n.toolMessages.length}` : (n.role==='user'?'USER':n.role==='ai'?'AI':'TOOL');
-      const badgeW = isMeta ? 28 : (n.role==='user'?34:n.role==='ai'?20:32);
-      ctx.fillStyle = getBbg(n.role, ia);
+      // ── Badge ─────────────────────────────────────────────────────
+      // v2.8: summary → "SUM"; meta → "×N"; others → role label
+      const badgeText = isMeta        ? `×${n.toolMessages.length}` :
+                        n.isSummary   ? 'SUM' :
+                        n.role==='user'? 'USER' :
+                        n.role==='ai'  ? 'AI'  : 'TOOL';
+      const badgeW = isMeta ? 28 : n.isSummary ? 26 : (n.role==='user'?34:n.role==='ai'?20:32);
+      ctx.fillStyle = style.bbg;
       if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(n.x+7,n.y+7,badgeW,14,3); ctx.fill(); }
-      ctx.fillStyle=getBc(n.role,ia); ctx.font=`bold ${isMeta?8.5:7.5}px system-ui`; ctx.textAlign='left';
+      ctx.fillStyle = style.bc;
+      ctx.font = `bold ${isMeta?8.5:7.5}px system-ui`; ctx.textAlign = 'left';
       ctx.fillText(badgeText, n.x+11, n.y+16.5);
 
-      ctx.fillStyle=ia?C.txA:C.txI; ctx.font=`${ia?500:400} 10px system-ui`;
-      let lbl=(isMeta?'⚙ ':'')+(n.label||'(empty)');
-      const maxW=n.w-16;
-      while (ctx.measureText(lbl).width>maxW&&lbl.length>6) lbl=lbl.slice(0,-4)+'…';
-      ctx.fillText(lbl,n.x+8,n.y+38);
+      // ── Label (v2.8: "∑ " prefix for summary, "⚙ " for meta) ─────
+      ctx.fillStyle = ia ? C.txA : C.txI;
+      ctx.font = `${ia?500:400} 10px system-ui`;
+      let lbl = (isMeta ? '⚙ ' : n.isSummary ? '∑ ' : '') + (n.label || '(empty)');
+      const maxW = n.w - 16;
+      while (ctx.measureText(lbl).width > maxW && lbl.length > 6) lbl = lbl.slice(0,-4) + '…';
+      ctx.fillText(lbl, n.x+8, n.y+38);
 
-      if (n.variants?.length) { ctx.fillStyle=C.dot; ctx.beginPath(); ctx.arc(n.x+n.w-8,n.y+8,4,0,Math.PI*2); ctx.fill(); }
-      if (!ia&&n.switchPath?.length>1) {
+      // ── Branch point dot ──────────────────────────────────────────
+      if (n.variants?.length) {
+        ctx.fillStyle=C.dot; ctx.beginPath(); ctx.arc(n.x+n.w-8,n.y+8,4,0,Math.PI*2); ctx.fill();
+      }
+      // ── Multi-step depth indicator ────────────────────────────────
+      if (!ia && n.switchPath?.length > 1) {
         ctx.fillStyle='rgba(245,158,11,.7)'; ctx.font='bold 8px system-ui'; ctx.textAlign='right';
-        ctx.fillText(`${n.switchPath.length}↓`,n.x+n.w-5,n.y+n.h-6);
+        ctx.fillText(`${n.switchPath.length}↓`, n.x+n.w-5, n.y+n.h-6);
       }
     });
     ctx.restore();
@@ -804,36 +791,31 @@
     graphCtx?.ro?.disconnect(); graphCtx?.ac?.abort();
     overlay.remove(); overlay=null; toastEl=null; graphCtx=null; clearTimeout(toastTmr);
   }
-
   function showToast(msg,type='ok') { if(!toastEl)return; clearTimeout(toastTmr); toastEl.textContent=msg; toastEl.className=type; toastTmr=setTimeout(()=>{if(toastEl)toastEl.className='';},3500); }
 
-  /* ── GRAPH NAV HELPERS ───────────────────────────────────────── */
+  /* ── GRAPH NAV ───────────────────────────────────────────────── */
   function getActiveParentNode(node) {
     if (!node || !graphCtx?.parentMap) return null;
     const p = graphCtx.parentMap.get(node.id) ?? null;
     return (p && p.active) ? p : null;
   }
-
   function getActiveChildNode(node) {
     if (!node) return null;
     const c = node.children?.[0] ?? null;
     return (c && c.active) ? c : null;
   }
-
   function panToNode(node) {
     if (!graphCtx?.canvas || !node) return;
-    const W = graphCtx.canvas.clientWidth, H = graphCtx.canvas.clientHeight;
-    if (!W || !H) return;
-    const s = graphCtx.tr.s;
-    graphCtx.tr.tx = (W / 2) - ((node.x + node.w / 2) * s);
-    graphCtx.tr.ty = (H / 2) - ((node.y + node.h / 2) * s);
+    const W=graphCtx.canvas.clientWidth, H=graphCtx.canvas.clientHeight;
+    if (!W||!H) return;
+    const s=graphCtx.tr.s;
+    graphCtx.tr.tx=(W/2)-((node.x+node.w/2)*s);
+    graphCtx.tr.ty=(H/2)-((node.y+node.h/2)*s);
   }
-
   function navigatePreview(targetNode, panelEl) {
     if (!targetNode || !graphCtx) return;
     graphCtx.selectedId = targetNode.id;
-    panToNode(targetNode);
-    graphCtx.draw();
+    panToNode(targetNode); graphCtx.draw();
     openPreview(targetNode, panelEl);
   }
 
@@ -846,9 +828,18 @@
     const upNode   = getActiveParentNode(node);
     const downNode = getActiveChildNode(node);
 
-    /* phead: role indicator + ✕ only */
-    const roleLabels = { user:'USER', ai:'AI Response', tool: isMeta ? `Tool Calls (×${node.toolMessages?.length||1})` : 'Tool Call' };
-    const dotColors  = { user:ia?'#00a884':'#3a7a56', ai:ia?'#1ea4d4':'#2a5a70', tool:ia?'#5a6a76':'#2a3a46' };
+    // ── Head: role indicator + ✕ ─────────────────────────────────
+    // v2.8: summary nodes shown with purple dot and "∑ Summary" label
+    const roleLabels = {
+      user: 'USER',
+      ai:   node.isSummary ? '∑ Summary' : 'AI Response',
+      tool: isMeta ? `Tool Calls (×${node.toolMessages?.length||1})` : 'Tool Call'
+    };
+    const dotColors = {
+      user: ia?'#00a884':'#3a7a56',
+      ai:   ia ? (node.isSummary ? '#a855f7' : '#1ea4d4') : (node.isSummary ? '#4a2880' : '#2a5a70'),
+      tool: ia?'#5a6a76':'#2a3a46'
+    };
     const phead = panelEl.querySelector('.phead');
     phead.innerHTML = `
       <div style="display:flex;align-items:center;gap:7px;min-width:0;flex:1">
@@ -858,14 +849,36 @@
       <button class="pclose-btn" title="Close preview (Esc)" style="background:none;border:none;cursor:pointer;color:#8696a0;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;flex-shrink:0">✕</button>`;
     phead.querySelector('.pclose-btn').onclick = () => closePreview(panelEl);
 
-    /* pbody: badge + content */
-    let badgeClass = ia ? 'active' : 'inactive', badgeText;
+    // ── Status badge (v2.8: context-aware classes and labels) ─────
+    let badgeClass, badgeText;
     if (isMeta) {
-      badgeClass = 'meta';
-      badgeText = ia ? '⚙ Aggregated tool calls (active chain)' : `⚙ ${steps > 1 ? steps + ' switches to activate' : '1 switch to activate'}`;
+      if (ia) {
+        const ctxSt = node.contextStatus;
+        if      (ctxSt === 'out')     { badgeClass='ooc';        badgeText='⚙ Tools — ⊘ all out of context'; }
+        else if (ctxSt === 'partial') { badgeClass='partial-ooc'; badgeText='⚙ Tools — ◑ partial out of context'; }
+        else                          { badgeClass='meta';        badgeText='⚙ Aggregated tool calls (active chain)'; }
+      } else {
+        badgeClass='meta';
+        badgeText=`⚙ ${steps>1?steps+' switches to activate':'1 switch to activate'}`;
+      }
+    } else if (node.isSummary) {
+      if (ia) {
+        if (node.isOoc) { badgeClass='ooc-summary'; badgeText='∑ Summary — ⊘ out of context'; }
+        else            { badgeClass='summary';     badgeText='∑ Context summary — in context'; }
+      } else {
+        badgeClass='inactive';
+        badgeText=`∑ ${steps>1?steps+' switches to activate':'1 switch to activate'}`;
+      }
     } else {
-      badgeText = ia ? '✓ Currently active in chat' : (steps===1?'⭐ 1 switch to activate':`⚡ ${steps} switches to activate`);
+      if (ia) {
+        if (node.isOoc) { badgeClass='ooc';    badgeText='⊘ Out of context (active chain)'; }
+        else            { badgeClass='active'; badgeText='✓ Currently active in chat'; }
+      } else {
+        badgeClass='inactive';
+        badgeText=steps===1?'⭐ 1 switch to activate':`⚡ ${steps} switches to activate`;
+      }
     }
+
     const pbody = panelEl.querySelector('.pbody');
     const contentHtml = isMeta
       ? buildMetaPreviewHtml(node.toolMessages)
@@ -875,16 +888,12 @@
       <div class="${EXT}-divider"><span class="${EXT}-divider-label">${isMeta?'Tool Call Details':'Message Content'}</span></div>
       ${contentHtml}`;
 
-    /* pfoot: nav row → divider → action → close */
+    // ── Footer: nav row → divider → action → close ────────────────
     const pfoot = panelEl.querySelector('.pfoot');
     pfoot.innerHTML = '';
 
-    const navRow = document.createElement('div');
-    navRow.className = EXT + '-nav-row';
-    const mkNavBtn = (label, title) => {
-      const b = document.createElement('button');
-      b.className = EXT + '-pbtn nav'; b.title = title; b.innerHTML = label; return b;
-    };
+    const navRow = document.createElement('div'); navRow.className = EXT + '-nav-row';
+    const mkNavBtn = (label, title) => { const b=document.createElement('button'); b.className=EXT+'-pbtn nav'; b.title=title; b.innerHTML=label; return b; };
     const upBtn   = mkNavBtn('↑ &nbsp;Parent', 'Navigate to parent node (active chain only)');
     const downBtn = mkNavBtn('↓ &nbsp;Child',  'Navigate to child node (active chain only)');
     if (!upNode)   upBtn.disabled   = true;
@@ -898,26 +907,21 @@
     pfoot.appendChild(sep);
 
     if (ia) {
-      const b = document.createElement('button');
-      b.className = EXT + '-pbtn primary';
+      const b = document.createElement('button'); b.className = EXT + '-pbtn primary';
       b.textContent = isMeta ? '↓ Go to First Tool Call' : '↓ Go to This Message';
       const scrollTarget  = isMeta ? node.scrollUUID : node.id;
-      // Pass rawContent for user/AI nodes so minimap fallback is available;
-      // null for meta nodes (tool messages not listed in minimap)
       const scrollContent = isMeta ? null : node.rawContent;
       b.onclick = () => { closePreview(panelEl); closeOverlay(); scrollAfterClose(scrollTarget, scrollContent); };
       pfoot.appendChild(b);
     } else if (steps > 0) {
-      const b = document.createElement('button');
-      b.className = EXT + '-pbtn apply';
+      const b = document.createElement('button'); b.className = EXT + '-pbtn apply';
       b.textContent = steps > 1 ? `⚡ Apply Changes (${steps} steps)` : '⭐ Apply Changes';
       b.onclick = () => applyAndReload(node);
       pfoot.appendChild(b);
     }
 
-    const cb = document.createElement('button');
-    cb.className = EXT + '-pbtn muted'; cb.textContent = 'Close Preview';
-    cb.onclick = () => closePreview(panelEl);
+    const cb = document.createElement('button'); cb.className = EXT + '-pbtn muted';
+    cb.textContent = 'Close Preview'; cb.onclick = () => closePreview(panelEl);
     pfoot.appendChild(cb);
 
     panelEl.classList.add('open');
@@ -934,7 +938,6 @@
     const sm=msgs[si],tgt=sm.threads?.[bi]; if(!tgt)throw new Error(`threads[${bi}] missing`);
     return [...msgs.slice(0,si),{...sm,content:tgt.userMessageContent,threads:[...sm.threads.filter((_,i)=>i!==bi),{userMessageContent:sm.content,messages:msgs.slice(si+1),createdAt:new Date().toISOString()}],updatedAt:new Date().toISOString()},...(tgt.messages||[])];
   }
-
   function getScrollTargetFromNode(node) {
     if (!node) return null;
     if (node.isMeta && node.scrollUUID) return node.scrollUUID;
@@ -948,7 +951,6 @@
     }
     return null;
   }
-
   async function applyAndReload(node) {
     if (!node||!node.switchPath?.length||node.active) return;
     const cs=getChatState(); if(!cs?.state?.chatID){showToast('Cannot read chat state','err');return;}
@@ -979,13 +981,20 @@
         <span class="hint">Tap to preview · Drag to pan · Scroll/pinch to zoom</span>
       </div>
       <button id="${EXT}-xbtn" title="Close — no changes (Esc)">✕</button>`;
+
     const leg = document.createElement('div'); leg.id = EXT+'-leg';
+    // v2.8: updated legend covering all 9 colour states
     leg.innerHTML = `
       <span><span class="${EXT}-dot" style="background:#00a884"></span>User</span>
-      <span><span class="${EXT}-dot" style="background:#1ea4d4"></span>AI Response</span>
-      <span><span class="${EXT}-dotdash" style="border-color:#3c4e5a"></span>Tool Calls (collapsed)</span>
+      <span><span class="${EXT}-dot" style="background:#1ea4d4"></span>AI</span>
+      <span><span class="${EXT}-dot" style="background:#a855f7"></span>∑ Summary</span>
+      <span><span class="${EXT}-dotdash" style="border-color:#3c4e5a"></span>Tools</span>
+      <span><span class="${EXT}-dot" style="background:#c47800"></span>⊘ OOC</span>
+      <span><span class="${EXT}-dotdash" style="border-color:#2e8a68"></span>Tools partial OOC</span>
+      <span><span class="${EXT}-dot" style="background:#2e1840;border:1px solid #4a2880;box-sizing:border-box"></span>Inactive</span>
       <span><span class="${EXT}-dot" style="background:#f59e0b"></span>Branch</span>
-      <span><span class="${EXT}-dot" style="background:#3b82f6"></span>Preview · Enter=confirm</span>`;
+      <span><span class="${EXT}-dot" style="background:#3b82f6"></span>Selected · Enter=go</span>`;
+
     const main = document.createElement('div'); main.id = EXT+'-main';
     const wrap = document.createElement('div'); wrap.id = EXT+'-wrap';
     const canvas = document.createElement('canvas'); canvas.id = EXT+'-cv';
@@ -1001,7 +1010,6 @@
     document.body.appendChild(overlay);
 
     const ac = new AbortController(), sig = ac.signal;
-    // draw() only — never auto-recentres so user zoom is always preserved
     const ro = new ResizeObserver(() => requestAnimationFrame(() => { graphCtx?.draw(); }));
     ro.observe(wrap);
 
@@ -1009,7 +1017,7 @@
       all, edges, bounds, parentMap, canvas, ac, ro,
       tr:{tx:0,ty:0,s:1}, hoverId:null, selectedId:null,
       centre() {
-        const W=canvas.clientWidth, H=canvas.clientHeight; if(!W||!H)return;
+        const W=canvas.clientWidth,H=canvas.clientHeight; if(!W||!H)return;
         const cW=this.bounds.maxX-this.bounds.minX+120, cH=this.bounds.maxY-60+120;
         this.tr.s=Math.max(0.2,Math.min(1.3,Math.min(W/cW,H/cH)));
         this.tr.tx=(W-cW*this.tr.s)/2-this.bounds.minX*this.tr.s+60*this.tr.s;
@@ -1030,7 +1038,6 @@
         const nd = graphCtx.all.find(n => n.id === graphCtx.selectedId);
         if (nd?.active) {
           const target  = nd.isMeta ? nd.scrollUUID : (nd.id.includes('__t') ? null : nd.id);
-          // Pass rawContent for minimap fallback (null for meta/branch-head nodes)
           const content = (!nd.isMeta && !nd.id.includes('__t')) ? nd.rawContent : null;
           closePreview(panel); closeOverlay(); if (target) scrollAfterClose(target, content);
         }
@@ -1118,14 +1125,12 @@
     btn.innerHTML=`<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="4" r="2.2"/><circle cx="16" cy="4" r="2.2"/><circle cx="4" cy="16" r="2.2"/><circle cx="16" cy="16" r="2.2"/><circle cx="10" cy="10" r="2.2"/><line x1="4" y1="4" x2="10" y2="10"/><line x1="16" y1="4" x2="10" y2="10"/><line x1="10" y1="10" x2="4" y2="16"/><line x1="10" y1="10" x2="16" y2="16"/></svg>`;
     btn.addEventListener('click', openGraph); bar.appendChild(btn);
   }
-
   function init() {
     checkScrollAfterReload(); injectStyles(); tryInject();
     let r=10; const retry=()=>{ if(document.querySelector('#'+EXT+'-btn'))return; tryInject(); if(--r>0)setTimeout(retry,650); };
     setTimeout(retry,400);
     new MutationObserver(tryInject).observe(document.body,{childList:true,subtree:true});
-    console.log('[TM Chat Graph] ✅ v2.7.0');
+    console.log('[TM Chat Graph] ✅ v2.8.0');
   }
-
   init();
 })();
