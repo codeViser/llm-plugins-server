@@ -1,30 +1,21 @@
 // ================================================================
 //  TypingMind — Chat Branch Graph  v2.5.0
 //
-//  New feature: Tool-call Meta Nodes
+//  Changes from v2.4.0:
+//    1) Zoom preserved on node selection — ResizeObserver no longer
+//       calls centre(); initial auto-fit runs once on open only.
+//    2) ↑/↓ Parent/Child navigation buttons added to the preview
+//       panel footer — navigate the active chain without leaving
+//       the graph or resetting zoom.
+//    3) Arrow navigation pans the canvas to center the target node
+//       at the exact current zoom level (zoom never changes).
+//    4) All preview panel buttons are in a fixed-height footer so
+//       panel content can never shift button positions.
+//    5) Bug fix: reload scroll target now resolves to the selected
+//       node, not the branch parent (getScrollTargetFromNode).
 //
-//  Any consecutive run of tool-type messages (role='tool' OR
-//  role='assistant' with tool_calls) between a user message and
-//  a final AI response is collapsed into a single META node.
-//
-//  Meta node properties:
-//    isMeta:       true
-//    toolMessages: array of all original tool messages in the run
-//    scrollUUID:   UUID of the first message (used for navigation)
-//    label:        comma-separated function names, or "N tool calls"
-//    badge:        "×N" where N = number of messages in the run
-//    border:       dashed (visually signals "collapsed group")
-//
-//  Meta node interaction:
-//    Preview: shows each tool invocation (function + arguments)
-//             and each tool result (output, truncated to 300 chars)
-//    Active:  "Go to First Tool Call" scrolls to scrollUUID
-//    Inactive: "Apply Changes" if switchPath is set (same as other
-//              inactive nodes — the parent chain's branch switch
-//              activates this entire path including tool calls)
-//
-//  All other nodes, colours, scrolling, and branch logic
-//  are identical to v2.3.0.
+//  Tool-call Meta Nodes, branch logic, and all other behaviour
+//  are unchanged from v2.4.0.
 // ================================================================
 (() => {
   'use strict';
@@ -50,7 +41,7 @@
     setTimeout(cleanup, 2000);
   }
 
-  /* ── SCROLL ──────────────────────────────────────────────────── */
+  /* ── LOCATE TOAST ────────────────────────────────────────────── */
   const LOC_TOAST_ID = EXT + '-loc-toast';
   let locToastTmr = null;
 
@@ -59,7 +50,7 @@
     if (!el) {
       el = document.createElement('div');
       el.id = LOC_TOAST_ID;
-      el.style.cssText = 'position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483647;padding:7px 14px;border-radius:16px;font-size:12px;font-weight:700;color:#0b141a;background:#00a884;box-shadow:0 6px 18px rgba(0,0,0,.35);opacity:0;transition:opacity .2s, transform .2s;pointer-events:none;white-space:nowrap;';
+      el.style.cssText = 'position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483647;padding:7px 14px;border-radius:16px;font-size:12px;font-weight:700;color:#0b141a;background:#00a884;box-shadow:0 6px 18px rgba(0,0,0,.35);opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;white-space:nowrap;';
       document.body.appendChild(el);
     }
     el.textContent = msg;
@@ -75,6 +66,7 @@
     }, 1400);
   }
 
+  /* ── SCROLL HELPERS ──────────────────────────────────────────── */
   function isScrollable(el) {
     if (!el) return false;
     const oy = window.getComputedStyle(el).overflowY;
@@ -93,11 +85,9 @@
 
   function pickBestScroller(list) {
     if (!list || list.length === 0) return null;
-    return list.reduce((best, cur) => {
-      const b = (best.scrollHeight - best.clientHeight);
-      const c = (cur.scrollHeight - cur.clientHeight);
-      return c > b ? cur : best;
-    }, list[0]);
+    return list.reduce((best, cur) =>
+      (cur.scrollHeight - cur.clientHeight) > (best.scrollHeight - best.clientHeight) ? cur : best
+    , list[0]);
   }
 
   function getChatScroller(preferredEl=null) {
@@ -108,7 +98,7 @@
     if (chatSpace) {
       const candidates = [];
       if (isScrollable(chatSpace)) candidates.push(chatSpace);
-      const nodes = chatSpace.querySelectorAll('[data-element-id], [class], [style], div, section');
+      const nodes = chatSpace.querySelectorAll('[data-element-id],[class],[style],div,section');
       for (const n of nodes) if (isScrollable(n)) candidates.push(n);
       const best = pickBestScroller(candidates);
       if (best) return best;
@@ -119,7 +109,7 @@
 
   function normalizeBlock(el) {
     if (!el || el.closest('#' + EXT + '-ov')) return null;
-    const block = el.closest('[data-element-id="response-block"], [data-element-id="request-block"], [data-element-id="message-block"], [data-element-id*="block"], [data-element-id*="message"], [data-element-id*="response"], [data-element-id*="request"]');
+    const block = el.closest('[data-element-id="response-block"],[data-element-id="request-block"],[data-element-id="message-block"],[data-element-id*="block"],[data-element-id*="message"],[data-element-id*="response"],[data-element-id*="request"]');
     return block || el;
   }
 
@@ -136,7 +126,6 @@
       const el = tsBtn.closest(sel);
       if (el) return el;
     }
-    // Avoid absolute/fixed hover toolbars; climb to a normal-flow container
     let el = tsBtn.parentElement;
     for (let i = 0; i < 12 && el; i++, el = el.parentElement) {
       const st = window.getComputedStyle(el);
@@ -161,43 +150,25 @@
   }
 
   function locateMessageBlock(uuid) {
-    // 1) Timestamp button
+    // 1) Timestamp button (primary path)
     const tsBtn = document.getElementById(`message-timestamp-${uuid}`);
     if (tsBtn) {
       const block = findMessageBlock(tsBtn);
       if (block) return { block, method: 'timestamp' };
     }
-
     // 2) Exact attribute matches
-    const exactSelectors = [
-      `[data-message-id="${uuid}"]`,
-      `[data-uuid="${uuid}"]`,
-      `[data-message-uuid="${uuid}"]`,
-      `[data-id="${uuid}"]`,
-      `[id="${uuid}"]`
-    ];
-    for (const sel of exactSelectors) {
-      const el = document.querySelector(sel);
-      const block = normalizeBlock(el);
+    for (const sel of [`[data-message-id="${uuid}"]`,`[data-uuid="${uuid}"]`,`[data-message-uuid="${uuid}"]`,`[data-id="${uuid}"]`,`[id="${uuid}"]`]) {
+      const block = normalizeBlock(document.querySelector(sel));
       if (block) return { block, method: 'attr-exact' };
     }
-
     // 3) Partial attribute matches
-    const partialSelectors = [
-      `[data-element-id*="${uuid}"]`,
-      `[id*="${uuid}"]`
-    ];
-    for (const sel of partialSelectors) {
-      const el = document.querySelector(sel);
-      const block = normalizeBlock(el);
+    for (const sel of [`[data-element-id*="${uuid}"]`,`[id*="${uuid}"]`]) {
+      const block = normalizeBlock(document.querySelector(sel));
       if (block) return { block, method: 'attr-partial' };
     }
-
-    // 4) Scan DOM for any attribute containing uuid
-    const scanned = scanDomForUuid(uuid);
-    const block = normalizeBlock(scanned);
+    // 4) Full DOM scan
+    const block = normalizeBlock(scanDomForUuid(uuid));
     if (block) return { block, method: 'scan' };
-
     return null;
   }
 
@@ -205,23 +176,21 @@
     const cs = getChatState();
     if (!cs?.state?.messages) return { idx: -1, total: 0 };
     const msgs = cs.state.messages;
-    const idx = msgs.findIndex(m => m.uuid === uuid);
-    return { idx, total: msgs.length };
+    return { idx: msgs.findIndex(m => m.uuid === uuid), total: msgs.length };
   }
 
   function computeJumpTarget(scroller, idx, total) {
     if (!scroller || total <= 1 || idx < 0) return null;
     const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-    const ratio = total <= 1 ? 0 : idx / (total - 1);
-    return Math.max(0, Math.min(max, max * ratio));
+    return Math.max(0, Math.min(max, max * (idx / (total - 1))));
   }
 
   function nudgeScroller(ctx) {
     if (!ctx.scroller) return;
     const delta = ctx.scroller.clientHeight * 0.6;
-    let dir = 1;
-    if (ctx.jumpTarget != null) dir = ctx.scroller.scrollTop > ctx.jumpTarget ? -1 : 1;
-    else dir = (ctx.nudgeCount % 2 === 0) ? 1 : -1;
+    const dir = ctx.jumpTarget != null
+      ? (ctx.scroller.scrollTop > ctx.jumpTarget ? -1 : 1)
+      : (ctx.nudgeCount % 2 === 0 ? 1 : -1);
     ctx.scroller.scrollBy({ top: dir * delta, behavior: 'auto' });
   }
 
@@ -231,36 +200,25 @@
 
     const sr = scroller.getBoundingClientRect();
     const br = block.getBoundingClientRect();
-
     const Epos = br.top - sr.top + scroller.scrollTop;
     let target = Epos - (scroller.clientHeight / 2) + (br.height / 2);
 
-    // Topmost handling
     if (Epos <= br.height || target < 0) target = 0;
-
     target = Math.max(0, Math.min(target, scroller.scrollHeight - scroller.clientHeight));
 
     const prev = scroller.scrollTop;
     scroller.scrollTo({ top: target, behavior: 'auto' });
 
-    // Fallback if scrollTop did not move (some PWA layouts)
     if (Math.abs(scroller.scrollTop - prev) < 1) {
-      block.scrollIntoView({
-        block: target === 0 ? 'start' : 'center',
-        inline: 'nearest',
-        behavior: 'auto'
-      });
+      block.scrollIntoView({ block: target === 0 ? 'start' : 'center', inline: 'nearest', behavior: 'auto' });
     }
     return true;
   }
 
   function scrollToMessage(uuid, doHighlight) {
-    // Guard synthetic IDs: __t = branch variant heads, __meta = tool meta nodes
     if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return { ok:false };
-
     const found = locateMessageBlock(uuid);
     if (!found?.block) return { ok:false };
-
     const ok = scrollBlockToCenter(found.block);
     if (doHighlight) highlightBlock(found.block);
     return { ok, method: found.method };
@@ -268,50 +226,29 @@
 
   function scrollWithRetry(uuid, { max = 28, delay = 140, highlight = true } = {}) {
     const idxInfo = getMessageIndexInfo(uuid);
-    const ctx = {
-      uuid,
-      attempts: 0,
-      idx: idxInfo.idx,
-      total: idxInfo.total,
-      didJump: false,
-      nudgeCount: 0,
-      maxNudge: 6,
-      scroller: null,
-      jumpTarget: null,
-      lastAction: ''
-    };
+    const ctx = { uuid, attempts: 0, idx: idxInfo.idx, total: idxInfo.total,
+      didJump: false, nudgeCount: 0, maxNudge: 6, scroller: null, jumpTarget: null, lastAction: '' };
 
     const tick = () => {
       const res = scrollToMessage(uuid, false);
       if (res.ok) {
-        const method = ctx.lastAction ? `${ctx.lastAction} → ${res.method}` : res.method;
-        showLocateToast(`Locate: ${method} ✓`, 'ok');
+        showLocateToast(`Locate: ${ctx.lastAction ? ctx.lastAction + ' → ' : ''}${res.method} ✓`, 'ok');
         if (highlight) setTimeout(() => scrollToMessage(uuid, true), 250);
         return;
       }
-
       if (!ctx.scroller) ctx.scroller = getChatScroller(null);
-
       if (!ctx.didJump && ctx.idx >= 0 && ctx.scroller) {
         ctx.jumpTarget = computeJumpTarget(ctx.scroller, ctx.idx, ctx.total);
         if (ctx.jumpTarget != null) {
           ctx.scroller.scrollTo({ top: ctx.jumpTarget, behavior: 'auto' });
-          ctx.didJump = true;
-          ctx.lastAction = 'index-jump';
+          ctx.didJump = true; ctx.lastAction = 'index-jump';
         }
       } else if (ctx.scroller && ctx.nudgeCount < ctx.maxNudge) {
-        nudgeScroller(ctx);
-        ctx.nudgeCount++;
-        ctx.lastAction = 'nudge-scan';
+        nudgeScroller(ctx); ctx.nudgeCount++; ctx.lastAction = 'nudge-scan';
       }
-
-      if (++ctx.attempts >= max) {
-        showLocateToast('Locate: failed (not in DOM)', 'err');
-        return;
-      }
+      if (++ctx.attempts >= max) { showLocateToast('Locate: failed (not in DOM)', 'err'); return; }
       setTimeout(tick, delay);
     };
-
     requestAnimationFrame(() => requestAnimationFrame(tick));
   }
 
@@ -386,12 +323,20 @@
       .tmg-meta-fn { font-family:monospace;font-size:11px;font-weight:700;color:#1ea4d4;margin-bottom:3px; }
       .tmg-meta-args { font-size:10px;background:rgba(255,255,255,.06);border-radius:4px;padding:4px 6px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin-bottom:2px;color:#b0c4ce; }
       .tmg-meta-output { font-size:11.5px;color:#9ab0ba;white-space:pre-wrap;word-break:break-word; }
+      /* Preview footer */
       .${EXT}-pfoot { padding:10px 12px;border-top:1px solid rgba(255,255,255,.08);display:flex;flex-direction:column;gap:7px;flex-shrink:0; }
       .${EXT}-pbtn { padding:8px 12px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:600;width:100%;transition:opacity .15s; }
-      .${EXT}-pbtn:hover  { opacity:.82; }
+      .${EXT}-pbtn:hover { opacity:.82; }
       .${EXT}-pbtn.primary { background:#00a884;color:#0b141a; }
       .${EXT}-pbtn.apply   { background:#f59e0b;color:#0b141a; }
       .${EXT}-pbtn.muted   { background:transparent;border:1px solid rgba(255,255,255,.18);color:#8696a0; }
+      /* Nav row: ↑ Parent / ↓ Child */
+      .${EXT}-nav-row { display:flex;gap:6px; }
+      .${EXT}-pbtn.nav { background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.18);color:#e9edef;flex:1;display:flex;align-items:center;justify-content:center;gap:5px;letter-spacing:.3px; }
+      .${EXT}-pbtn.nav:disabled { opacity:.27;cursor:not-allowed;pointer-events:none; }
+      .${EXT}-pbtn.nav:not(:disabled):hover { background:rgba(255,255,255,.13);opacity:1; }
+      .${EXT}-nav-divider { height:1px;background:rgba(255,255,255,.08);margin:1px 0; }
+      /* Graph toast */
       #${EXT}-toast { position:absolute;bottom:20px;left:50%;transform:translateX(-50%) translateY(60px);padding:7px 18px;border-radius:20px;font-size:12px;font-weight:700;transition:transform .22s;pointer-events:none;white-space:nowrap;z-index:10; }
       #${EXT}-toast.ok   { background:#00a884;color:#0b141a;transform:translateX(-50%) translateY(0); }
       #${EXT}-toast.warn { background:#f59e0b;color:#0b141a;transform:translateX(-50%) translateY(0); }
@@ -446,7 +391,7 @@
     return 'tool';
   }
 
-  /* ── META NODE HELPERS ─────────────────────────────────────────── */
+  /* ── META NODE HELPERS ───────────────────────────────────────── */
   function getMetaLabel(toolMsgs) {
     const names = [];
     for (const m of toolMsgs) {
@@ -472,28 +417,20 @@
         const calls = m.tool_calls.map(tc => {
           const name = tc.function?.name || tc.name || 'tool';
           let args = '';
-          try {
-            const parsed = JSON.parse(tc.function?.arguments || '{}');
-            args = JSON.stringify(parsed, null, 2);
-          } catch (_) {
-            args = tc.function?.arguments || '';
-          }
+          try { args = JSON.stringify(JSON.parse(tc.function?.arguments || '{}'), null, 2); }
+          catch (_) { args = tc.function?.arguments || ''; }
           const argsPreview = args.slice(0, 400) + (args.length > 400 ? '\n…' : '');
           return `<div class="tmg-meta-fn">${escH(name)}()</div>
             ${argsPreview ? `<div class="tmg-meta-args">${escH(argsPreview)}</div>` : ''}`;
         }).join('');
         return `<div class="tmg-meta-group">
-          <div class="tmg-meta-section-label tmg-meta-invoke-label">🔧 Tool Invoke</div>
-          ${calls}
-        </div>`;
+          <div class="tmg-meta-section-label tmg-meta-invoke-label">🔧 Tool Invoke</div>${calls}</div>`;
       }
       if (m.role === 'tool') {
-        const raw = extractText(m.content);
-        const preview = raw.slice(0, 350);
+        const raw = extractText(m.content), preview = raw.slice(0, 350);
         return `<div class="tmg-meta-group">
           <div class="tmg-meta-section-label tmg-meta-result-label">📤 Tool Result</div>
-          <div class="tmg-meta-output">${escH(preview)}${raw.length > 350 ? '\n…' : ''}</div>
-        </div>`;
+          <div class="tmg-meta-output">${escH(preview)}${raw.length > 350 ? '\n…' : ''}</div></div>`;
       }
       return '';
     }).filter(Boolean).join('');
@@ -512,45 +449,32 @@
       .replace(/\n\n/g,'</p><p>').replace(/\n/g,'<br>');
   }
 
-  /* ── TREE BUILDER ──────────────────────────────────────────────── */
+  /* ── TREE BUILDER ────────────────────────────────────────────── */
   function buildChain(msgs, start, isActive, sp) {
     if (!msgs || start >= msgs.length) return [];
     const m = msgs[start];
     const cls = classifyMsg(m);
 
-    // Collapse consecutive tool run into one META node
     if (cls === 'tool') {
       let end = start;
       const toolMsgs = [];
-      while (end < msgs.length && classifyMsg(msgs[end]) === 'tool') {
-        toolMsgs.push(msgs[end]);
-        end++;
-      }
+      while (end < msgs.length && classifyMsg(msgs[end]) === 'tool') { toolMsgs.push(msgs[end]); end++; }
       const metaNode = {
-        id:           `${toolMsgs[0].uuid}__meta`,
-        role:         'tool',
-        isMeta:       true,
-        toolMessages: toolMsgs,
-        label:        getMetaLabel(toolMsgs),
-        scrollUUID:   toolMsgs[0].uuid,
-        active:       isActive,
-        switchPath:   isActive ? [] : sp,
-        sourceUUID:   sp.length > 0 ? sp[sp.length-1].sourceUUID : toolMsgs[0].uuid,
-        branchIdx:    sp.length > 0 ? sp[sp.length-1].branchIdx  : null,
+        id: `${toolMsgs[0].uuid}__meta`, role:'tool', isMeta:true, toolMessages:toolMsgs,
+        label: getMetaLabel(toolMsgs), scrollUUID: toolMsgs[0].uuid,
+        active: isActive, switchPath: isActive ? [] : sp,
+        sourceUUID: sp.length > 0 ? sp[sp.length-1].sourceUUID : toolMsgs[0].uuid,
+        branchIdx:  sp.length > 0 ? sp[sp.length-1].branchIdx  : null,
         x:0, y:0, w:0, h:0, children:[], variants:[]
       };
       metaNode.children = buildChain(msgs, end, isActive, sp);
       return [metaNode];
     }
 
-    // Normal node
     const node = {
-      id:         m.uuid,
-      role:       cls,
-      label:      extractText(m.content).replace(/\s+/g, ' ').slice(0, 82),
-      rawContent: m.content,
-      active:     isActive,
-      switchPath: isActive ? [] : sp,
+      id: m.uuid, role: cls,
+      label: extractText(m.content).replace(/\s+/g,' ').slice(0, 82),
+      rawContent: m.content, active: isActive, switchPath: isActive ? [] : sp,
       sourceUUID: sp.length > 0 ? sp[sp.length-1].sourceUUID : m.uuid,
       branchIdx:  sp.length > 0 ? sp[sp.length-1].branchIdx  : null,
       x:0, y:0, w:0, h:0, children:[], variants:[]
@@ -560,12 +484,10 @@
       node.variants = m.threads.map((thread, ti) => {
         const vp = [...(isActive ? [] : sp), { sourceUUID: m.uuid, branchIdx: ti }];
         const hd = {
-          id: `${m.uuid}__t${ti}`, role: 'user',
+          id: `${m.uuid}__t${ti}`, role:'user',
           label: extractText(thread.userMessageContent).replace(/\s+/g,' ').slice(0,82),
-          rawContent: thread.userMessageContent,
-          active: false, switchPath: vp,
-          sourceUUID: vp[vp.length-1].sourceUUID,
-          branchIdx:  vp[vp.length-1].branchIdx,
+          rawContent: thread.userMessageContent, active: false, switchPath: vp,
+          sourceUUID: vp[vp.length-1].sourceUUID, branchIdx: vp[vp.length-1].branchIdx,
           x:0, y:0, w:0, h:0, children:[], variants:[]
         };
         hd.children = buildChain(thread.messages || [], 0, false, vp);
@@ -579,15 +501,16 @@
     return [node];
   }
 
+  /* ── PARENT MAP ──────────────────────────────────────────────── */
   function buildParentMap(root) {
-    const parentMap = new Map();
-    (function walk(n, p) {
+    const map = new Map();
+    (function walk(n, parent) {
       if (!n) return;
-      parentMap.set(n.id, p || null);
+      map.set(n.id, parent ?? null);
       if (n.children?.[0]) walk(n.children[0], n);
       if (n.variants?.length) n.variants.forEach(v => walk(v, n));
     })(root, null);
-    return parentMap;
+    return map;
   }
 
   /* ── LAYOUT ──────────────────────────────────────────────────── */
@@ -618,10 +541,10 @@
 
   /* ── CANVAS COLORS ───────────────────────────────────────────── */
   const C = {
-    uA:'#004d3a',  uAb:'#00a884',  uI:'#1a2e23',  uIb:'#2a4532',
-    aiA:'#0d3b4f', aiAb:'#1ea4d4', aiI:'#152530',  aiIb:'#1d3a4d',
-    tA:'#222c34',  tAb:'#3c4e5a',  tI:'#141c22',   tIb:'#1e2831',
-    eA:'#00a884',  eI:'rgba(40,60,70,.55)',
+    uA:'#004d3a', uAb:'#00a884', uI:'#1a2e23', uIb:'#2a4532',
+    aiA:'#0d3b4f', aiAb:'#1ea4d4', aiI:'#152530', aiIb:'#1d3a4d',
+    tA:'#222c34', tAb:'#3c4e5a', tI:'#141c22', tIb:'#1e2831',
+    eA:'#00a884', eI:'rgba(40,60,70,.55)',
     txA:'#e9edef', txI:'#3a5262',
     hov:'#f59e0b', dot:'#f59e0b', sel:'#3b82f6'
   };
@@ -654,50 +577,36 @@
       ctx.setLineDash(e.active?[]:[6,4]); ctx.stroke(); ctx.setLineDash([]);
     });
 
-    const sorted = [...all].sort((a,b) => a.active===b.active?0:a.active?-1:1);
+    const sorted = [...all].sort((a,b)=>a.active===b.active?0:a.active?-1:1);
     sorted.forEach(n => {
       const ia=n.active, isMeta=!!n.isMeta;
       const isSel=n.id===selectedId, isHov=n.id===hoverId&&!isSel;
       const bg  = getBg(n.role, ia);
       const bdr = isSel ? C.sel : isHov ? C.hov : getBdr(n.role, ia);
 
-      ctx.shadowColor='rgba(0,0,0,.35)';
-      ctx.shadowBlur=isSel?22:isHov?14:ia?6:3;
-      ctx.shadowOffsetY=isSel?5:2;
+      ctx.shadowColor='rgba(0,0,0,.35)'; ctx.shadowBlur=isSel?22:isHov?14:ia?6:3; ctx.shadowOffsetY=isSel?5:2;
       rr(ctx,n.x,n.y,n.w,n.h,10); ctx.fillStyle=bg; ctx.fill();
       ctx.shadowColor='transparent'; ctx.shadowBlur=0; ctx.shadowOffsetY=0;
 
-      if (isMeta) ctx.setLineDash([5, 3]);
+      if (isMeta) ctx.setLineDash([5,3]);
       rr(ctx,n.x,n.y,n.w,n.h,10);
-      ctx.strokeStyle=bdr; ctx.lineWidth=(isSel||isHov)?2.5:(ia?1.5:1);
-      ctx.stroke();
-      ctx.setLineDash([]);
+      ctx.strokeStyle=bdr; ctx.lineWidth=(isSel||isHov)?2.5:(ia?1.5:1); ctx.stroke(); ctx.setLineDash([]);
 
-      const badgeText = isMeta
-        ? `×${n.toolMessages.length}`
-        : (n.role==='user'?'USER':n.role==='ai'?'AI':'TOOL');
+      const badgeText = isMeta ? `×${n.toolMessages.length}` : (n.role==='user'?'USER':n.role==='ai'?'AI':'TOOL');
       const badgeW = isMeta ? 28 : (n.role==='user'?34:n.role==='ai'?20:32);
       ctx.fillStyle = getBbg(n.role, ia);
       if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(n.x+7,n.y+7,badgeW,14,3); ctx.fill(); }
-      ctx.fillStyle = getBc(n.role, ia);
-      ctx.font = `bold ${isMeta?8.5:7.5}px system-ui`;
-      ctx.textAlign = 'left';
+      ctx.fillStyle=getBc(n.role,ia); ctx.font=`bold ${isMeta?8.5:7.5}px system-ui`; ctx.textAlign='left';
       ctx.fillText(badgeText, n.x+11, n.y+16.5);
 
-      ctx.fillStyle = ia ? C.txA : C.txI;
-      ctx.font = `${ia?500:400} 10px system-ui`;
-      let lbl = (isMeta ? '⚙ ' : '') + (n.label || '(empty)');
-      const maxW = n.w - 16;
-      while (ctx.measureText(lbl).width > maxW && lbl.length > 6) lbl = lbl.slice(0,-4) + '…';
-      ctx.fillText(lbl, n.x+8, n.y+38);
+      ctx.fillStyle=ia?C.txA:C.txI; ctx.font=`${ia?500:400} 10px system-ui`;
+      let lbl=(isMeta?'⚙ ':'')+(n.label||'(empty)');
+      const maxW=n.w-16;
+      while (ctx.measureText(lbl).width>maxW&&lbl.length>6) lbl=lbl.slice(0,-4)+'…';
+      ctx.fillText(lbl,n.x+8,n.y+38);
 
-      if (n.variants?.length) {
-        ctx.fillStyle=C.dot; ctx.beginPath(); ctx.arc(n.x+n.w-8,n.y+8,4,0,Math.PI*2); ctx.fill();
-      }
-      if (!ia && n.switchPath?.length > 1) {
-        ctx.fillStyle='rgba(245,158,11,.7)'; ctx.font='bold 8px system-ui'; ctx.textAlign='right';
-        ctx.fillText(`${n.switchPath.length}↓`, n.x+n.w-5, n.y+n.h-6);
-      }
+      if (n.variants?.length) { ctx.fillStyle=C.dot; ctx.beginPath(); ctx.arc(n.x+n.w-8,n.y+8,4,0,Math.PI*2); ctx.fill(); }
+      if (!ia&&n.switchPath?.length>1) { ctx.fillStyle='rgba(245,158,11,.7)'; ctx.font='bold 8px system-ui'; ctx.textAlign='right'; ctx.fillText(`${n.switchPath.length}↓`,n.x+n.w-5,n.y+n.h-6); }
     });
     ctx.restore();
   }
@@ -710,20 +619,21 @@
   function closeOverlay() { if(!overlay)return; graphCtx?.ro?.disconnect(); graphCtx?.ac?.abort(); overlay.remove(); overlay=null; toastEl=null; graphCtx=null; clearTimeout(toastTmr); }
   function showToast(msg,type='ok') { if(!toastEl)return; clearTimeout(toastTmr); toastEl.textContent=msg; toastEl.className=type; toastTmr=setTimeout(()=>{if(toastEl)toastEl.className='';},3500); }
 
-  /* ── PREVIEW NAV HELPERS ─────────────────────────────────────── */
+  /* ── GRAPH NAV HELPERS ───────────────────────────────────────── */
   function getActiveParentNode(node) {
     if (!node || !graphCtx?.parentMap) return null;
-    const p = graphCtx.parentMap.get(node.id) || null;
+    const p = graphCtx.parentMap.get(node.id) ?? null;
     return (p && p.active) ? p : null;
   }
 
   function getActiveChildNode(node) {
     if (!node) return null;
-    const c = node.children?.[0] || null;
+    const c = node.children?.[0] ?? null;
     return (c && c.active) ? c : null;
   }
 
-  function centerNodeAtCurrentZoom(node) {
+  // Pan-only: moves the graph view so node is centred at current zoom
+  function panToNode(node) {
     if (!graphCtx || !node || !graphCtx.canvas) return;
     const W = graphCtx.canvas.clientWidth;
     const H = graphCtx.canvas.clientHeight;
@@ -733,88 +643,86 @@
     graphCtx.tr.ty = (H / 2) - ((node.y + node.h / 2) * s);
   }
 
-  function navigatePreview(node, dir, panelEl) {
-    const target = dir === 'up' ? getActiveParentNode(node) : getActiveChildNode(node);
-    if (!target) return;
-    if (graphCtx) {
-      graphCtx.selectedId = target.id;
-      graphCtx.hasUserView = true;
-      centerNodeAtCurrentZoom(target); // pan only, preserves zoom
-      graphCtx.draw();
-    }
-    openPreview(target, panelEl);
+  function navigatePreview(targetNode, panelEl) {
+    if (!targetNode || !graphCtx) return;
+    graphCtx.selectedId = targetNode.id;
+    panToNode(targetNode);  // zoom unchanged, only pan
+    graphCtx.draw();
+    openPreview(targetNode, panelEl);
   }
 
   /* ── PREVIEW PANEL ───────────────────────────────────────────── */
   function openPreview(node, panelEl) {
     if (!node || !panelEl) return;
-    if (graphCtx) { graphCtx.selectedId = node.id; graphCtx.hasUserView = true; graphCtx.draw(); }
+    if (graphCtx) { graphCtx.selectedId = node.id; graphCtx.draw(); }
 
-    const ia = node.active, steps = node.switchPath?.length || 0;
-    const isMeta = !!node.isMeta;
-    const upNode = getActiveParentNode(node);
+    const ia = node.active, steps = node.switchPath?.length || 0, isMeta = !!node.isMeta;
+    const upNode   = getActiveParentNode(node);
     const downNode = getActiveChildNode(node);
 
+    /* ── Head: role label + ✕ only ──────────────────────────────── */
     const roleLabels = { user:'USER', ai:'AI Response', tool: isMeta ? `Tool Calls (×${node.toolMessages?.length||1})` : 'Tool Call' };
     const dotColors  = { user:ia?'#00a884':'#3a7a56', ai:ia?'#1ea4d4':'#2a5a70', tool:ia?'#5a6a76':'#2a3a46' };
-
     const phead = panelEl.querySelector('.phead');
     phead.innerHTML = `
       <div style="display:flex;align-items:center;gap:7px;min-width:0;flex:1">
         <span style="width:8px;height:8px;border-radius:${isMeta?'2px':'50%'};background:${dotColors[node.role]||'#444'};flex-shrink:0"></span>
         <span style="font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${roleLabels[node.role]||'?'}</span>
       </div>
-      <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
-        <button class="pnav-btn pnav-up" title="Parent node (active chain only)" style="background:transparent;border:1px solid rgba(255,255,255,.25);color:#e9edef;cursor:pointer;font-size:12px;line-height:1;padding:4px 7px;border-radius:6px;min-width:28px">↑</button>
-        <button class="pnav-btn pnav-down" title="Child node (active chain only)" style="background:transparent;border:1px solid rgba(255,255,255,.25);color:#e9edef;cursor:pointer;font-size:12px;line-height:1;padding:4px 7px;border-radius:6px;min-width:28px">↓</button>
-        <button class="pclose-btn" title="Close preview (Esc)" style="background:none;border:none;cursor:pointer;color:#8696a0;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;flex-shrink:0">✕</button>
-      </div>`;
+      <button class="pclose-btn" title="Close preview (Esc)" style="background:none;border:none;cursor:pointer;color:#8696a0;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;flex-shrink:0">✕</button>`;
+    phead.querySelector('.pclose-btn').onclick = () => closePreview(panelEl);
 
-    const upBtn = phead.querySelector('.pnav-up');
-    const downBtn = phead.querySelector('.pnav-down');
-    const closeBtn = phead.querySelector('.pclose-btn');
-
-    const setNavState = (btn, enabled) => {
-      btn.disabled = !enabled;
-      btn.style.opacity = enabled ? '1' : '.35';
-      btn.style.cursor = enabled ? 'pointer' : 'not-allowed';
-      btn.style.borderColor = enabled ? 'rgba(255,255,255,.25)' : 'rgba(255,255,255,.12)';
-    };
-
-    setNavState(upBtn, !!upNode);
-    setNavState(downBtn, !!downNode);
-
-    if (upNode) upBtn.onclick = () => navigatePreview(node, 'up', panelEl);
-    if (downNode) downBtn.onclick = () => navigatePreview(node, 'down', panelEl);
-    closeBtn.onclick = () => closePreview(panelEl);
-
-    let badgeClass = ia ? 'active' : 'inactive';
-    let badgeText;
+    /* ── Body: status badge + content ───────────────────────────── */
+    let badgeClass = ia ? 'active' : 'inactive', badgeText;
     if (isMeta) {
       badgeClass = 'meta';
       badgeText = ia ? '⚙ Aggregated tool calls (active chain)' : `⚙ ${steps > 1 ? steps + ' switches to activate' : '1 switch to activate'}`;
     } else {
       badgeText = ia ? '✓ Currently active in chat' : (steps===1?'⭐ 1 switch to activate':`⚡ ${steps} switches to activate`);
     }
-
     const pbody = panelEl.querySelector('.pbody');
-    const dividerLabel = isMeta ? 'Tool Call Details' : 'Message Content';
-    const contentHtml  = isMeta
+    const contentHtml = isMeta
       ? buildMetaPreviewHtml(node.toolMessages)
       : `<div class="${EXT}-content">${renderForPreview(node.rawContent)}</div>`;
-
     pbody.innerHTML = `
       <div style="margin-bottom:2px">
         <span class="${EXT}-sbadge ${badgeClass}">${badgeText}</span>
       </div>
       <div class="${EXT}-divider">
-        <span class="${EXT}-divider-label">${dividerLabel}</span>
+        <span class="${EXT}-divider-label">${isMeta?'Tool Call Details':'Message Content'}</span>
       </div>
       ${contentHtml}`;
 
+    /* ── Footer: nav row → action → close (all fixed at bottom) ── */
     const pfoot = panelEl.querySelector('.pfoot');
     pfoot.innerHTML = '';
 
+    // ── Nav row (always present) ─────────────────────────────────
+    const navRow = document.createElement('div');
+    navRow.className = EXT + '-nav-row';
+
+    const mkNavBtn = (label, title) => {
+      const b = document.createElement('button');
+      b.className = EXT + '-pbtn nav'; b.title = title;
+      b.innerHTML = label; return b;
+    };
+    const upBtn   = mkNavBtn('↑ &nbsp;Parent', 'Navigate to parent node (active chain only)');
+    const downBtn = mkNavBtn('↓ &nbsp;Child',  'Navigate to child node (active chain only)');
+
+    if (!upNode)   { upBtn.disabled   = true; }
+    if (!downNode) { downBtn.disabled = true; }
+    upBtn.onclick   = () => { if (upNode)   navigatePreview(upNode,   panelEl); };
+    downBtn.onclick = () => { if (downNode) navigatePreview(downNode, panelEl); };
+
+    navRow.appendChild(upBtn); navRow.appendChild(downBtn);
+    pfoot.appendChild(navRow);
+
+    // ── Thin divider between nav and action area ─────────────────
+    const navDiv = document.createElement('div');
+    navDiv.className = EXT + '-nav-divider';
+    pfoot.appendChild(navDiv);
+
+    // ── Primary action (conditional) ────────────────────────────
     if (ia) {
       const b = document.createElement('button');
       b.className = EXT + '-pbtn primary';
@@ -829,6 +737,8 @@
       b.onclick = () => applyAndReload(node);
       pfoot.appendChild(b);
     }
+
+    // ── Close (always last) ──────────────────────────────────────
     const cb = document.createElement('button');
     cb.className = EXT + '-pbtn muted';
     cb.textContent = 'Close Preview';
@@ -872,10 +782,8 @@
       let msgs=cs.state.messages;
       for (const step of node.switchPath) msgs=computeSingleSwitch(msgs,step.sourceUUID,step.branchIdx);
       await persistMessages(cs.state.chatID,msgs);
-
       const scrollTarget = getScrollTargetFromNode(node) || node.switchPath[0].sourceUUID;
       sessionStorage.setItem(SCROLL_KEY, scrollTarget);
-
       closeOverlay(); window.location.reload();
     } catch(err) { console.warn('[TM Graph]',err.message); showToast('Error: '+err.message.slice(0,55),'err'); }
   }
@@ -918,15 +826,14 @@
     document.body.appendChild(overlay);
 
     const ac = new AbortController(), sig = ac.signal;
-    // Preserve zoom/pan on resize (no auto re-centre)
+
+    // ── ResizeObserver: draw only — NEVER recentres so zoom is preserved ──
     const ro = new ResizeObserver(() => requestAnimationFrame(() => { graphCtx?.draw(); }));
     ro.observe(wrap);
 
     graphCtx = {
       all, edges, bounds, parentMap, canvas, ac, ro,
-      tr:{tx:0,ty:0,s:1},
-      hoverId:null, selectedId:null,
-      hasUserView:false,
+      tr:{tx:0,ty:0,s:1}, hoverId:null, selectedId:null,
       centre() {
         const W=canvas.clientWidth,H=canvas.clientHeight; if(!W||!H)return;
         const cW=this.bounds.maxX-this.bounds.minX+120, cH=this.bounds.maxY-60+120;
@@ -936,6 +843,8 @@
       },
       draw() { doRender(canvas,this.all,this.edges,this.tr,this.hoverId,this.selectedId); }
     };
+
+    // Initial fit — runs exactly once on open
     requestAnimationFrame(() => { graphCtx.centre(); graphCtx.draw(); });
 
     bar.querySelector('#'+EXT+'-xbtn').addEventListener('click', closeOverlay, {signal:sig});
@@ -952,7 +861,6 @@
 
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
-      graphCtx.hasUserView = true;
       const rect=canvas.getBoundingClientRect(), mx=e.clientX-rect.left, my=e.clientY-rect.top, d=e.deltaY<0?1.09:0.92;
       graphCtx.tr.tx=mx-(mx-graphCtx.tr.tx)*d; graphCtx.tr.ty=my-(my-graphCtx.tr.ty)*d;
       graphCtx.tr.s=Math.min(3.5,Math.max(0.12,graphCtx.tr.s*d)); graphCtx.draw();
@@ -966,20 +874,13 @@
       const hit=hitTest(graphCtx.all,mx,my,graphCtx.tr), nid=hit?.id||null;
       if (nid!==graphCtx.hoverId) { graphCtx.hoverId=nid; graphCtx.draw(); }
       canvas.style.cursor = mdrag?'grabbing':nid?'pointer':'grab';
-      if (mdrag) {
-        graphCtx.hasUserView = true;
-        dragDist+=Math.hypot(e.movementX||0,e.movementY||0);
-        graphCtx.tr.tx=e.clientX-mdrag.sx; graphCtx.tr.ty=e.clientY-mdrag.sy; graphCtx.draw();
-      }
+      if (mdrag) { dragDist+=Math.hypot(e.movementX||0,e.movementY||0); graphCtx.tr.tx=e.clientX-mdrag.sx; graphCtx.tr.ty=e.clientY-mdrag.sy; graphCtx.draw(); }
     }, {signal:sig});
     window.addEventListener('mouseup', () => { mdrag=null; canvas.classList.remove('drag'); }, {signal:sig});
-
     canvas.addEventListener('click', e => {
-      if (dragDist>5) { dragDist=0; return; }
-      dragDist=0;
+      if (dragDist>5) { dragDist=0; return; } dragDist=0;
       const rect=canvas.getBoundingClientRect(), hit=hitTest(graphCtx.all,e.clientX-rect.left,e.clientY-rect.top,graphCtx.tr);
-      if (hit) openPreview(hit,panel);
-      else closePreview(panel);
+      if (hit) openPreview(hit,panel); else closePreview(panel);
     }, {signal:sig});
 
     let lastTouches=null, touchStart=null, panning=false;
@@ -992,20 +893,17 @@
         if ((hit?.id||null)!==graphCtx.hoverId) { graphCtx.hoverId=hit?.id||null; graphCtx.draw(); }
       } else touchStart=null;
     }, {passive:false,signal:sig});
-
     canvas.addEventListener('touchmove', e => {
       e.preventDefault();
       const ts=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
       if (touchStart) { const mv=Math.hypot(ts[0].x-touchStart.x,ts[0].y-touchStart.y); if(mv>8) panning=true; }
       if (ts.length===1&&lastTouches?.length===1) {
-        graphCtx.hasUserView = true;
         graphCtx.tr.tx+=ts[0].x-lastTouches[0].x; graphCtx.tr.ty+=ts[0].y-lastTouches[0].y;
         const rect=canvas.getBoundingClientRect();
         graphCtx.hoverId=hitTest(graphCtx.all,ts[0].x-rect.left,ts[0].y-rect.top,graphCtx.tr)?.id||null; graphCtx.draw();
       } else if (ts.length===2&&lastTouches?.length===2) {
         const pd=Math.hypot(lastTouches[1].x-lastTouches[0].x,lastTouches[1].y-lastTouches[0].y), cd=Math.hypot(ts[1].x-ts[0].x,ts[1].y-ts[0].y);
         if (pd>0) {
-          graphCtx.hasUserView = true;
           const d=cd/pd, rect=canvas.getBoundingClientRect(), mx=(ts[0].x+ts[1].x)/2-rect.left, my=(ts[0].y+ts[1].y)/2-rect.top;
           graphCtx.tr.tx=mx-(mx-graphCtx.tr.tx)*d; graphCtx.tr.ty=my-(my-graphCtx.tr.ty)*d;
           graphCtx.tr.s=Math.min(3.5,Math.max(0.12,graphCtx.tr.s*d)); graphCtx.draw();
@@ -1013,7 +911,6 @@
       }
       lastTouches=ts;
     }, {passive:false,signal:sig});
-
     canvas.addEventListener('touchend', e => {
       e.preventDefault();
       if (touchStart&&!panning&&e.touches.length===0&&e.changedTouches.length===1) {
@@ -1028,11 +925,7 @@
       if (e.touches.length===0) { lastTouches=null; graphCtx.hoverId=null; graphCtx.draw(); }
       else lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
     }, {passive:false,signal:sig});
-
-    canvas.addEventListener('touchcancel', () => {
-      lastTouches=null; touchStart=null; panning=false;
-      if(graphCtx){graphCtx.hoverId=null;graphCtx.draw();}
-    }, {passive:false,signal:sig});
+    canvas.addEventListener('touchcancel', () => { lastTouches=null; touchStart=null; panning=false; if(graphCtx){graphCtx.hoverId=null;graphCtx.draw();} }, {passive:false,signal:sig});
   }
 
   /* ── BUTTON / BOOTSTRAP ──────────────────────────────────────── */
@@ -1043,7 +936,6 @@
     btn.innerHTML=`<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="4" r="2.2"/><circle cx="16" cy="4" r="2.2"/><circle cx="4" cy="16" r="2.2"/><circle cx="16" cy="16" r="2.2"/><circle cx="10" cy="10" r="2.2"/><line x1="4" y1="4" x2="10" y2="10"/><line x1="16" y1="4" x2="10" y2="10"/><line x1="10" y1="10" x2="4" y2="16"/><line x1="10" y1="10" x2="16" y2="16"/></svg>`;
     btn.addEventListener('click', openGraph); bar.appendChild(btn);
   }
-
   function init() {
     checkScrollAfterReload(); injectStyles(); tryInject();
     let r=10; const retry=()=>{ if(document.querySelector('#'+EXT+'-btn'))return; tryInject(); if(--r>0)setTimeout(retry,650); };
@@ -1051,6 +943,5 @@
     new MutationObserver(tryInject).observe(document.body,{childList:true,subtree:true});
     console.log('[TM Chat Graph] ✅ v2.5.0');
   }
-
   init();
 })();
