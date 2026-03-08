@@ -1,27 +1,76 @@
 // ================================================================
-//  TypingMind — Chat Branch Graph  v2.5.0
+//  TypingMind — Chat Branch Graph  v2.6.0
 //
-//  Changes from v2.4.0:
-//    1) Zoom preserved on node selection — ResizeObserver no longer
-//       calls centre(); initial auto-fit runs once on open only.
-//    2) ↑/↓ Parent/Child navigation buttons added to the preview
-//       panel footer — navigate the active chain without leaving
-//       the graph or resetting zoom.
-//    3) Arrow navigation pans the canvas to center the target node
-//       at the exact current zoom level (zoom never changes).
-//    4) All preview panel buttons are in a fixed-height footer so
-//       panel content can never shift button positions.
-//    5) Bug fix: reload scroll target now resolves to the selected
-//       node, not the branch parent (getScrollTargetFromNode).
+//  Changes from v2.5.0:
+//    View-state persistence across overlay open/close cycles:
+//    — Zoom level, pan position, selected node, and open preview
+//      are saved to a module-level variable when the overlay is
+//      closed and fully restored when it is reopened.
+//    — Because the state lives in a JS variable (not storage APIs)
+//      it resets automatically on any page reload, exactly as
+//      requested.
+//    — If the active chat has changed since the last close
+//      (chatID mismatch), the saved state is discarded and the
+//      graph opens at the default auto-fit view instead.
 //
-//  Tool-call Meta Nodes, branch logic, and all other behaviour
-//  are unchanged from v2.4.0.
+//  All features and fixes from v2.5.0 are unchanged.
 // ================================================================
 (() => {
   'use strict';
   const EXT        = 'tmChatGraph';
   const SCROLL_KEY = 'tmg_scroll_uuid';
 
+  /* ── PERSISTENT VIEW STATE (module-level, resets on reload) ─── */
+  let savedViewState = null;
+  // Shape: { tr:{tx,ty,s}, selectedId:string|null, chatID:string|null }
+
+  function saveViewState() {
+    if (!graphCtx) return;
+    const cs = getChatState();
+    savedViewState = {
+      tr: { tx: graphCtx.tr.tx, ty: graphCtx.tr.ty, s: graphCtx.tr.s },
+      selectedId: graphCtx.selectedId ?? null,
+      chatID: cs?.state?.chatID ?? null
+    };
+  }
+
+  function restoreViewState(panel) {
+    const sv = savedViewState;
+    if (!sv) return false;
+
+    // Validate transform values
+    const { tx, ty, s } = sv.tr ?? {};
+    if (
+      typeof s  !== 'number' || !isFinite(s)  || s  < 0.12 || s  > 3.5  ||
+      typeof tx !== 'number' || !isFinite(tx) ||
+      typeof ty !== 'number' || !isFinite(ty)
+    ) return false;
+
+    // Guard: discard if a different chat is now active
+    const cs = getChatState();
+    const currentChatID = cs?.state?.chatID ?? null;
+    if (sv.chatID && currentChatID && sv.chatID !== currentChatID) return false;
+
+    // Restore zoom + pan (no recentre)
+    graphCtx.tr.tx = tx;
+    graphCtx.tr.ty = ty;
+    graphCtx.tr.s  = s;
+    graphCtx.draw();
+
+    // Restore selected node + preview panel if applicable
+    if (sv.selectedId) {
+      const restoredNode = graphCtx.all.find(n => n.id === sv.selectedId);
+      if (restoredNode) {
+        graphCtx.selectedId = restoredNode.id;
+        // Use rAF so panel DOM has settled before openPreview runs
+        requestAnimationFrame(() => openPreview(restoredNode, panel));
+      }
+    }
+
+    return true;
+  }
+
+  /* ── SCROLL-AFTER-RELOAD ─────────────────────────────────────── */
   function checkScrollAfterReload() {
     const uuid = sessionStorage.getItem(SCROLL_KEY);
     if (!uuid) return;
@@ -336,7 +385,7 @@
       .${EXT}-pbtn.nav:disabled { opacity:.27;cursor:not-allowed;pointer-events:none; }
       .${EXT}-pbtn.nav:not(:disabled):hover { background:rgba(255,255,255,.13);opacity:1; }
       .${EXT}-nav-divider { height:1px;background:rgba(255,255,255,.08);margin:1px 0; }
-      /* Graph toast */
+      /* Graph-level toast */
       #${EXT}-toast { position:absolute;bottom:20px;left:50%;transform:translateX(-50%) translateY(60px);padding:7px 18px;border-radius:20px;font-size:12px;font-weight:700;transition:transform .22s;pointer-events:none;white-space:nowrap;z-index:10; }
       #${EXT}-toast.ok   { background:#00a884;color:#0b141a;transform:translateX(-50%) translateY(0); }
       #${EXT}-toast.warn { background:#f59e0b;color:#0b141a;transform:translateX(-50%) translateY(0); }
@@ -606,7 +655,10 @@
       ctx.fillText(lbl,n.x+8,n.y+38);
 
       if (n.variants?.length) { ctx.fillStyle=C.dot; ctx.beginPath(); ctx.arc(n.x+n.w-8,n.y+8,4,0,Math.PI*2); ctx.fill(); }
-      if (!ia&&n.switchPath?.length>1) { ctx.fillStyle='rgba(245,158,11,.7)'; ctx.font='bold 8px system-ui'; ctx.textAlign='right'; ctx.fillText(`${n.switchPath.length}↓`,n.x+n.w-5,n.y+n.h-6); }
+      if (!ia&&n.switchPath?.length>1) {
+        ctx.fillStyle='rgba(245,158,11,.7)'; ctx.font='bold 8px system-ui'; ctx.textAlign='right';
+        ctx.fillText(`${n.switchPath.length}↓`,n.x+n.w-5,n.y+n.h-6);
+      }
     });
     ctx.restore();
   }
@@ -616,7 +668,17 @@
 
   /* ── MODULE STATE / CLOSE / TOAST ────────────────────────────── */
   let graphCtx=null, overlay=null, toastEl=null, toastTmr=null;
-  function closeOverlay() { if(!overlay)return; graphCtx?.ro?.disconnect(); graphCtx?.ac?.abort(); overlay.remove(); overlay=null; toastEl=null; graphCtx=null; clearTimeout(toastTmr); }
+
+  function closeOverlay() {
+    if (!overlay) return;
+    saveViewState();                      // ← persist before teardown
+    graphCtx?.ro?.disconnect();
+    graphCtx?.ac?.abort();
+    overlay.remove();
+    overlay=null; toastEl=null; graphCtx=null;
+    clearTimeout(toastTmr);
+  }
+
   function showToast(msg,type='ok') { if(!toastEl)return; clearTimeout(toastTmr); toastEl.textContent=msg; toastEl.className=type; toastTmr=setTimeout(()=>{if(toastEl)toastEl.className='';},3500); }
 
   /* ── GRAPH NAV HELPERS ───────────────────────────────────────── */
@@ -632,11 +694,10 @@
     return (c && c.active) ? c : null;
   }
 
-  // Pan-only: moves the graph view so node is centred at current zoom
+  // Pan only — zoom (tr.s) is never touched
   function panToNode(node) {
-    if (!graphCtx || !node || !graphCtx.canvas) return;
-    const W = graphCtx.canvas.clientWidth;
-    const H = graphCtx.canvas.clientHeight;
+    if (!graphCtx?.canvas || !node) return;
+    const W = graphCtx.canvas.clientWidth, H = graphCtx.canvas.clientHeight;
     if (!W || !H) return;
     const s = graphCtx.tr.s;
     graphCtx.tr.tx = (W / 2) - ((node.x + node.w / 2) * s);
@@ -646,7 +707,7 @@
   function navigatePreview(targetNode, panelEl) {
     if (!targetNode || !graphCtx) return;
     graphCtx.selectedId = targetNode.id;
-    panToNode(targetNode);  // zoom unchanged, only pan
+    panToNode(targetNode);
     graphCtx.draw();
     openPreview(targetNode, panelEl);
   }
@@ -660,7 +721,7 @@
     const upNode   = getActiveParentNode(node);
     const downNode = getActiveChildNode(node);
 
-    /* ── Head: role label + ✕ only ──────────────────────────────── */
+    /* ── Head: role indicator + ✕ only ──────────────────────────── */
     const roleLabels = { user:'USER', ai:'AI Response', tool: isMeta ? `Tool Calls (×${node.toolMessages?.length||1})` : 'Tool Call' };
     const dotColors  = { user:ia?'#00a884':'#3a7a56', ai:ia?'#1ea4d4':'#2a5a70', tool:ia?'#5a6a76':'#2a3a46' };
     const phead = panelEl.querySelector('.phead');
@@ -672,7 +733,7 @@
       <button class="pclose-btn" title="Close preview (Esc)" style="background:none;border:none;cursor:pointer;color:#8696a0;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;flex-shrink:0">✕</button>`;
     phead.querySelector('.pclose-btn').onclick = () => closePreview(panelEl);
 
-    /* ── Body: status badge + content ───────────────────────────── */
+    /* ── Body: badge + content ───────────────────────────────────── */
     let badgeClass = ia ? 'active' : 'inactive', badgeText;
     if (isMeta) {
       badgeClass = 'meta';
@@ -693,11 +754,11 @@
       </div>
       ${contentHtml}`;
 
-    /* ── Footer: nav row → action → close (all fixed at bottom) ── */
+    /* ── Footer: nav row → [divider] → action → close ───────────── */
     const pfoot = panelEl.querySelector('.pfoot');
     pfoot.innerHTML = '';
 
-    // ── Nav row (always present) ─────────────────────────────────
+    // Nav row (always present)
     const navRow = document.createElement('div');
     navRow.className = EXT + '-nav-row';
 
@@ -709,20 +770,20 @@
     const upBtn   = mkNavBtn('↑ &nbsp;Parent', 'Navigate to parent node (active chain only)');
     const downBtn = mkNavBtn('↓ &nbsp;Child',  'Navigate to child node (active chain only)');
 
-    if (!upNode)   { upBtn.disabled   = true; }
-    if (!downNode) { downBtn.disabled = true; }
+    if (!upNode)   upBtn.disabled   = true;
+    if (!downNode) downBtn.disabled = true;
     upBtn.onclick   = () => { if (upNode)   navigatePreview(upNode,   panelEl); };
     downBtn.onclick = () => { if (downNode) navigatePreview(downNode, panelEl); };
 
     navRow.appendChild(upBtn); navRow.appendChild(downBtn);
     pfoot.appendChild(navRow);
 
-    // ── Thin divider between nav and action area ─────────────────
-    const navDiv = document.createElement('div');
-    navDiv.className = EXT + '-nav-divider';
-    pfoot.appendChild(navDiv);
+    // Visual separator between nav and action buttons
+    const sep = document.createElement('div');
+    sep.className = EXT + '-nav-divider';
+    pfoot.appendChild(sep);
 
-    // ── Primary action (conditional) ────────────────────────────
+    // Primary action (conditional)
     if (ia) {
       const b = document.createElement('button');
       b.className = EXT + '-pbtn primary';
@@ -738,7 +799,7 @@
       pfoot.appendChild(b);
     }
 
-    // ── Close (always last) ──────────────────────────────────────
+    // Close (always last)
     const cb = document.createElement('button');
     cb.className = EXT + '-pbtn muted';
     cb.textContent = 'Close Preview';
@@ -826,8 +887,7 @@
     document.body.appendChild(overlay);
 
     const ac = new AbortController(), sig = ac.signal;
-
-    // ── ResizeObserver: draw only — NEVER recentres so zoom is preserved ──
+    // ResizeObserver: draw only — never auto-recentres so zoom is always preserved
     const ro = new ResizeObserver(() => requestAnimationFrame(() => { graphCtx?.draw(); }));
     ro.observe(wrap);
 
@@ -835,7 +895,7 @@
       all, edges, bounds, parentMap, canvas, ac, ro,
       tr:{tx:0,ty:0,s:1}, hoverId:null, selectedId:null,
       centre() {
-        const W=canvas.clientWidth,H=canvas.clientHeight; if(!W||!H)return;
+        const W=canvas.clientWidth, H=canvas.clientHeight; if(!W||!H)return;
         const cW=this.bounds.maxX-this.bounds.minX+120, cH=this.bounds.maxY-60+120;
         this.tr.s=Math.max(0.2,Math.min(1.3,Math.min(W/cW,H/cH)));
         this.tr.tx=(W-cW*this.tr.s)/2-this.bounds.minX*this.tr.s+60*this.tr.s;
@@ -844,8 +904,11 @@
       draw() { doRender(canvas,this.all,this.edges,this.tr,this.hoverId,this.selectedId); }
     };
 
-    // Initial fit — runs exactly once on open
-    requestAnimationFrame(() => { graphCtx.centre(); graphCtx.draw(); });
+    // Restore saved view OR fall back to auto-fit — runs once on open
+    requestAnimationFrame(() => {
+      const didRestore = restoreViewState(panel);
+      if (!didRestore) { graphCtx.centre(); graphCtx.draw(); }
+    });
 
     bar.querySelector('#'+EXT+'-xbtn').addEventListener('click', closeOverlay, {signal:sig});
     window.addEventListener('keydown', e => {
@@ -877,6 +940,7 @@
       if (mdrag) { dragDist+=Math.hypot(e.movementX||0,e.movementY||0); graphCtx.tr.tx=e.clientX-mdrag.sx; graphCtx.tr.ty=e.clientY-mdrag.sy; graphCtx.draw(); }
     }, {signal:sig});
     window.addEventListener('mouseup', () => { mdrag=null; canvas.classList.remove('drag'); }, {signal:sig});
+
     canvas.addEventListener('click', e => {
       if (dragDist>5) { dragDist=0; return; } dragDist=0;
       const rect=canvas.getBoundingClientRect(), hit=hitTest(graphCtx.all,e.clientX-rect.left,e.clientY-rect.top,graphCtx.tr);
@@ -893,6 +957,7 @@
         if ((hit?.id||null)!==graphCtx.hoverId) { graphCtx.hoverId=hit?.id||null; graphCtx.draw(); }
       } else touchStart=null;
     }, {passive:false,signal:sig});
+
     canvas.addEventListener('touchmove', e => {
       e.preventDefault();
       const ts=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
@@ -911,6 +976,7 @@
       }
       lastTouches=ts;
     }, {passive:false,signal:sig});
+
     canvas.addEventListener('touchend', e => {
       e.preventDefault();
       if (touchStart&&!panning&&e.touches.length===0&&e.changedTouches.length===1) {
@@ -925,7 +991,11 @@
       if (e.touches.length===0) { lastTouches=null; graphCtx.hoverId=null; graphCtx.draw(); }
       else lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
     }, {passive:false,signal:sig});
-    canvas.addEventListener('touchcancel', () => { lastTouches=null; touchStart=null; panning=false; if(graphCtx){graphCtx.hoverId=null;graphCtx.draw();} }, {passive:false,signal:sig});
+
+    canvas.addEventListener('touchcancel', () => {
+      lastTouches=null; touchStart=null; panning=false;
+      if (graphCtx) { graphCtx.hoverId=null; graphCtx.draw(); }
+    }, {passive:false,signal:sig});
   }
 
   /* ── BUTTON / BOOTSTRAP ──────────────────────────────────────── */
@@ -936,12 +1006,14 @@
     btn.innerHTML=`<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="4" r="2.2"/><circle cx="16" cy="4" r="2.2"/><circle cx="4" cy="16" r="2.2"/><circle cx="16" cy="16" r="2.2"/><circle cx="10" cy="10" r="2.2"/><line x1="4" y1="4" x2="10" y2="10"/><line x1="16" y1="4" x2="10" y2="10"/><line x1="10" y1="10" x2="4" y2="16"/><line x1="10" y1="10" x2="16" y2="16"/></svg>`;
     btn.addEventListener('click', openGraph); bar.appendChild(btn);
   }
+
   function init() {
     checkScrollAfterReload(); injectStyles(); tryInject();
     let r=10; const retry=()=>{ if(document.querySelector('#'+EXT+'-btn'))return; tryInject(); if(--r>0)setTimeout(retry,650); };
     setTimeout(retry,400);
     new MutationObserver(tryInject).observe(document.body,{childList:true,subtree:true});
-    console.log('[TM Chat Graph] ✅ v2.5.0');
+    console.log('[TM Chat Graph] ✅ v2.6.0');
   }
+
   init();
 })();
