@@ -1,5 +1,5 @@
 // ================================================================
-//  TypingMind — Chat Branch Graph  v2.4.0
+//  TypingMind — Chat Branch Graph  v2.5.0
 //
 //  New feature: Tool-call Meta Nodes
 //
@@ -446,15 +446,7 @@
     return 'tool';
   }
 
-  /* ── META NODE HELPERS ───────────────────────────────────────────
-   *
-   *  getMetaLabel: extract function names from tool_calls, fall back
-   *  to "N tool calls" if none found.
-   *
-   *  buildMetaPreviewHtml: structured HTML showing each tool
-   *  invocation (function name + truncated args) and each tool
-   *  result (truncated output). Used in the preview panel.
-   * ─────────────────────────────────────────────────────────────── */
+  /* ── META NODE HELPERS ─────────────────────────────────────────── */
   function getMetaLabel(toolMsgs) {
     const names = [];
     for (const m of toolMsgs) {
@@ -520,19 +512,13 @@
       .replace(/\n\n/g,'</p><p>').replace(/\n/g,'<br>');
   }
 
-  /* ── TREE BUILDER ────────────────────────────────────────────────
-   *
-   *  Collapse logic: when the current message position is a 'tool'
-   *  message, scan forward to collect the entire consecutive run,
-   *  then emit one META node covering all of them. Continue building
-   *  the chain from the first non-tool message after the run.
-   * ─────────────────────────────────────────────────────────────── */
+  /* ── TREE BUILDER ──────────────────────────────────────────────── */
   function buildChain(msgs, start, isActive, sp) {
     if (!msgs || start >= msgs.length) return [];
     const m = msgs[start];
     const cls = classifyMsg(m);
 
-    // ── Collapse consecutive tool run into one META node ──────────
+    // Collapse consecutive tool run into one META node
     if (cls === 'tool') {
       let end = start;
       const toolMsgs = [];
@@ -546,19 +532,18 @@
         isMeta:       true,
         toolMessages: toolMsgs,
         label:        getMetaLabel(toolMsgs),
-        scrollUUID:   toolMsgs[0].uuid,           // real UUID for navigation
+        scrollUUID:   toolMsgs[0].uuid,
         active:       isActive,
         switchPath:   isActive ? [] : sp,
         sourceUUID:   sp.length > 0 ? sp[sp.length-1].sourceUUID : toolMsgs[0].uuid,
         branchIdx:    sp.length > 0 ? sp[sp.length-1].branchIdx  : null,
         x:0, y:0, w:0, h:0, children:[], variants:[]
       };
-      // Continue chain from first non-tool message after the run
       metaNode.children = buildChain(msgs, end, isActive, sp);
       return [metaNode];
     }
 
-    // ── Normal (non-tool) node ────────────────────────────────────
+    // Normal node
     const node = {
       id:         m.uuid,
       role:       cls,
@@ -592,6 +577,17 @@
 
     node.children = buildChain(msgs, start+1, isActive, sp);
     return [node];
+  }
+
+  function buildParentMap(root) {
+    const parentMap = new Map();
+    (function walk(n, p) {
+      if (!n) return;
+      parentMap.set(n.id, p || null);
+      if (n.children?.[0]) walk(n.children[0], n);
+      if (n.variants?.length) n.variants.forEach(v => walk(v, n));
+    })(root, null);
+    return parentMap;
   }
 
   /* ── LAYOUT ──────────────────────────────────────────────────── */
@@ -671,16 +667,14 @@
       rr(ctx,n.x,n.y,n.w,n.h,10); ctx.fillStyle=bg; ctx.fill();
       ctx.shadowColor='transparent'; ctx.shadowBlur=0; ctx.shadowOffsetY=0;
 
-      // META nodes: dashed border signals "collapsed group"
       if (isMeta) ctx.setLineDash([5, 3]);
       rr(ctx,n.x,n.y,n.w,n.h,10);
       ctx.strokeStyle=bdr; ctx.lineWidth=(isSel||isHov)?2.5:(ia?1.5:1);
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Badge
       const badgeText = isMeta
-        ? `×${n.toolMessages.length}`     // ×N  (e.g. ×3)
+        ? `×${n.toolMessages.length}`
         : (n.role==='user'?'USER':n.role==='ai'?'AI':'TOOL');
       const badgeW = isMeta ? 28 : (n.role==='user'?34:n.role==='ai'?20:32);
       ctx.fillStyle = getBbg(n.role, ia);
@@ -690,19 +684,16 @@
       ctx.textAlign = 'left';
       ctx.fillText(badgeText, n.x+11, n.y+16.5);
 
-      // Label
       ctx.fillStyle = ia ? C.txA : C.txI;
       ctx.font = `${ia?500:400} 10px system-ui`;
-      let lbl = (isMeta ? '⚙ ' : '') + (n.label || '(empty)');   // ⚙ prefix for meta
+      let lbl = (isMeta ? '⚙ ' : '') + (n.label || '(empty)');
       const maxW = n.w - 16;
       while (ctx.measureText(lbl).width > maxW && lbl.length > 6) lbl = lbl.slice(0,-4) + '…';
       ctx.fillText(lbl, n.x+8, n.y+38);
 
-      // Branch point dot (orange)
       if (n.variants?.length) {
         ctx.fillStyle=C.dot; ctx.beginPath(); ctx.arc(n.x+n.w-8,n.y+8,4,0,Math.PI*2); ctx.fill();
       }
-      // Multi-step depth indicator
       if (!ia && n.switchPath?.length > 1) {
         ctx.fillStyle='rgba(245,158,11,.7)'; ctx.font='bold 8px system-ui'; ctx.textAlign='right';
         ctx.fillText(`${n.switchPath.length}↓`, n.x+n.w-5, n.y+n.h-6);
@@ -719,22 +710,51 @@
   function closeOverlay() { if(!overlay)return; graphCtx?.ro?.disconnect(); graphCtx?.ac?.abort(); overlay.remove(); overlay=null; toastEl=null; graphCtx=null; clearTimeout(toastTmr); }
   function showToast(msg,type='ok') { if(!toastEl)return; clearTimeout(toastTmr); toastEl.textContent=msg; toastEl.className=type; toastTmr=setTimeout(()=>{if(toastEl)toastEl.className='';},3500); }
 
-  /* ── PREVIEW PANEL ─────────────────────────────────────────────
-   *
-   *  For META nodes: aggregate preview (invocations + results).
-   *  Active  → "Go to First Tool Call" scrolls to scrollUUID.
-   *  Inactive→ "Apply Changes" (same as all other inactive nodes).
-   *
-   *  For regular nodes: same layout as v2.3.0.
-   * ─────────────────────────────────────────────────────────────── */
+  /* ── PREVIEW NAV HELPERS ─────────────────────────────────────── */
+  function getActiveParentNode(node) {
+    if (!node || !graphCtx?.parentMap) return null;
+    const p = graphCtx.parentMap.get(node.id) || null;
+    return (p && p.active) ? p : null;
+  }
+
+  function getActiveChildNode(node) {
+    if (!node) return null;
+    const c = node.children?.[0] || null;
+    return (c && c.active) ? c : null;
+  }
+
+  function centerNodeAtCurrentZoom(node) {
+    if (!graphCtx || !node || !graphCtx.canvas) return;
+    const W = graphCtx.canvas.clientWidth;
+    const H = graphCtx.canvas.clientHeight;
+    if (!W || !H) return;
+    const s = graphCtx.tr.s;
+    graphCtx.tr.tx = (W / 2) - ((node.x + node.w / 2) * s);
+    graphCtx.tr.ty = (H / 2) - ((node.y + node.h / 2) * s);
+  }
+
+  function navigatePreview(node, dir, panelEl) {
+    const target = dir === 'up' ? getActiveParentNode(node) : getActiveChildNode(node);
+    if (!target) return;
+    if (graphCtx) {
+      graphCtx.selectedId = target.id;
+      graphCtx.hasUserView = true;
+      centerNodeAtCurrentZoom(target); // pan only, preserves zoom
+      graphCtx.draw();
+    }
+    openPreview(target, panelEl);
+  }
+
+  /* ── PREVIEW PANEL ───────────────────────────────────────────── */
   function openPreview(node, panelEl) {
     if (!node || !panelEl) return;
-    if (graphCtx) { graphCtx.selectedId = node.id; graphCtx.draw(); }
+    if (graphCtx) { graphCtx.selectedId = node.id; graphCtx.hasUserView = true; graphCtx.draw(); }
 
     const ia = node.active, steps = node.switchPath?.length || 0;
     const isMeta = !!node.isMeta;
+    const upNode = getActiveParentNode(node);
+    const downNode = getActiveChildNode(node);
 
-    // --- Head row ---
     const roleLabels = { user:'USER', ai:'AI Response', tool: isMeta ? `Tool Calls (×${node.toolMessages?.length||1})` : 'Tool Call' };
     const dotColors  = { user:ia?'#00a884':'#3a7a56', ai:ia?'#1ea4d4':'#2a5a70', tool:ia?'#5a6a76':'#2a3a46' };
 
@@ -744,10 +764,30 @@
         <span style="width:8px;height:8px;border-radius:${isMeta?'2px':'50%'};background:${dotColors[node.role]||'#444'};flex-shrink:0"></span>
         <span style="font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${roleLabels[node.role]||'?'}</span>
       </div>
-      <button class="pclose-btn" title="Close preview (Esc)" style="background:none;border:none;cursor:pointer;color:#8696a0;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;flex-shrink:0">✕</button>`;
-    phead.querySelector('.pclose-btn').onclick = () => closePreview(panelEl);
+      <div style="display:flex;align-items:center;gap:6px;flex-shrink:0">
+        <button class="pnav-btn pnav-up" title="Parent node (active chain only)" style="background:transparent;border:1px solid rgba(255,255,255,.25);color:#e9edef;cursor:pointer;font-size:12px;line-height:1;padding:4px 7px;border-radius:6px;min-width:28px">↑</button>
+        <button class="pnav-btn pnav-down" title="Child node (active chain only)" style="background:transparent;border:1px solid rgba(255,255,255,.25);color:#e9edef;cursor:pointer;font-size:12px;line-height:1;padding:4px 7px;border-radius:6px;min-width:28px">↓</button>
+        <button class="pclose-btn" title="Close preview (Esc)" style="background:none;border:none;cursor:pointer;color:#8696a0;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;flex-shrink:0">✕</button>
+      </div>`;
 
-    // --- Status badge ---
+    const upBtn = phead.querySelector('.pnav-up');
+    const downBtn = phead.querySelector('.pnav-down');
+    const closeBtn = phead.querySelector('.pclose-btn');
+
+    const setNavState = (btn, enabled) => {
+      btn.disabled = !enabled;
+      btn.style.opacity = enabled ? '1' : '.35';
+      btn.style.cursor = enabled ? 'pointer' : 'not-allowed';
+      btn.style.borderColor = enabled ? 'rgba(255,255,255,.25)' : 'rgba(255,255,255,.12)';
+    };
+
+    setNavState(upBtn, !!upNode);
+    setNavState(downBtn, !!downNode);
+
+    if (upNode) upBtn.onclick = () => navigatePreview(node, 'up', panelEl);
+    if (downNode) downBtn.onclick = () => navigatePreview(node, 'down', panelEl);
+    closeBtn.onclick = () => closePreview(panelEl);
+
     let badgeClass = ia ? 'active' : 'inactive';
     let badgeText;
     if (isMeta) {
@@ -757,7 +797,6 @@
       badgeText = ia ? '✓ Currently active in chat' : (steps===1?'⭐ 1 switch to activate':`⚡ ${steps} switches to activate`);
     }
 
-    // --- Body content ---
     const pbody = panelEl.querySelector('.pbody');
     const dividerLabel = isMeta ? 'Tool Call Details' : 'Message Content';
     const contentHtml  = isMeta
@@ -773,7 +812,6 @@
       </div>
       ${contentHtml}`;
 
-    // --- Footer buttons ---
     const pfoot = panelEl.querySelector('.pfoot');
     pfoot.innerHTML = '';
 
@@ -796,10 +834,14 @@
     cb.textContent = 'Close Preview';
     cb.onclick = () => closePreview(panelEl);
     pfoot.appendChild(cb);
+
     panelEl.classList.add('open');
   }
 
-  function closePreview(panelEl) { if (graphCtx) { graphCtx.selectedId = null; graphCtx.draw(); } panelEl?.classList.remove('open'); }
+  function closePreview(panelEl) {
+    if (graphCtx) { graphCtx.selectedId = null; graphCtx.draw(); }
+    panelEl?.classList.remove('open');
+  }
 
   /* ── PURE SWITCH / APPLY ─────────────────────────────────────── */
   function computeSingleSwitch(msgs,srcU,bi) {
@@ -844,6 +886,7 @@
     const cs = getChatState(); if(!cs){alert('[TM Graph] No active conversation.');return;}
     const root = buildChain(cs.state.messages,0,true,[])[0]; if(!root){alert('[TM Graph] No messages found.');return;}
     const {all,edges,bounds} = doLayout(root);
+    const parentMap = buildParentMap(root);
 
     overlay = document.createElement('div'); overlay.id = EXT+'-ov';
     const bar = document.createElement('div'); bar.id = EXT+'-bar';
@@ -875,11 +918,15 @@
     document.body.appendChild(overlay);
 
     const ac = new AbortController(), sig = ac.signal;
-    const ro = new ResizeObserver(() => requestAnimationFrame(() => { graphCtx?.centre(); graphCtx?.draw(); }));
+    // Preserve zoom/pan on resize (no auto re-centre)
+    const ro = new ResizeObserver(() => requestAnimationFrame(() => { graphCtx?.draw(); }));
     ro.observe(wrap);
 
     graphCtx = {
-      all, edges, bounds, ac, ro, tr:{tx:0,ty:0,s:1}, hoverId:null, selectedId:null,
+      all, edges, bounds, parentMap, canvas, ac, ro,
+      tr:{tx:0,ty:0,s:1},
+      hoverId:null, selectedId:null,
+      hasUserView:false,
       centre() {
         const W=canvas.clientWidth,H=canvas.clientHeight; if(!W||!H)return;
         const cW=this.bounds.maxX-this.bounds.minX+120, cH=this.bounds.maxY-60+120;
@@ -905,6 +952,7 @@
 
     canvas.addEventListener('wheel', e => {
       e.preventDefault();
+      graphCtx.hasUserView = true;
       const rect=canvas.getBoundingClientRect(), mx=e.clientX-rect.left, my=e.clientY-rect.top, d=e.deltaY<0?1.09:0.92;
       graphCtx.tr.tx=mx-(mx-graphCtx.tr.tx)*d; graphCtx.tr.ty=my-(my-graphCtx.tr.ty)*d;
       graphCtx.tr.s=Math.min(3.5,Math.max(0.12,graphCtx.tr.s*d)); graphCtx.draw();
@@ -918,13 +966,20 @@
       const hit=hitTest(graphCtx.all,mx,my,graphCtx.tr), nid=hit?.id||null;
       if (nid!==graphCtx.hoverId) { graphCtx.hoverId=nid; graphCtx.draw(); }
       canvas.style.cursor = mdrag?'grabbing':nid?'pointer':'grab';
-      if (mdrag) { dragDist+=Math.hypot(e.movementX||0,e.movementY||0); graphCtx.tr.tx=e.clientX-mdrag.sx; graphCtx.tr.ty=e.clientY-mdrag.sy; graphCtx.draw(); }
+      if (mdrag) {
+        graphCtx.hasUserView = true;
+        dragDist+=Math.hypot(e.movementX||0,e.movementY||0);
+        graphCtx.tr.tx=e.clientX-mdrag.sx; graphCtx.tr.ty=e.clientY-mdrag.sy; graphCtx.draw();
+      }
     }, {signal:sig});
     window.addEventListener('mouseup', () => { mdrag=null; canvas.classList.remove('drag'); }, {signal:sig});
+
     canvas.addEventListener('click', e => {
-      if (dragDist>5) { dragDist=0; return; } dragDist=0;
+      if (dragDist>5) { dragDist=0; return; }
+      dragDist=0;
       const rect=canvas.getBoundingClientRect(), hit=hitTest(graphCtx.all,e.clientX-rect.left,e.clientY-rect.top,graphCtx.tr);
-      if (hit) openPreview(hit,panel); else closePreview(panel);
+      if (hit) openPreview(hit,panel);
+      else closePreview(panel);
     }, {signal:sig});
 
     let lastTouches=null, touchStart=null, panning=false;
@@ -937,17 +992,20 @@
         if ((hit?.id||null)!==graphCtx.hoverId) { graphCtx.hoverId=hit?.id||null; graphCtx.draw(); }
       } else touchStart=null;
     }, {passive:false,signal:sig});
+
     canvas.addEventListener('touchmove', e => {
       e.preventDefault();
       const ts=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
       if (touchStart) { const mv=Math.hypot(ts[0].x-touchStart.x,ts[0].y-touchStart.y); if(mv>8) panning=true; }
       if (ts.length===1&&lastTouches?.length===1) {
+        graphCtx.hasUserView = true;
         graphCtx.tr.tx+=ts[0].x-lastTouches[0].x; graphCtx.tr.ty+=ts[0].y-lastTouches[0].y;
         const rect=canvas.getBoundingClientRect();
         graphCtx.hoverId=hitTest(graphCtx.all,ts[0].x-rect.left,ts[0].y-rect.top,graphCtx.tr)?.id||null; graphCtx.draw();
       } else if (ts.length===2&&lastTouches?.length===2) {
         const pd=Math.hypot(lastTouches[1].x-lastTouches[0].x,lastTouches[1].y-lastTouches[0].y), cd=Math.hypot(ts[1].x-ts[0].x,ts[1].y-ts[0].y);
         if (pd>0) {
+          graphCtx.hasUserView = true;
           const d=cd/pd, rect=canvas.getBoundingClientRect(), mx=(ts[0].x+ts[1].x)/2-rect.left, my=(ts[0].y+ts[1].y)/2-rect.top;
           graphCtx.tr.tx=mx-(mx-graphCtx.tr.tx)*d; graphCtx.tr.ty=my-(my-graphCtx.tr.ty)*d;
           graphCtx.tr.s=Math.min(3.5,Math.max(0.12,graphCtx.tr.s*d)); graphCtx.draw();
@@ -955,6 +1013,7 @@
       }
       lastTouches=ts;
     }, {passive:false,signal:sig});
+
     canvas.addEventListener('touchend', e => {
       e.preventDefault();
       if (touchStart&&!panning&&e.touches.length===0&&e.changedTouches.length===1) {
@@ -969,7 +1028,11 @@
       if (e.touches.length===0) { lastTouches=null; graphCtx.hoverId=null; graphCtx.draw(); }
       else lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
     }, {passive:false,signal:sig});
-    canvas.addEventListener('touchcancel', () => { lastTouches=null; touchStart=null; panning=false; if(graphCtx){graphCtx.hoverId=null;graphCtx.draw();} }, {passive:false,signal:sig});
+
+    canvas.addEventListener('touchcancel', () => {
+      lastTouches=null; touchStart=null; panning=false;
+      if(graphCtx){graphCtx.hoverId=null;graphCtx.draw();}
+    }, {passive:false,signal:sig});
   }
 
   /* ── BUTTON / BOOTSTRAP ──────────────────────────────────────── */
@@ -980,12 +1043,14 @@
     btn.innerHTML=`<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="4" r="2.2"/><circle cx="16" cy="4" r="2.2"/><circle cx="4" cy="16" r="2.2"/><circle cx="16" cy="16" r="2.2"/><circle cx="10" cy="10" r="2.2"/><line x1="4" y1="4" x2="10" y2="10"/><line x1="16" y1="4" x2="10" y2="10"/><line x1="10" y1="10" x2="4" y2="16"/><line x1="10" y1="10" x2="16" y2="16"/></svg>`;
     btn.addEventListener('click', openGraph); bar.appendChild(btn);
   }
+
   function init() {
     checkScrollAfterReload(); injectStyles(); tryInject();
     let r=10; const retry=()=>{ if(document.querySelector('#'+EXT+'-btn'))return; tryInject(); if(--r>0)setTimeout(retry,650); };
     setTimeout(retry,400);
     new MutationObserver(tryInject).observe(document.body,{childList:true,subtree:true});
-    console.log('[TM Chat Graph] ✅ v2.4.0');
+    console.log('[TM Chat Graph] ✅ v2.5.0');
   }
+
   init();
 })();
