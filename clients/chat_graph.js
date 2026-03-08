@@ -1,28 +1,31 @@
 // ================================================================
-//  TypingMind — Chat Branch Graph  v2.8.0
+//  TypingMind — Chat Branch Graph  v2.9.0
 //
-//  Changes from v2.7.0 — color-only, zero functional changes:
+//  Changes from v2.8.0:
 //
-//  Layer 1: In-context vs Out-of-context coloring (active chain)
-//    Detected via message.contextClearedAt field.
-//    OOC nodes on the active chain render in amber/warm tones,
-//    visually distinct from both active in-context and inactive.
-//    Tool-call meta nodes gain a third state (partial OOC) in a
-//    muted teal-green, separate from all-OOC bronze and in-ctx slate.
+//  1. Summary Detection (Bug Fix)
+//     Old .includes() check was fragile — any message mentioning
+//     the tag was falsely detected. New rule: opening tag must
+//     appear within the first 300 chars of trimmed content AND
+//     the closing tag must be the final text. Supports both the
+//     <CONVERSATION_SUMMARY> and <CONVERSATIONAL_SUMMARY> spellings.
 //
-//  Layer 2: Summary Message nodes (special AI subtype)
-//    Detected by <CONVERSATION_SUMMARY> tag in assistant content.
-//    Rendered in purple across all chain/context states.
-//    Badge text: "SUM". Label prefix: "∑".
+//  2. Color System Redesign (Three-Dimensional)
+//     Dimension A — Type (base hue, always recognizable):
+//       User → Green  |  AI → Blue  |  Tool → Slate  |  Summary → Purple
+//     Dimension B — Chain (brightness):
+//       Active = full color  |  Inactive = muted/dark
+//     Dimension C — Context (brightness within active chain only):
+//       In-context = full  |  OOC = dimmed  |  Partial = intermediate (tool only)
+//     All states are variants of the same hue — type identity is
+//     preserved across every combination.
 //
-//  New preview panel badge classes: ooc, summary, ooc-summary,
-//    partial-ooc — each with matching colour and label text.
+//  3. Legend Redesign
+//     Grouped into Types and State Modifiers — short, scannable,
+//     no per-combination entries.
 //
-//  Legend updated to cover full 9-state colour matrix.
-//
-//  No changes to: node selection, navigation, scroll/locate,
-//  branch switching, active-chain calculation, view-state, or
-//  any other functional behaviour from v2.7.0.
+//  No changes to scroll/locate, navigation, branch switching,
+//  view-state, or any other functional behaviour from v2.7.0.
 // ================================================================
 (() => {
   'use strict';
@@ -46,19 +49,15 @@
     const sv = savedViewState;
     if (!sv) return false;
     const { tx, ty, s } = sv.tr ?? {};
-    if (
-      typeof s  !== 'number' || !isFinite(s)  || s  < 0.12 || s  > 3.5 ||
-      typeof tx !== 'number' || !isFinite(tx) ||
-      typeof ty !== 'number' || !isFinite(ty)
-    ) return false;
+    if (typeof s!=='number'||!isFinite(s)||s<0.12||s>3.5||typeof tx!=='number'||!isFinite(tx)||typeof ty!=='number'||!isFinite(ty)) return false;
     const cs = getChatState();
     const currentChatID = cs?.state?.chatID ?? null;
     if (sv.chatID && currentChatID && sv.chatID !== currentChatID) return false;
-    graphCtx.tr.tx = tx; graphCtx.tr.ty = ty; graphCtx.tr.s = s;
+    graphCtx.tr.tx=tx; graphCtx.tr.ty=ty; graphCtx.tr.s=s;
     graphCtx.draw();
     if (sv.selectedId) {
       const node = graphCtx.all.find(n => n.id === sv.selectedId);
-      if (node) { graphCtx.selectedId = node.id; requestAnimationFrame(() => openPreview(node, panel)); }
+      if (node) { graphCtx.selectedId = node.id; requestAnimationFrame(()=>openPreview(node,panel)); }
     }
     return true;
   }
@@ -77,7 +76,7 @@
     block.style.animation = '';
     void block.offsetWidth;
     block.style.borderRadius = '8px';
-    block.style.animation    = 'tmg-pulse 0.8s ease-out 2';
+    block.style.animation = 'tmg-pulse 0.8s ease-out 2';
     const cleanup = () => { block.style.animation=''; block.style.borderRadius=''; };
     block.addEventListener('animationend', cleanup, { once: true });
     setTimeout(cleanup, 2000);
@@ -90,21 +89,18 @@
   function showLocateToast(msg, type='ok') {
     let el = document.getElementById(LOC_TOAST_ID);
     if (!el) {
-      el = document.createElement('div');
-      el.id = LOC_TOAST_ID;
-      el.style.cssText = 'position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483647;padding:7px 14px;border-radius:16px;font-size:12px;font-weight:700;color:#0b141a;background:#00a884;box-shadow:0 6px 18px rgba(0,0,0,.35);opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;white-space:nowrap;';
+      el = document.createElement('div'); el.id = LOC_TOAST_ID;
+      el.style.cssText = 'position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483647;padding:7px 14px;border-radius:16px;font-size:12px;font-weight:700;color:#0b141a;background:#00c896;box-shadow:0 6px 18px rgba(0,0,0,.35);opacity:0;transition:opacity .2s,transform .2s;pointer-events:none;white-space:nowrap;';
       document.body.appendChild(el);
     }
     el.textContent = msg;
-    el.style.background = type==='ok' ? '#00a884' : type==='warn' ? '#f59e0b' : '#ef4444';
+    el.style.background = type==='ok' ? '#00c896' : type==='warn' ? '#f59e0b' : '#ef4444';
     el.style.color = type==='err' ? '#fff' : '#0b141a';
-    el.style.opacity = '1';
-    el.style.transform = 'translateX(-50%) translateY(0)';
+    el.style.opacity = '1'; el.style.transform = 'translateX(-50%) translateY(0)';
     clearTimeout(locToastTmr);
     locToastTmr = setTimeout(() => {
-      el.style.opacity = '0';
-      el.style.transform = 'translateX(-50%) translateY(8px)';
-      setTimeout(() => { if (el) el.remove(); }, 260);
+      el.style.opacity='0'; el.style.transform='translateX(-50%) translateY(8px)';
+      setTimeout(()=>{ if(el)el.remove(); },260);
     }, 1600);
   }
 
@@ -112,243 +108,174 @@
   function isScrollable(el) {
     if (!el) return false;
     const oy = window.getComputedStyle(el).overflowY;
-    return (oy === 'auto' || oy === 'scroll' || oy === 'overlay') && el.scrollHeight > el.clientHeight + 1;
+    return (oy==='auto'||oy==='scroll'||oy==='overlay') && el.scrollHeight>el.clientHeight+1;
   }
   function getScrollableAncestors(el) {
-    const list = [];
-    let p = el?.parentElement;
-    while (p && p !== document.documentElement) { if (isScrollable(p)) list.push(p); p = p.parentElement; }
+    const list=[]; let p=el?.parentElement;
+    while(p&&p!==document.documentElement){if(isScrollable(p))list.push(p);p=p.parentElement;}
     return list;
   }
   function pickBestScroller(list) {
-    if (!list || list.length === 0) return null;
-    return list.reduce((best, cur) =>
-      (cur.scrollHeight - cur.clientHeight) > (best.scrollHeight - best.clientHeight) ? cur : best, list[0]);
+    if(!list||!list.length)return null;
+    return list.reduce((b,c)=>(c.scrollHeight-c.clientHeight)>(b.scrollHeight-b.clientHeight)?c:b,list[0]);
   }
   function getChatScroller(preferredEl=null) {
-    const fromEl = preferredEl ? getScrollableAncestors(preferredEl) : [];
-    if (fromEl.length) return pickBestScroller(fromEl);
-    const chatSpace = document.querySelector('[data-element-id="chat-space-middle-part"]');
-    if (chatSpace) {
-      const candidates = [];
-      if (isScrollable(chatSpace)) candidates.push(chatSpace);
-      const nodes = chatSpace.querySelectorAll('[data-element-id],[class],[style],div,section');
-      for (const n of nodes) if (isScrollable(n)) candidates.push(n);
-      const best = pickBestScroller(candidates);
-      if (best) return best;
-    }
-    return document.scrollingElement || document.documentElement;
+    const fromEl=preferredEl?getScrollableAncestors(preferredEl):[];
+    if(fromEl.length)return pickBestScroller(fromEl);
+    const cs=document.querySelector('[data-element-id="chat-space-middle-part"]');
+    if(cs){const cands=[];if(isScrollable(cs))cands.push(cs);const ns=cs.querySelectorAll('[data-element-id],[class],[style],div,section');for(const n of ns)if(isScrollable(n))cands.push(n);const b=pickBestScroller(cands);if(b)return b;}
+    return document.scrollingElement||document.documentElement;
   }
 
-  /* ── BLOCK RESOLUTION ────────────────────────────────────────── */
+  /* ── BLOCK RESOLUTION HELPERS ────────────────────────────────── */
   function normalizeBlock(el) {
-    if (!el || el.closest('#' + EXT + '-ov')) return null;
-    const block = el.closest('[data-element-id="response-block"],[data-element-id="request-block"],[data-element-id="message-block"],[data-element-id*="block"],[data-element-id*="message"],[data-element-id*="response"],[data-element-id*="request"]');
-    return block || el;
+    if(!el||el.closest('#'+EXT+'-ov'))return null;
+    const b=el.closest('[data-element-id="response-block"],[data-element-id="request-block"],[data-element-id="message-block"],[data-element-id*="block"],[data-element-id*="message"],[data-element-id*="response"],[data-element-id*="request"]');
+    return b||el;
   }
   function findMessageBlock(tsBtn) {
-    if (!tsBtn) return null;
-    const selectors = ['[data-element-id="response-block"]','[data-element-id="request-block"]','[data-element-id="message-block"]','[data-element-id*="message"]','[data-element-id*="block"]'];
-    for (const sel of selectors) { const el = tsBtn.closest(sel); if (el) return el; }
-    let el = tsBtn.parentElement;
-    for (let i = 0; i < 12 && el; i++, el = el.parentElement) {
-      const st = window.getComputedStyle(el);
-      if (st.position !== 'absolute' && st.position !== 'fixed') return el;
-    }
+    if(!tsBtn)return null;
+    for(const sel of['[data-element-id="response-block"]','[data-element-id="request-block"]','[data-element-id="message-block"]','[data-element-id*="message"]','[data-element-id*="block"]']){const e=tsBtn.closest(sel);if(e)return e;}
+    let el=tsBtn.parentElement;
+    for(let i=0;i<12&&el;i++,el=el.parentElement){const st=window.getComputedStyle(el);if(st.position!=='absolute'&&st.position!=='fixed')return el;}
     return tsBtn;
   }
   function scanDomForUuid(uuid) {
-    const attrs = ['data-message-id','data-uuid','data-id','data-message-uuid','data-element-id','id'];
-    const chatSpace = document.querySelector('[data-element-id="chat-space-middle-part"]');
-    const nodes = document.querySelectorAll('[data-message-id],[data-uuid],[data-id],[data-message-uuid],[data-element-id],[id]');
-    for (const el of nodes) {
-      if (chatSpace && !chatSpace.contains(el)) continue;
-      if (el.closest('#' + EXT + '-ov')) continue;
-      for (const a of attrs) { const v = el.getAttribute(a); if (v && v.includes(uuid)) return el; }
+    const attrs=['data-message-id','data-uuid','data-id','data-message-uuid','data-element-id','id'];
+    const cs=document.querySelector('[data-element-id="chat-space-middle-part"]');
+    const nodes=document.querySelectorAll('[data-message-id],[data-uuid],[data-id],[data-message-uuid],[data-element-id],[id]');
+    for(const el of nodes){
+      if(cs&&!cs.contains(el))continue;if(el.closest('#'+EXT+'-ov'))continue;
+      for(const a of attrs){const v=el.getAttribute(a);if(v&&v.includes(uuid))return el;}
     }
     return null;
   }
   function locateMessageBlock(uuid) {
-    const tsBtn = document.getElementById(`message-timestamp-${uuid}`);
-    if (tsBtn) { const block = findMessageBlock(tsBtn); if (block) return { block, method: 'ts' }; }
-    for (const sel of [`[data-message-id="${uuid}"]`,`[data-uuid="${uuid}"]`,`[data-message-uuid="${uuid}"]`,`[data-id="${uuid}"]`,`[id="${uuid}"]`]) {
-      const block = normalizeBlock(document.querySelector(sel)); if (block) return { block, method: 'attr-exact' };
-    }
-    for (const sel of [`[data-element-id*="${uuid}"]`,`[id*="${uuid}"]`]) {
-      const block = normalizeBlock(document.querySelector(sel)); if (block) return { block, method: 'attr-partial' };
-    }
-    const block = normalizeBlock(scanDomForUuid(uuid));
-    if (block) return { block, method: 'scan' };
+    const tsBtn=document.getElementById(`message-timestamp-${uuid}`);
+    if(tsBtn){const b=findMessageBlock(tsBtn);if(b)return{block:b,method:'ts'};}
+    for(const sel of[`[data-message-id="${uuid}"]`,`[data-uuid="${uuid}"]`,`[data-message-uuid="${uuid}"]`,`[data-id="${uuid}"]`,`[id="${uuid}"]`]){const b=normalizeBlock(document.querySelector(sel));if(b)return{block:b,method:'attr-exact'};}
+    for(const sel of[`[data-element-id*="${uuid}"]`,`[id*="${uuid}"]`]){const b=normalizeBlock(document.querySelector(sel));if(b)return{block:b,method:'attr-partial'};}
+    const b=normalizeBlock(scanDomForUuid(uuid));
+    if(b)return{block:b,method:'scan'};
     return null;
   }
   function getMessageIndexInfo(uuid) {
-    const cs = getChatState();
-    if (!cs?.state?.messages) return { idx: -1, total: 0 };
-    const msgs = cs.state.messages;
-    return { idx: msgs.findIndex(m => m.uuid === uuid), total: msgs.length };
+    const cs=getChatState();if(!cs?.state?.messages)return{idx:-1,total:0};
+    const msgs=cs.state.messages;return{idx:msgs.findIndex(m=>m.uuid===uuid),total:msgs.length};
   }
-  function computeJumpTarget(scroller, idx, total) {
-    if (!scroller || total <= 1 || idx < 0) return null;
-    const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-    return Math.max(0, Math.min(max, max * (idx / (total - 1))));
+  function computeJumpTarget(scroller,idx,total) {
+    if(!scroller||total<=1||idx<0)return null;
+    const max=Math.max(0,scroller.scrollHeight-scroller.clientHeight);
+    return Math.max(0,Math.min(max,max*(idx/(total-1))));
   }
   function scrollBlockToCenter(block) {
-    const scroller = getChatScroller(block);
-    if (!scroller) return false;
-    const sr = scroller.getBoundingClientRect(), br = block.getBoundingClientRect();
-    const Epos = br.top - sr.top + scroller.scrollTop;
-    let target = Epos - (scroller.clientHeight / 2) + (br.height / 2);
-    if (Epos <= br.height || target < 0) target = 0;
-    target = Math.max(0, Math.min(target, scroller.scrollHeight - scroller.clientHeight));
-    const prev = scroller.scrollTop;
-    scroller.scrollTo({ top: target, behavior: 'auto' });
-    if (Math.abs(scroller.scrollTop - prev) < 1) {
-      block.scrollIntoView({ block: target === 0 ? 'start' : 'center', inline: 'nearest', behavior: 'auto' });
-    }
+    const scroller=getChatScroller(block);if(!scroller)return false;
+    const sr=scroller.getBoundingClientRect(),br=block.getBoundingClientRect();
+    const Epos=br.top-sr.top+scroller.scrollTop;
+    let target=Epos-(scroller.clientHeight/2)+(br.height/2);
+    if(Epos<=br.height||target<0)target=0;
+    target=Math.max(0,Math.min(target,scroller.scrollHeight-scroller.clientHeight));
+    const prev=scroller.scrollTop;scroller.scrollTo({top:target,behavior:'auto'});
+    if(Math.abs(scroller.scrollTop-prev)<1)block.scrollIntoView({block:target===0?'start':'center',inline:'nearest',behavior:'auto'});
     return true;
   }
-  function scrollToMessage(uuid, doHighlight) {
-    if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return { ok:false };
-    const found = locateMessageBlock(uuid);
-    if (!found?.block) return { ok:false };
-    const ok = scrollBlockToCenter(found.block);
-    if (doHighlight) highlightBlock(found.block);
-    return { ok, method: found.method };
+  function scrollToMessage(uuid,doHighlight) {
+    if(!uuid||uuid.includes('__t')||uuid.includes('__meta'))return{ok:false};
+    const found=locateMessageBlock(uuid);if(!found?.block)return{ok:false};
+    const ok=scrollBlockToCenter(found.block);
+    if(doHighlight)highlightBlock(found.block);
+    return{ok,method:found.method};
   }
 
   /* ── MINIMAP NAVIGATION ──────────────────────────────────────── */
-  async function openMinimapPanel() {
-    if (document.querySelector('[data-element-id="chat-minimap-content"]')) return true;
-    let moreBtn = document.querySelector('button[data-tooltip-content="More actions"]');
-    if (!moreBtn) {
-      const titleArea = document.querySelector('[data-element-id="current-chat-title"]');
-      if (titleArea) moreBtn = titleArea.querySelector('button[aria-haspopup="menu"]');
-    }
-    if (!moreBtn) return false;
-    moreBtn.click();
-    await new Promise(r => setTimeout(r, 200));
-    const minimapBtn = document.querySelector('[data-element-id="minimap-button"]');
-    if (!minimapBtn) { document.body.click(); return false; }
-    minimapBtn.click();
-    await new Promise(r => setTimeout(r, 280));
-    return !!document.querySelector('[data-element-id="chat-minimap-content"]');
+  async function openMinimapPanel(){
+    if(document.querySelector('[data-element-id="chat-minimap-content"]'))return true;
+    let mb=document.querySelector('button[data-tooltip-content="More actions"]');
+    if(!mb){const ta=document.querySelector('[data-element-id="current-chat-title"]');if(ta)mb=ta.querySelector('button[aria-haspopup="menu"]');}
+    if(!mb)return false;
+    mb.click();await new Promise(r=>setTimeout(r,200));
+    const btn=document.querySelector('[data-element-id="minimap-button"]');
+    if(!btn){document.body.click();return false;}
+    btn.click();await new Promise(r=>setTimeout(r,280));
+    return!!document.querySelector('[data-element-id="chat-minimap-content"]');
   }
-  function closeMinimapPanel() {
-    if (!document.querySelector('[data-element-id="chat-minimap-content"]')) return;
-    const target = document.querySelector('[data-element-id="chat-space-middle-part"]') ||
-                   document.querySelector('[data-element-id="chat-body"]') || document.querySelector('main');
-    if (target) { target.click(); return; }
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  function closeMinimapPanel(){
+    if(!document.querySelector('[data-element-id="chat-minimap-content"]'))return;
+    const t=document.querySelector('[data-element-id="chat-space-middle-part"]')||document.querySelector('[data-element-id="chat-body"]')||document.querySelector('main');
+    if(t){t.click();return;}
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true,cancelable:true}));
   }
-  function findMinimapButton(rawContent) {
-    const minimap = document.querySelector('[data-element-id="chat-minimap-content"]');
-    if (!minimap || !rawContent) return null;
-    const targetText = extractText(rawContent).replace(/\s+/g, ' ').trim();
-    if (targetText.length < 4) return null;
-    const buttons = minimap.querySelectorAll('button[type="button"]');
-    if (!buttons.length) return null;
-    for (const snippetLen of [38, 22, 12]) {
-      const snippet = targetText.slice(0, snippetLen).toLowerCase();
-      if (snippet.length < 4) continue;
-      for (const btn of buttons) {
-        const p = btn.querySelector('p');
-        if (!p) continue;
-        if (p.textContent.replace(/\s+/g, ' ').trim().toLowerCase().includes(snippet)) return btn;
-      }
+  function findMinimapButton(rawContent){
+    const mm=document.querySelector('[data-element-id="chat-minimap-content"]');
+    if(!mm||!rawContent)return null;
+    const target=extractText(rawContent).replace(/\s+/g,' ').trim();
+    if(target.length<4)return null;
+    const btns=mm.querySelectorAll('button[type="button"]');if(!btns.length)return null;
+    for(const sl of[38,22,12]){
+      const snip=target.slice(0,sl).toLowerCase();if(snip.length<4)continue;
+      for(const btn of btns){const p=btn.querySelector('p');if(!p)continue;if(p.textContent.replace(/\s+/g,' ').trim().toLowerCase().includes(snip))return btn;}
     }
     return null;
   }
-  async function tryMinimapNavigation(uuid, rawContent) {
-    try {
-      const existingInput = document.querySelector('[data-element-id="search-input"]');
-      if (existingInput && existingInput.value) {
-        existingInput.value = '';
-        existingInput.dispatchEvent(new Event('input', { bubbles: true }));
-        await new Promise(r => setTimeout(r, 150));
-      }
-      const opened = await openMinimapPanel();
-      if (!opened) return false;
-      const searchInput = document.querySelector('[data-element-id="search-input"]');
-      if (searchInput && searchInput.value) {
-        searchInput.value = '';
-        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-        await new Promise(r => setTimeout(r, 150));
-      }
-      const btn = findMinimapButton(rawContent);
-      if (!btn) { closeMinimapPanel(); return false; }
-      btn.click();
-      setTimeout(closeMinimapPanel, 850);
-      return true;
-    } catch (e) { console.warn('[TM Graph] minimap nav error:', e); return false; }
+  async function tryMinimapNavigation(uuid,rawContent){
+    try{
+      const ei=document.querySelector('[data-element-id="search-input"]');
+      if(ei&&ei.value){ei.value='';ei.dispatchEvent(new Event('input',{bubbles:true}));await new Promise(r=>setTimeout(r,150));}
+      const opened=await openMinimapPanel();if(!opened)return false;
+      const si=document.querySelector('[data-element-id="search-input"]');
+      if(si&&si.value){si.value='';si.dispatchEvent(new Event('input',{bubbles:true}));await new Promise(r=>setTimeout(r,150));}
+      const btn=findMinimapButton(rawContent);if(!btn){closeMinimapPanel();return false;}
+      btn.click();setTimeout(closeMinimapPanel,850);return true;
+    }catch(e){console.warn('[TM Graph] minimap nav error:',e);return false;}
   }
 
   /* ── THREE-PHASE SCROLL-WITH-RETRY ───────────────────────────── */
-  function scrollWithRetry(uuid, { highlight = true, rawContent = null } = {}) {
-    const idxInfo = getMessageIndexInfo(uuid);
-    const scroller = getChatScroller(null);
-    let phase = 1, p1 = 0, p2 = 0, minimapTried = false;
-
-    const onFound = (tag, method) => {
-      showLocateToast(`Locate: ${tag ? tag + ' → ' : ''}${method} ✓`, 'ok');
-      if (highlight) setTimeout(() => scrollToMessage(uuid, true), 250);
+  function scrollWithRetry(uuid,{highlight=true,rawContent=null}={}) {
+    const idxInfo=getMessageIndexInfo(uuid),scroller=getChatScroller(null);
+    let phase=1,p1=0,p2=0,mmTried=false;
+    const onFound=(tag,method)=>{
+      showLocateToast(`Locate: ${tag?tag+' → ':''}${method} ✓`,'ok');
+      if(highlight)setTimeout(()=>scrollToMessage(uuid,true),250);
     };
-
-    const tick = () => {
-      const res = scrollToMessage(uuid, false);
-      if (res.ok) { onFound(phase === 2 ? 'idx-jump' : phase === 3 ? 'minimap' : '', res.method); return; }
-
-      if (phase === 1) {
-        if (++p1 < 3) { setTimeout(tick, 80); return; }
-        phase = 2;
-        if (scroller && idxInfo.idx >= 0) {
-          const t = computeJumpTarget(scroller, idxInfo.idx, idxInfo.total);
-          if (t != null) scroller.scrollTo({ top: t, behavior: 'auto' });
-        }
-        setTimeout(tick, 300); return;
+    const tick=()=>{
+      const res=scrollToMessage(uuid,false);
+      if(res.ok){onFound(phase===2?'idx-jump':phase===3?'minimap':'',res.method);return;}
+      if(phase===1){
+        if(++p1<3){setTimeout(tick,80);return;}
+        phase=2;
+        if(scroller&&idxInfo.idx>=0){const t=computeJumpTarget(scroller,idxInfo.idx,idxInfo.total);if(t!=null)scroller.scrollTo({top:t,behavior:'auto'});}
+        setTimeout(tick,300);return;
       }
-
-      if (phase === 2) {
-        if (++p2 < 6) { setTimeout(tick, 200); return; }
-        phase = 3;
-      }
-
-      if (!minimapTried) {
-        minimapTried = true;
-        if (rawContent) {
-          tryMinimapNavigation(uuid, rawContent).then(ok => {
-            if (ok) { showLocateToast('Locate: minimap ✓', 'ok'); setTimeout(() => scrollToMessage(uuid, true), 1500); }
-            else    { showLocateToast('Locate: failed', 'err'); }
-          });
-        } else { showLocateToast('Locate: failed (not in DOM)', 'err'); }
+      if(phase===2){if(++p2<6){setTimeout(tick,200);return;}phase=3;}
+      if(!mmTried){
+        mmTried=true;
+        if(rawContent){tryMinimapNavigation(uuid,rawContent).then(ok=>{if(ok){showLocateToast('Locate: minimap ✓','ok');setTimeout(()=>scrollToMessage(uuid,true),1500);}else showLocateToast('Locate: failed','err');});}
+        else showLocateToast('Locate: failed (not in DOM)','err');
       }
     };
-    requestAnimationFrame(() => requestAnimationFrame(tick));
+    requestAnimationFrame(()=>requestAnimationFrame(tick));
   }
-
-  function scrollAfterClose(uuid, rawContent = null) {
-    if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return;
-    scrollWithRetry(uuid, { highlight: true, rawContent });
+  function scrollAfterClose(uuid,rawContent=null){
+    if(!uuid||uuid.includes('__t')||uuid.includes('__meta'))return;
+    scrollWithRetry(uuid,{highlight:true,rawContent});
   }
-  function scrollAfterReload(uuid) {
-    if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return;
-    setTimeout(() => {
-      const cs = getChatState();
-      const msg = cs?.state?.messages?.find(m => m.uuid === uuid);
-      const rawContent = msg?.content ?? null;
-      scrollWithRetry(uuid, { highlight: true, rawContent });
-    }, 700);
+  function scrollAfterReload(uuid){
+    if(!uuid||uuid.includes('__t')||uuid.includes('__meta'))return;
+    setTimeout(()=>{
+      const cs=getChatState(),msg=cs?.state?.messages?.find(m=>m.uuid===uuid);
+      scrollWithRetry(uuid,{highlight:true,rawContent:msg?.content??null});
+    },700);
   }
 
   /* ── STYLES ──────────────────────────────────────────────────── */
   function injectStyles() {
-    if (document.getElementById(EXT + '-css')) return;
-    const s = document.createElement('style');
-    s.id = EXT + '-css';
+    if(document.getElementById(EXT+'-css'))return;
+    const s=document.createElement('style');s.id=EXT+'-css';
     s.textContent = `
       @keyframes tmg-pulse {
-        0%   { box-shadow: 0 0 0 0 rgba(0,168,132,.6); }
-        70%  { box-shadow: 0 0 0 12px rgba(0,168,132,0); }
-        100% { box-shadow: 0 0 0 0 rgba(0,168,132,0); }
+        0%   { box-shadow: 0 0 0 0 rgba(0,200,150,.6); }
+        70%  { box-shadow: 0 0 0 12px rgba(0,200,150,0); }
+        100% { box-shadow: 0 0 0 0 rgba(0,200,150,0); }
       }
       #${EXT}-btn { display:flex;align-items:center;justify-content:center;width:36px;height:36px;border-radius:8px;border:none;background:transparent;cursor:pointer;color:inherit;transition:background .15s; }
       #${EXT}-btn:hover { background:rgba(255,255,255,.12); }
@@ -359,10 +286,12 @@
       #${EXT}-bar .hint { font-size:11px;color:#8696a0;margin-left:10px; }
       #${EXT}-xbtn { background:none;border:none;cursor:pointer;color:#8696a0;font-size:20px;line-height:1;padding:4px 8px;border-radius:6px;transition:background .15s,color .15s; }
       #${EXT}-xbtn:hover { background:rgba(255,255,255,.12);color:#e9edef; }
-      #${EXT}-leg { display:flex;gap:14px;padding:5px 16px;flex-shrink:0;flex-wrap:wrap;border-bottom:1px solid rgba(255,255,255,.06);font-size:10px;color:#8696a0; }
+      #${EXT}-leg { display:flex;gap:10px;padding:5px 16px;flex-shrink:0;flex-wrap:wrap;align-items:center;border-bottom:1px solid rgba(255,255,255,.06);font-size:10px;color:#8696a0; }
       #${EXT}-leg span { display:flex;align-items:center;gap:4px; }
-      .${EXT}-dot { width:9px;height:9px;border-radius:50%;display:inline-block; }
-      .${EXT}-dotdash { width:18px;height:9px;border-radius:3px;border:1px dashed;display:inline-block; }
+      .${EXT}-dot { width:9px;height:9px;border-radius:50%;display:inline-block;flex-shrink:0; }
+      .${EXT}-dotdash { width:18px;height:9px;border-radius:3px;border:1px dashed;display:inline-block;flex-shrink:0; }
+      .${EXT}-leg-div { width:1px;height:11px;background:rgba(255,255,255,.22);align-self:center;flex-shrink:0; }
+      .${EXT}-leg-label { font-size:8.5px;font-weight:700;color:rgba(255,255,255,.35);letter-spacing:.7px;text-transform:uppercase; }
       #${EXT}-main { flex:1;display:flex;flex-direction:row;overflow:hidden;min-height:0; }
       #${EXT}-wrap { flex:1;overflow:hidden;position:relative;touch-action:none;min-width:0; }
       #${EXT}-cv   { display:block;width:100%;height:100%;cursor:grab;touch-action:none; }
@@ -372,13 +301,13 @@
       .${EXT}-phead { display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0;gap:8px; }
       .${EXT}-pbody { flex:1;overflow-y:auto;padding:12px 12px 6px;font-size:13px;line-height:1.65;color:#e9edef;-webkit-overflow-scrolling:touch;min-height:0; }
       .${EXT}-sbadge { display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;padding:4px 10px;border-radius:20px;border:1px solid; }
-      .${EXT}-sbadge.active      { color:#00a884;background:rgba(0,168,132,.1);border-color:rgba(0,168,132,.3); }
+      .${EXT}-sbadge.active      { color:#00c896;background:rgba(0,200,150,.1);border-color:rgba(0,200,150,.3); }
       .${EXT}-sbadge.inactive    { color:#f59e0b;background:rgba(245,158,11,.1);border-color:rgba(245,158,11,.3); }
-      .${EXT}-sbadge.meta        { color:#8696a0;background:rgba(130,150,160,.08);border-color:rgba(130,150,160,.25); }
-      .${EXT}-sbadge.ooc         { color:#c47800;background:rgba(196,120,0,.1);border-color:rgba(196,120,0,.35); }
-      .${EXT}-sbadge.summary     { color:#a855f7;background:rgba(168,85,247,.1);border-color:rgba(168,85,247,.35); }
-      .${EXT}-sbadge.ooc-summary { color:#7a50cc;background:rgba(122,80,204,.1);border-color:rgba(122,80,204,.3); }
-      .${EXT}-sbadge.partial-ooc { color:#2e8a68;background:rgba(46,138,104,.1);border-color:rgba(46,138,104,.3); }
+      .${EXT}-sbadge.meta        { color:#5a7080;background:rgba(90,112,128,.1);border-color:rgba(90,112,128,.25); }
+      .${EXT}-sbadge.ooc         { color:#e07040;background:rgba(224,112,64,.1);border-color:rgba(224,112,64,.3); }
+      .${EXT}-sbadge.summary     { color:#a855f7;background:rgba(168,85,247,.1);border-color:rgba(168,85,247,.3); }
+      .${EXT}-sbadge.ooc-summary { color:#7040b8;background:rgba(112,64,184,.1);border-color:rgba(112,64,184,.28); }
+      .${EXT}-sbadge.partial-ooc { color:#3c7488;background:rgba(60,116,136,.1);border-color:rgba(60,116,136,.28); }
       .${EXT}-divider { display:flex;align-items:center;gap:8px;margin:12px 0 10px; }
       .${EXT}-divider::before,.${EXT}-divider::after { content:'';flex:1;height:1px;background:rgba(255,255,255,.12); }
       .${EXT}-divider-label { font-size:8.5px;font-weight:700;color:rgba(255,255,255,.3);letter-spacing:1.3px;text-transform:uppercase;white-space:nowrap; }
@@ -398,15 +327,15 @@
       .tmg-meta-group { padding:8px 0;border-bottom:1px solid rgba(255,255,255,.07); }
       .tmg-meta-group:last-child { border-bottom:none; }
       .tmg-meta-section-label { font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:5px; }
-      .tmg-meta-invoke-label { color:#1ea4d4; }
+      .tmg-meta-invoke-label { color:#18a8d8; }
       .tmg-meta-result-label { color:#8696a0; }
-      .tmg-meta-fn { font-family:monospace;font-size:11px;font-weight:700;color:#1ea4d4;margin-bottom:3px; }
+      .tmg-meta-fn { font-family:monospace;font-size:11px;font-weight:700;color:#18a8d8;margin-bottom:3px; }
       .tmg-meta-args { font-size:10px;background:rgba(255,255,255,.06);border-radius:4px;padding:4px 6px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin-bottom:2px;color:#b0c4ce; }
       .tmg-meta-output { font-size:11.5px;color:#9ab0ba;white-space:pre-wrap;word-break:break-word; }
       .${EXT}-pfoot { padding:10px 12px;border-top:1px solid rgba(255,255,255,.08);display:flex;flex-direction:column;gap:7px;flex-shrink:0; }
       .${EXT}-pbtn { padding:8px 12px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:600;width:100%;transition:opacity .15s; }
       .${EXT}-pbtn:hover { opacity:.82; }
-      .${EXT}-pbtn.primary { background:#00a884;color:#0b141a; }
+      .${EXT}-pbtn.primary { background:#00c896;color:#0b141a; }
       .${EXT}-pbtn.apply   { background:#f59e0b;color:#0b141a; }
       .${EXT}-pbtn.muted   { background:transparent;border:1px solid rgba(255,255,255,.18);color:#8696a0; }
       .${EXT}-nav-row { display:flex;gap:6px; }
@@ -415,7 +344,7 @@
       .${EXT}-pbtn.nav:not(:disabled):hover { background:rgba(255,255,255,.13);opacity:1; }
       .${EXT}-nav-divider { height:1px;background:rgba(255,255,255,.08);margin:1px 0; }
       #${EXT}-toast { position:absolute;bottom:20px;left:50%;transform:translateX(-50%) translateY(60px);padding:7px 18px;border-radius:20px;font-size:12px;font-weight:700;transition:transform .22s;pointer-events:none;white-space:nowrap;z-index:10; }
-      #${EXT}-toast.ok   { background:#00a884;color:#0b141a;transform:translateX(-50%) translateY(0); }
+      #${EXT}-toast.ok   { background:#00c896;color:#0b141a;transform:translateX(-50%) translateY(0); }
       #${EXT}-toast.warn { background:#f59e0b;color:#0b141a;transform:translateX(-50%) translateY(0); }
       #${EXT}-toast.err  { background:#ef4444;color:#fff;   transform:translateX(-50%) translateY(0); }
       @media (max-width:680px) {
@@ -428,55 +357,58 @@
   }
 
   /* ── REACT FIBER ─────────────────────────────────────────────── */
-  function getFiber(el) { const k = Object.keys(el).find(k => k.startsWith('__reactFiber')); return k ? el[k] : null; }
-  function getChatState() {
-    const el = document.querySelector('[data-element-id="chat-space-middle-part"]');
-    if (!el) return null;
-    let f = getFiber(el);
-    for (let d = 0; f && d < 80; f = f.return, d++) {
-      let hs = f.memoizedState, hi = 0;
-      for (; hs && hi < 6; hs = hs.next, hi++) {
-        const v = hs.memoizedState;
-        if (v && !Array.isArray(v) && typeof v === 'object' && Array.isArray(v.messages) && v.chatID)
-          return { state: v };
-      }
+  function getFiber(el){const k=Object.keys(el).find(k=>k.startsWith('__reactFiber'));return k?el[k]:null;}
+  function getChatState(){
+    const el=document.querySelector('[data-element-id="chat-space-middle-part"]');if(!el)return null;
+    let f=getFiber(el);
+    for(let d=0;f&&d<80;f=f.return,d++){
+      let hs=f.memoizedState,hi=0;
+      for(;hs&&hi<6;hs=hs.next,hi++){const v=hs.memoizedState;if(v&&!Array.isArray(v)&&typeof v==='object'&&Array.isArray(v.messages)&&v.chatID)return{state:v};}
     }
     return null;
   }
 
   /* ── IDB ─────────────────────────────────────────────────────── */
-  const openIDB = () => new Promise((res, rej) => { const r = indexedDB.open('keyval-store'); r.onsuccess = e => res(e.target.result); r.onerror = () => rej(r.error); });
-  async function persistMessages(chatID, msgs) {
-    const db = await openIDB();
-    return new Promise((res, rej) => {
-      const tx = db.transaction('keyval','readwrite'), st = tx.objectStore('keyval'), key = `CHAT_${chatID}`, g = st.get(key);
-      g.onsuccess = () => {
-        const prev = g.result; if (!prev) { db.close(); res(); return; }
-        const p = st.put({...prev, messages: msgs, updatedAt: new Date()}, key);
-        p.onsuccess = () => { db.close(); res(); }; p.onerror = () => { db.close(); rej(p.error); };
-      };
-      g.onerror = () => { db.close(); rej(g.error); };
+  const openIDB=()=>new Promise((res,rej)=>{const r=indexedDB.open('keyval-store');r.onsuccess=e=>res(e.target.result);r.onerror=()=>rej(r.error);});
+  async function persistMessages(chatID,msgs){
+    const db=await openIDB();
+    return new Promise((res,rej)=>{
+      const tx=db.transaction('keyval','readwrite'),st=tx.objectStore('keyval'),key=`CHAT_${chatID}`,g=st.get(key);
+      g.onsuccess=()=>{const prev=g.result;if(!prev){db.close();res();return;}const p=st.put({...prev,messages:msgs,updatedAt:new Date()},key);p.onsuccess=()=>{db.close();res();};p.onerror=()=>{db.close();rej(p.error);};};
+      g.onerror=()=>{db.close();rej(g.error);};
     });
   }
 
   /* ── TEXT / CLASSIFY ─────────────────────────────────────────── */
-  const extractText = c => !c ? '' : typeof c === 'string' ? c : Array.isArray(c) ? c.map(x => x?.text ?? x?.content ?? '').join(' ') : '';
-  function classifyMsg(m) {
-    if (m.role === 'user') return 'user';
-    if (m.role === 'tool') return 'tool';
-    if (m.role === 'assistant') return (m.tool_calls?.length > 0) ? 'tool' : 'ai';
+  const extractText=c=>!c?'':typeof c==='string'?c:Array.isArray(c)?c.map(x=>x?.text??x?.content??'').join(' '):'';
+  function classifyMsg(m){
+    if(m.role==='user')return 'user';
+    if(m.role==='tool')return 'tool';
+    if(m.role==='assistant')return(m.tool_calls?.length>0)?'tool':'ai';
     return 'tool';
   }
 
   /* ── CONTEXT / SUMMARY HELPERS ───────────────────────────────── */
 
-  // A message is out-of-context when TypingMind has stamped contextClearedAt on it.
-  // This covers both individual exclusion (Select Mode) and bulk Clear Context.
+  // FIX (v2.9): opening tag must appear within first 300 chars of trimmed
+  // content AND closing tag must be the final text — prevents false positives
+  // from messages that merely mention the tag. Both CONVERSATION_ and
+  // CONVERSATIONAL_ spellings are accepted.
   function isSummaryMessage(content) {
-    return extractText(content).includes('<CONVERSATION_SUMMARY>');
+    const text = extractText(content).trim();
+    const variants = [
+      ['<CONVERSATION_SUMMARY>',   '</CONVERSATION_SUMMARY>'],
+      ['<CONVERSATIONAL_SUMMARY>', '</CONVERSATIONAL_SUMMARY>']
+    ];
+    for (const [open, close] of variants) {
+      const openIdx = text.indexOf(open);
+      if (openIdx === -1) continue;
+      if (openIdx > 300) continue; // tag must appear near the start
+      if (text.endsWith(close)) return true;
+    }
+    return false;
   }
 
-  // For a collapsed tool-call meta node: determine aggregate context status.
   function getMetaContextStatus(toolMessages) {
     const n = toolMessages.filter(m => m.contextClearedAt).length;
     if (n === 0) return 'in';
@@ -484,497 +416,427 @@
     return 'partial';
   }
 
-  /* ── CANVAS COLOR SYSTEM ─────────────────────────────────────── */
-  const C = {
-    // ── User ─────────────────────────────────────────────────────
-    uA:   '#004d3a', uAb:   '#00a884', // active, in-context  (teal-green)
-    uI:   '#1a2e23', uIb:   '#2a4532', // inactive chain       (dark green)
-    uOoc: '#302500', uOocb: '#c47800', // active, OOC          (amber)
-    // ── AI Response ──────────────────────────────────────────────
-    aiA:   '#0d3b4f', aiAb:   '#1ea4d4', // active, in-context (blue)
-    aiI:   '#152530', aiIb:   '#1d3a4d', // inactive chain      (dark blue)
-    aiOoc: '#1d1130', aiOocb: '#8866cc', // active, OOC         (violet)
-    // ── Tool Calls (collapsed meta) ───────────────────────────────
-    tA:   '#222c34', tAb:   '#3c4e5a', // active, all in-ctx   (slate)
-    tI:   '#141c22', tIb:   '#1e2831', // inactive chain        (dark slate)
-    tOoc: '#281c08', tOocb: '#a07030', // active, all OOC       (bronze)
-    tPar: '#0c1e18', tParb: '#2e8a68', // active, partial OOC   (teal-green)
-    // ── Summary (special AI subtype) ──────────────────────────────
-    sumA:   '#1e0c38', sumAb:   '#a855f7', // active, in-ctx    (purple)
-    sumI:   '#130820', sumIb:   '#2e1840', // inactive chain     (dark purple)
-    sumOoc: '#190928', sumOocb: '#6a3aaa', // active, OOC        (muted purple)
-    // ── Edges / text / interaction ────────────────────────────────
-    eA: '#00a884', eI: 'rgba(40,60,70,.55)',
-    txA: '#e9edef', txI: '#3a5262',
-    hov: '#f59e0b', dot: '#f59e0b', sel: '#3b82f6'
+  /* ── COLOUR SYSTEM (v2.9: three-dimensional, systematic) ──────
+   *
+   *  PALETTE  — per-node style lookup
+   *    Dimension A  type:    user(green) | asst(blue) | tool(slate) | summ(purple)
+   *    Dimension B  chain:   active (full) | inactive (muted)
+   *    Dimension C  context: in-ctx (full) | ooc (dimmed) | partial (tool only)
+   *
+   *  Each entry: { bg, bd, bbg, bbc }
+   *    bg   — node background fill
+   *    bd   — border / accent color
+   *    bbg  — badge pill background
+   *    bbc  — badge pill text color
+   *
+   *  All states for a given type share the same base hue,
+   *  differing only in brightness — type identity stays legible.
+   * ─────────────────────────────────────────────────────────────── */
+  const PALETTE = {
+    // ── USER  (Green  #00c896) ─────────────────────────────────────
+    user_a_in:  { bg:'#004d3a', bd:'#00c896', bbg:'rgba(0,200,150,.18)',  bbc:'#00c896' },
+    user_a_out: { bg:'#002a20', bd:'#006b50', bbg:'rgba(0,107,80,.16)',   bbc:'#00975e' },
+    user_i:     { bg:'#0d1e18', bd:'#1a3328', bbg:'rgba(26,51,40,.3)',    bbc:'#2a5040' },
+
+    // ── ASSISTANT  (Blue  #18a8d8) ─────────────────────────────────
+    asst_a_in:  { bg:'#09344a', bd:'#18a8d8', bbg:'rgba(24,168,216,.18)', bbc:'#18a8d8' },
+    asst_a_out: { bg:'#051c28', bd:'#0d5a78', bbg:'rgba(13,90,120,.16)',  bbc:'#107898' },
+    asst_i:     { bg:'#0b1e28', bd:'#143040', bbg:'rgba(20,48,64,.3)',    bbc:'#1e4058' },
+
+    // ── TOOL CALLS  (Slate  #5a7080) ──────────────────────────────
+    tool_a_in:  { bg:'#242c34', bd:'#5a7080', bbg:'rgba(90,112,128,.18)', bbc:'#5a7080' },
+    tool_a_par: { bg:'#1c2428', bd:'#3e5864', bbg:'rgba(62,88,100,.16)',  bbc:'#3e6070' }, // partial OOC
+    tool_a_out: { bg:'#141a1e', bd:'#2e404a', bbg:'rgba(46,64,74,.16)',   bbc:'#3a5060' },
+    tool_i:     { bg:'#0f1418', bd:'#1e2830', bbg:'rgba(30,40,48,.28)',   bbc:'#283848' },
+
+    // ── SUMMARY  (Purple  #a855f7) ─────────────────────────────────
+    summ_a_in:  { bg:'#220a40', bd:'#a855f7', bbg:'rgba(168,85,247,.18)', bbc:'#a855f7' },
+    summ_a_out: { bg:'#14062a', bd:'#5a2ea0', bbg:'rgba(90,46,160,.16)',  bbc:'#7040c0' },
+    summ_i:     { bg:'#0c0618', bd:'#2a1040', bbg:'rgba(42,16,64,.28)',   bbc:'#381848' },
   };
 
-  // Unified style resolver — replaces the four separate getBg/getBdr/getBbg/getBc helpers.
-  function getNodeStyle(n) {
-    const ia    = n.active;
-    const isMeta = !!n.isMeta;
-    const isSum  = !!(n.isSummary);
-    const isOoc  = ia && !!(n.isOoc);    // OOC only relevant on active chain
-    const ctxSt  = n.contextStatus;      // 'in' | 'out' | 'partial'
-    const role   = n.role;
+  // Edge / text / interaction colours (not node-type specific)
+  const C = {
+    eA: '#00c896',                  // active chain edge
+    eI: 'rgba(40,60,70,.5)',        // inactive chain edge
+    txA: '#e9edef',                 // active node label text
+    txI: '#3a5262',                 // inactive node label text
+    hov: '#f59e0b',                 // hover border highlight
+    dot: '#f59e0b',                 // branch point dot
+    sel: '#3b82f6'                  // selected node border
+  };
 
-    // ── Collapsed tool-call meta node ─────────────────────────────
+  function getNodeStyle(n) {
+    const { active, isMeta=false, isSummary=false, isOoc=false, contextStatus='in', role } = n;
+    const isActiveOoc = active && isOoc;
     if (isMeta) {
-      if (!ia) return { bg:C.tI, bdr:C.tIb, bbg:'rgba(255,255,255,.04)', bc:'#284050' };
-      if (ctxSt === 'out')     return { bg:C.tOoc, bdr:C.tOocb, bbg:'rgba(160,112,48,.14)', bc:'#b48040' };
-      if (ctxSt === 'partial') return { bg:C.tPar, bdr:C.tParb, bbg:'rgba(46,138,104,.12)', bc:'#2e8a68' };
-      return { bg:C.tA, bdr:C.tAb, bbg:'rgba(255,255,255,.05)', bc:'#5a6a76' };
+      if (!active)                return PALETTE.tool_i;
+      if (contextStatus==='out')  return PALETTE.tool_a_out;
+      if (contextStatus==='partial') return PALETTE.tool_a_par;
+      return PALETTE.tool_a_in;
     }
-    // ── Summary message (AI subtype) ──────────────────────────────
-    if (isSum) {
-      if (!ia) return { bg:C.sumI, bdr:C.sumIb, bbg:'rgba(46,24,64,.3)',     bc:'#4e2880' };
-      if (isOoc) return { bg:C.sumOoc, bdr:C.sumOocb, bbg:'rgba(106,58,170,.14)', bc:'#7a50cc' };
-      return { bg:C.sumA, bdr:C.sumAb, bbg:'rgba(168,85,247,.18)', bc:'#a855f7' };
+    if (isSummary) {
+      if (!active)         return PALETTE.summ_i;
+      if (isActiveOoc)     return PALETTE.summ_a_out;
+      return PALETTE.summ_a_in;
     }
-    // ── User message ──────────────────────────────────────────────
     if (role === 'user') {
-      if (!ia) return { bg:C.uI,   bdr:C.uIb,   bbg:'rgba(42,100,70,.35)',    bc:'#3a7a56' };
-      if (isOoc) return { bg:C.uOoc, bdr:C.uOocb, bbg:'rgba(196,120,0,.14)',   bc:'#c07800' };
-      return { bg:C.uA, bdr:C.uAb, bbg:'rgba(0,168,132,.28)', bc:'#00a884' };
+      if (!active)         return PALETTE.user_i;
+      if (isActiveOoc)     return PALETTE.user_a_out;
+      return PALETTE.user_a_in;
     }
-    // ── AI response ───────────────────────────────────────────────
     if (role === 'ai') {
-      if (!ia) return { bg:C.aiI,   bdr:C.aiIb,   bbg:'rgba(29,58,77,.45)',       bc:'#2a5a70' };
-      if (isOoc) return { bg:C.aiOoc, bdr:C.aiOocb, bbg:'rgba(136,102,204,.14)',   bc:'#8866cc' };
-      return { bg:C.aiA, bdr:C.aiAb, bbg:'rgba(30,164,212,.2)', bc:'#1ea4d4' };
+      if (!active)         return PALETTE.asst_i;
+      if (isActiveOoc)     return PALETTE.asst_a_out;
+      return PALETTE.asst_a_in;
     }
-    // ── Generic fallback ──────────────────────────────────────────
-    return ia ? { bg:C.tA, bdr:C.tAb, bbg:'rgba(255,255,255,.05)', bc:'#5a6a76' }
-              : { bg:C.tI, bdr:C.tIb, bbg:'rgba(255,255,255,.04)', bc:'#284050' };
+    return active ? PALETTE.tool_a_in : PALETTE.tool_i;
   }
 
   /* ── META NODE PREVIEW HELPERS ───────────────────────────────── */
-  function getMetaLabel(toolMsgs) {
-    const names = [];
-    for (const m of toolMsgs) {
-      if (m.tool_calls) {
-        for (const tc of m.tool_calls) {
-          const name = tc.function?.name || tc.name;
-          if (name && !names.includes(name)) names.push(name);
-        }
-      }
-    }
-    if (names.length > 0) {
-      const preview = names.slice(0, 3).join(', ');
-      return names.length > 3 ? preview + ` +${names.length - 3}` : preview;
-    }
-    return toolMsgs.length === 1 ? '1 tool call' : `${toolMsgs.length} tool calls`;
+  function getMetaLabel(toolMsgs){
+    const names=[];
+    for(const m of toolMsgs){if(m.tool_calls)for(const tc of m.tool_calls){const nm=tc.function?.name||tc.name;if(nm&&!names.includes(nm))names.push(nm);}}
+    if(names.length>0){const p=names.slice(0,3).join(', ');return names.length>3?p+` +${names.length-3}`:p;}
+    return toolMsgs.length===1?'1 tool call':`${toolMsgs.length} tool calls`;
   }
-  function escH(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-  function buildMetaPreviewHtml(toolMsgs) {
-    const parts = toolMsgs.map(m => {
-      if (m.role === 'assistant' && m.tool_calls?.length > 0) {
-        const calls = m.tool_calls.map(tc => {
-          const name = tc.function?.name || tc.name || 'tool';
-          let args = '';
-          try { args = JSON.stringify(JSON.parse(tc.function?.arguments || '{}'), null, 2); }
-          catch (_) { args = tc.function?.arguments || ''; }
-          const argsPreview = args.slice(0, 400) + (args.length > 400 ? '\n…' : '');
-          return `<div class="tmg-meta-fn">${escH(name)}()</div>${argsPreview ? `<div class="tmg-meta-args">${escH(argsPreview)}</div>` : ''}`;
-        }).join('');
-        return `<div class="tmg-meta-group"><div class="tmg-meta-section-label tmg-meta-invoke-label">🔧 Tool Invoke</div>${calls}</div>`;
+  function escH(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+  function buildMetaPreviewHtml(toolMsgs){
+    const parts=toolMsgs.map(m=>{
+      if(m.role==='assistant'&&m.tool_calls?.length>0){
+        const calls=m.tool_calls.map(tc=>{const nm=tc.function?.name||tc.name||'tool';let args='';try{args=JSON.stringify(JSON.parse(tc.function?.arguments||'{}'),null,2);}catch(_){args=tc.function?.arguments||'';}const ap=args.slice(0,400)+(args.length>400?'\n…':'');return`<div class="tmg-meta-fn">${escH(nm)}()</div>${ap?`<div class="tmg-meta-args">${escH(ap)}</div>`:''}`}).join('');
+        return`<div class="tmg-meta-group"><div class="tmg-meta-section-label tmg-meta-invoke-label">🔧 Tool Invoke</div>${calls}</div>`;
       }
-      if (m.role === 'tool') {
-        const raw = extractText(m.content), preview = raw.slice(0, 350);
-        return `<div class="tmg-meta-group"><div class="tmg-meta-section-label tmg-meta-result-label">📤 Tool Result</div><div class="tmg-meta-output">${escH(preview)}${raw.length > 350 ? '\n…' : ''}</div></div>`;
-      }
-      return '';
+      if(m.role==='tool'){const raw=extractText(m.content),p=raw.slice(0,350);return`<div class="tmg-meta-group"><div class="tmg-meta-section-label tmg-meta-result-label">📤 Tool Result</div><div class="tmg-meta-output">${escH(p)}${raw.length>350?'\n…':''}</div></div>`;}
+      return'';
     }).filter(Boolean).join('');
-    return parts || '<em style="opacity:.45">(no content)</em>';
+    return parts||'<em style="opacity:.45">(no content)</em>';
   }
-  function renderForPreview(content) {
-    const text = extractText(content);
-    if (!text.trim()) return '<em style="opacity:.45">(empty)</em>';
-    if (typeof window.marked !== 'undefined') { try { return window.marked.parse(text); } catch (_) {} }
+  function renderForPreview(content){
+    const text=extractText(content);if(!text.trim())return'<em style="opacity:.45">(empty)</em>';
+    if(typeof window.marked!=='undefined'){try{return window.marked.parse(text);}catch(_){}}
     return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
       .replace(/```([\s\S]*?)```/g,(_,c)=>`<pre><code>${c}</code></pre>`)
       .replace(/`([^`\n]+)`/g,(_,c)=>`<code>${c}</code>`)
-      .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>')
-      .replace(/\*([^*\n]+)\*/g,'<em>$1</em>')
+      .replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/\*([^*\n]+)\*/g,'<em>$1</em>')
       .replace(/\n\n/g,'</p><p>').replace(/\n/g,'<br>');
   }
 
   /* ── TREE BUILDER ────────────────────────────────────────────── */
-  function buildChain(msgs, start, isActive, sp) {
-    if (!msgs || start >= msgs.length) return [];
-    const m = msgs[start];
-    const cls = classifyMsg(m);
+  function buildChain(msgs,start,isActive,sp){
+    if(!msgs||start>=msgs.length)return[];
+    const m=msgs[start],cls=classifyMsg(m);
 
-    // ── Collapse consecutive tool run into one META node ──────────
-    if (cls === 'tool') {
-      let end = start;
-      const toolMsgs = [];
-      while (end < msgs.length && classifyMsg(msgs[end]) === 'tool') { toolMsgs.push(msgs[end]); end++; }
-      const ctxStatus = getMetaContextStatus(toolMsgs);
-      const metaNode = {
-        id: `${toolMsgs[0].uuid}__meta`, role:'tool', isMeta:true, toolMessages:toolMsgs,
-        label: getMetaLabel(toolMsgs), scrollUUID: toolMsgs[0].uuid,
-        active: isActive, switchPath: isActive ? [] : sp,
-        sourceUUID: sp.length > 0 ? sp[sp.length-1].sourceUUID : toolMsgs[0].uuid,
-        branchIdx:  sp.length > 0 ? sp[sp.length-1].branchIdx  : null,
-        isOoc: ctxStatus !== 'in',  // true when any tool msg is OOC
-        isSummary: false,
-        contextStatus: ctxStatus,
-        x:0, y:0, w:0, h:0, children:[], variants:[]
+    if(cls==='tool'){
+      let end=start;const toolMsgs=[];
+      while(end<msgs.length&&classifyMsg(msgs[end])==='tool'){toolMsgs.push(msgs[end]);end++;}
+      const ctxStatus=getMetaContextStatus(toolMsgs);
+      const metaNode={
+        id:`${toolMsgs[0].uuid}__meta`,role:'tool',isMeta:true,toolMessages:toolMsgs,
+        label:getMetaLabel(toolMsgs),scrollUUID:toolMsgs[0].uuid,
+        active:isActive,switchPath:isActive?[]:sp,
+        sourceUUID:sp.length>0?sp[sp.length-1].sourceUUID:toolMsgs[0].uuid,
+        branchIdx:sp.length>0?sp[sp.length-1].branchIdx:null,
+        isOoc:ctxStatus!=='in',isSummary:false,contextStatus:ctxStatus,
+        x:0,y:0,w:0,h:0,children:[],variants:[]
       };
-      metaNode.children = buildChain(msgs, end, isActive, sp);
-      return [metaNode];
+      metaNode.children=buildChain(msgs,end,isActive,sp);
+      return[metaNode];
     }
 
-    // ── Normal (non-tool) node ────────────────────────────────────
-    const isOoc    = !!(m.contextClearedAt);
-    const isSummary = cls === 'ai' && isSummaryMessage(m.content);
-    const node = {
-      id: m.uuid, role: cls,
-      label: extractText(m.content).replace(/\s+/g,' ').slice(0, 82),
-      rawContent: m.content, active: isActive, switchPath: isActive ? [] : sp,
-      sourceUUID: sp.length > 0 ? sp[sp.length-1].sourceUUID : m.uuid,
-      branchIdx:  sp.length > 0 ? sp[sp.length-1].branchIdx  : null,
-      isOoc,
-      isSummary,
-      contextStatus: isOoc ? 'out' : 'in',
-      x:0, y:0, w:0, h:0, children:[], variants:[]
+    const isOoc=!!(m.contextClearedAt);
+    const isSummary=cls==='ai'&&isSummaryMessage(m.content);
+    const node={
+      id:m.uuid,role:cls,
+      label:extractText(m.content).replace(/\s+/g,' ').slice(0,82),
+      rawContent:m.content,active:isActive,switchPath:isActive?[]:sp,
+      sourceUUID:sp.length>0?sp[sp.length-1].sourceUUID:m.uuid,
+      branchIdx:sp.length>0?sp[sp.length-1].branchIdx:null,
+      isOoc,isSummary,contextStatus:isOoc?'out':'in',
+      x:0,y:0,w:0,h:0,children:[],variants:[]
     };
 
-    if (m.role === 'user' && m.threads?.length > 0) {
-      node.variants = m.threads.map((thread, ti) => {
-        const vp = [...(isActive ? [] : sp), { sourceUUID: m.uuid, branchIdx: ti }];
-        const hd = {
-          id: `${m.uuid}__t${ti}`, role:'user',
-          label: extractText(thread.userMessageContent).replace(/\s+/g,' ').slice(0,82),
-          rawContent: thread.userMessageContent, active: false, switchPath: vp,
-          sourceUUID: vp[vp.length-1].sourceUUID, branchIdx: vp[vp.length-1].branchIdx,
-          isOoc: false, isSummary: false, contextStatus: 'in',
-          x:0, y:0, w:0, h:0, children:[], variants:[]
+    if(m.role==='user'&&m.threads?.length>0){
+      node.variants=m.threads.map((thread,ti)=>{
+        const vp=[...(isActive?[]:sp),{sourceUUID:m.uuid,branchIdx:ti}];
+        const hd={
+          id:`${m.uuid}__t${ti}`,role:'user',
+          label:extractText(thread.userMessageContent).replace(/\s+/g,' ').slice(0,82),
+          rawContent:thread.userMessageContent,active:false,switchPath:vp,
+          sourceUUID:vp[vp.length-1].sourceUUID,branchIdx:vp[vp.length-1].branchIdx,
+          isOoc:false,isSummary:false,contextStatus:'in',
+          x:0,y:0,w:0,h:0,children:[],variants:[]
         };
-        hd.children = buildChain(thread.messages || [], 0, false, vp);
+        hd.children=buildChain(thread.messages||[],0,false,vp);
         return hd;
       });
-      node.children = isActive ? buildChain(msgs, start+1, true, []) : buildChain(msgs, start+1, false, sp);
-      return [node];
+      node.children=isActive?buildChain(msgs,start+1,true,[]):buildChain(msgs,start+1,false,sp);
+      return[node];
     }
-    node.children = buildChain(msgs, start+1, isActive, sp);
-    return [node];
+    node.children=buildChain(msgs,start+1,isActive,sp);
+    return[node];
   }
 
   /* ── PARENT MAP ──────────────────────────────────────────────── */
-  function buildParentMap(root) {
-    const map = new Map();
-    (function walk(n, parent) {
-      if (!n) return;
-      map.set(n.id, parent ?? null);
-      if (n.children?.[0]) walk(n.children[0], n);
-      if (n.variants?.length) n.variants.forEach(v => walk(v, n));
-    })(root, null);
+  function buildParentMap(root){
+    const map=new Map();
+    (function walk(n,parent){
+      if(!n)return;map.set(n.id,parent??null);
+      if(n.children?.[0])walk(n.children[0],n);
+      if(n.variants?.length)n.variants.forEach(v=>walk(v,n));
+    })(root,null);
     return map;
   }
 
   /* ── LAYOUT ──────────────────────────────────────────────────── */
-  const NW=200, NH=56, VGAP=34, slotW=226;
-  const colsPx = n => n * slotW - 26;
-  function treeCols(n) { if(!n) return 1; if(n.variants.length>0) return treeCols(n.children[0]||null)+n.variants.reduce((s,v)=>s+treeCols(v),0); return n.children.length?treeCols(n.children[0]):1; }
-  function placeNode(node, cx, cy, all, edges) {
-    if (!node) return;
-    node.x=cx-NW/2; node.y=cy; node.w=NW; node.h=NH; all.push(node);
-    const ny = cy+NH+VGAP;
-    if (node.variants.length > 0) {
-      const ac=treeCols(node.children[0]||null), vcs=node.variants.map(v=>treeCols(v));
-      const tc=ac+vcs.reduce((s,c)=>s+c,0); let sx=cx-colsPx(tc)/2;
-      if (node.children[0]) { const aCx=sx+colsPx(ac)/2; edges.push({fx:cx,fy:cy+NH,tx:aCx,ty:ny,active:true}); placeNode(node.children[0],aCx,ny,all,edges); sx+=ac*slotW; }
+  const NW=200,NH=56,VGAP=34,slotW=226;
+  const colsPx=n=>n*slotW-26;
+  function treeCols(n){if(!n)return 1;if(n.variants.length>0)return treeCols(n.children[0]||null)+n.variants.reduce((s,v)=>s+treeCols(v),0);return n.children.length?treeCols(n.children[0]):1;}
+  function placeNode(node,cx,cy,all,edges){
+    if(!node)return;node.x=cx-NW/2;node.y=cy;node.w=NW;node.h=NH;all.push(node);
+    const ny=cy+NH+VGAP;
+    if(node.variants.length>0){
+      const ac=treeCols(node.children[0]||null),vcs=node.variants.map(v=>treeCols(v));
+      const tc=ac+vcs.reduce((s,c)=>s+c,0);let sx=cx-colsPx(tc)/2;
+      if(node.children[0]){const aCx=sx+colsPx(ac)/2;edges.push({fx:cx,fy:cy+NH,tx:aCx,ty:ny,active:true});placeNode(node.children[0],aCx,ny,all,edges);sx+=ac*slotW;}
       node.variants.forEach((v,vi)=>{const vCx=sx+colsPx(vcs[vi])/2;edges.push({fx:cx,fy:cy+NH,tx:vCx,ty:ny,active:false});placeNode(v,vCx,ny,all,edges);sx+=vcs[vi]*slotW;});
-    } else if (node.children[0]) {
+    }else if(node.children[0]){
       edges.push({fx:cx,fy:cy+NH,tx:cx,ty:ny,active:node.active});
       placeNode(node.children[0],cx,ny,all,edges);
     }
   }
-  function doLayout(root) {
-    const all=[], edges=[];
-    placeNode(root, colsPx(treeCols(root))/2+60, 60, all, edges);
-    let minX=Infinity, maxX=-Infinity, maxY=-Infinity;
+  function doLayout(root){
+    const all=[],edges=[];
+    placeNode(root,colsPx(treeCols(root))/2+60,60,all,edges);
+    let minX=Infinity,maxX=-Infinity,maxY=-Infinity;
     all.forEach(n=>{minX=Math.min(minX,n.x);maxX=Math.max(maxX,n.x+n.w);maxY=Math.max(maxY,n.y+n.h);});
-    return { all, edges, bounds:{minX,maxX,maxY} };
+    return{all,edges,bounds:{minX,maxX,maxY}};
   }
 
-  /* ── CANVAS RENDERER ─────────────────────────────────────────── */
-  function rr(ctx,x,y,w,h,r) {
-    ctx.beginPath();
-    ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.quadraticCurveTo(x+w,y,x+w,y+r);
+  /* ── CANVAS ──────────────────────────────────────────────────── */
+  function rr(ctx,x,y,w,h,r){
+    ctx.beginPath();ctx.moveTo(x+r,y);ctx.lineTo(x+w-r,y);ctx.quadraticCurveTo(x+w,y,x+w,y+r);
     ctx.lineTo(x+w,y+h-r);ctx.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
     ctx.lineTo(x+r,y+h);ctx.quadraticCurveTo(x,y+h,x,y+h-r);
     ctx.lineTo(x,y+r);ctx.quadraticCurveTo(x,y,x+r,y);ctx.closePath();
   }
 
-  function doRender(canvas, all, edges, tr, hoverId, selectedId) {
-    const dpr=window.devicePixelRatio||1, W=canvas.clientWidth, H=canvas.clientHeight;
-    if (!W||!H) return;
-    canvas.width=W*dpr; canvas.height=H*dpr;
+  function doRender(canvas,all,edges,tr,hoverId,selectedId){
+    const dpr=window.devicePixelRatio||1,W=canvas.clientWidth,H=canvas.clientHeight;
+    if(!W||!H)return;
+    canvas.width=W*dpr;canvas.height=H*dpr;
     const ctx=canvas.getContext('2d');
-    ctx.scale(dpr,dpr); ctx.clearRect(0,0,W,H);
-    ctx.save(); ctx.translate(tr.tx,tr.ty); ctx.scale(tr.s,tr.s);
+    ctx.scale(dpr,dpr);ctx.clearRect(0,0,W,H);
+    ctx.save();ctx.translate(tr.tx,tr.ty);ctx.scale(tr.s,tr.s);
 
+    // Edges
     edges.forEach(e=>{
-      ctx.beginPath(); ctx.moveTo(e.fx,e.fy);
-      const m=(e.fy+e.ty)/2; ctx.bezierCurveTo(e.fx,m,e.tx,m,e.tx,e.ty);
-      ctx.strokeStyle=e.active?C.eA:C.eI; ctx.lineWidth=e.active?2.2:1.5;
-      ctx.setLineDash(e.active?[]:[6,4]); ctx.stroke(); ctx.setLineDash([]);
+      ctx.beginPath();ctx.moveTo(e.fx,e.fy);
+      const m=(e.fy+e.ty)/2;ctx.bezierCurveTo(e.fx,m,e.tx,m,e.tx,e.ty);
+      ctx.strokeStyle=e.active?C.eA:C.eI;ctx.lineWidth=e.active?2.2:1.5;
+      ctx.setLineDash(e.active?[]:[6,4]);ctx.stroke();ctx.setLineDash([]);
     });
 
-    const sorted = [...all].sort((a,b)=>a.active===b.active?0:a.active?-1:1);
-    sorted.forEach(n => {
-      const ia=n.active, isMeta=!!n.isMeta;
-      const isSel=n.id===selectedId, isHov=n.id===hoverId&&!isSel;
+    // Nodes (active drawn last so they appear on top)
+    const sorted=[...all].sort((a,b)=>a.active===b.active?0:a.active?-1:1);
+    sorted.forEach(n=>{
+      const ia=n.active,isMeta=!!n.isMeta;
+      const isSel=n.id===selectedId,isHov=n.id===hoverId&&!isSel;
 
-      // ── Resolve per-node style (v2.8: uses getNodeStyle) ─────────
-      const style = getNodeStyle(n);
-      const bg    = style.bg;
-      const bdr   = isSel ? C.sel : isHov ? C.hov : style.bdr;
+      // Per-node style from three-dimensional palette lookup
+      const sty = getNodeStyle(n);
+      const bg  = sty.bg;
+      const bdr = isSel ? C.sel : isHov ? C.hov : sty.bd;
 
-      // ── Node fill ────────────────────────────────────────────────
-      ctx.shadowColor='rgba(0,0,0,.35)'; ctx.shadowBlur=isSel?22:isHov?14:ia?6:3; ctx.shadowOffsetY=isSel?5:2;
-      rr(ctx,n.x,n.y,n.w,n.h,10); ctx.fillStyle=bg; ctx.fill();
-      ctx.shadowColor='transparent'; ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+      // Node fill + shadow
+      ctx.shadowColor='rgba(0,0,0,.35)';ctx.shadowBlur=isSel?22:isHov?14:ia?6:3;ctx.shadowOffsetY=isSel?5:2;
+      rr(ctx,n.x,n.y,n.w,n.h,10);ctx.fillStyle=bg;ctx.fill();
+      ctx.shadowColor='transparent';ctx.shadowBlur=0;ctx.shadowOffsetY=0;
 
-      // ── Border (dashed for meta; solid otherwise) ─────────────────
-      if (isMeta) ctx.setLineDash([5,3]);
+      // Border (dashed for collapsed tool meta)
+      if(isMeta)ctx.setLineDash([5,3]);
       rr(ctx,n.x,n.y,n.w,n.h,10);
-      ctx.strokeStyle=bdr; ctx.lineWidth=(isSel||isHov)?2.5:(ia?1.5:1);
-      ctx.stroke(); ctx.setLineDash([]);
+      ctx.strokeStyle=bdr;ctx.lineWidth=(isSel||isHov)?2.5:(ia?1.5:1);
+      ctx.stroke();ctx.setLineDash([]);
 
-      // ── Badge ─────────────────────────────────────────────────────
-      // v2.8: summary → "SUM"; meta → "×N"; others → role label
-      const badgeText = isMeta        ? `×${n.toolMessages.length}` :
-                        n.isSummary   ? 'SUM' :
-                        n.role==='user'? 'USER' :
-                        n.role==='ai'  ? 'AI'  : 'TOOL';
-      const badgeW = isMeta ? 28 : n.isSummary ? 26 : (n.role==='user'?34:n.role==='ai'?20:32);
-      ctx.fillStyle = style.bbg;
-      if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(n.x+7,n.y+7,badgeW,14,3); ctx.fill(); }
-      ctx.fillStyle = style.bc;
-      ctx.font = `bold ${isMeta?8.5:7.5}px system-ui`; ctx.textAlign = 'left';
-      ctx.fillText(badgeText, n.x+11, n.y+16.5);
+      // Badge — "SUM" for summary, "×N" for meta, role label otherwise
+      const badgeText=isMeta?`×${n.toolMessages.length}`:n.isSummary?'SUM':n.role==='user'?'USER':n.role==='ai'?'AI':'TOOL';
+      const badgeW=isMeta?28:n.isSummary?26:(n.role==='user'?34:n.role==='ai'?20:32);
+      ctx.fillStyle=sty.bbg;
+      if(ctx.roundRect){ctx.beginPath();ctx.roundRect(n.x+7,n.y+7,badgeW,14,3);ctx.fill();}
+      ctx.fillStyle=sty.bbc;ctx.font=`bold ${isMeta?8.5:7.5}px system-ui`;ctx.textAlign='left';
+      ctx.fillText(badgeText,n.x+11,n.y+16.5);
 
-      // ── Label (v2.8: "∑ " prefix for summary, "⚙ " for meta) ─────
-      ctx.fillStyle = ia ? C.txA : C.txI;
-      ctx.font = `${ia?500:400} 10px system-ui`;
-      let lbl = (isMeta ? '⚙ ' : n.isSummary ? '∑ ' : '') + (n.label || '(empty)');
-      const maxW = n.w - 16;
-      while (ctx.measureText(lbl).width > maxW && lbl.length > 6) lbl = lbl.slice(0,-4) + '…';
-      ctx.fillText(lbl, n.x+8, n.y+38);
+      // Label — "∑ " prefix for summary, "⚙ " for meta
+      ctx.fillStyle=ia?C.txA:C.txI;ctx.font=`${ia?500:400} 10px system-ui`;
+      let lbl=(isMeta?'⚙ ':n.isSummary?'∑ ':')+(n.label||'(empty)');
+      const maxW=n.w-16;
+      while(ctx.measureText(lbl).width>maxW&&lbl.length>6)lbl=lbl.slice(0,-4)+'…';
+      ctx.fillText(lbl,n.x+8,n.y+38);
 
-      // ── Branch point dot ──────────────────────────────────────────
-      if (n.variants?.length) {
-        ctx.fillStyle=C.dot; ctx.beginPath(); ctx.arc(n.x+n.w-8,n.y+8,4,0,Math.PI*2); ctx.fill();
-      }
-      // ── Multi-step depth indicator ────────────────────────────────
-      if (!ia && n.switchPath?.length > 1) {
-        ctx.fillStyle='rgba(245,158,11,.7)'; ctx.font='bold 8px system-ui'; ctx.textAlign='right';
-        ctx.fillText(`${n.switchPath.length}↓`, n.x+n.w-5, n.y+n.h-6);
-      }
+      // Branch point dot
+      if(n.variants?.length){ctx.fillStyle=C.dot;ctx.beginPath();ctx.arc(n.x+n.w-8,n.y+8,4,0,Math.PI*2);ctx.fill();}
+      // Multi-step depth indicator
+      if(!ia&&n.switchPath?.length>1){ctx.fillStyle='rgba(245,158,11,.7)';ctx.font='bold 8px system-ui';ctx.textAlign='right';ctx.fillText(`${n.switchPath.length}↓`,n.x+n.w-5,n.y+n.h-6);}
     });
     ctx.restore();
   }
 
   /* ── HIT TEST ────────────────────────────────────────────────── */
-  function hitTest(all,mx,my,tr) { const wx=(mx-tr.tx)/tr.s,wy=(my-tr.ty)/tr.s; return all.find(n=>wx>=n.x&&wx<=n.x+n.w&&wy>=n.y&&wy<=n.y+n.h)||null; }
+  function hitTest(all,mx,my,tr){const wx=(mx-tr.tx)/tr.s,wy=(my-tr.ty)/tr.s;return all.find(n=>wx>=n.x&&wx<=n.x+n.w&&wy>=n.y&&wy<=n.y+n.h)||null;}
 
   /* ── MODULE STATE / CLOSE / TOAST ────────────────────────────── */
-  let graphCtx=null, overlay=null, toastEl=null, toastTmr=null;
-
-  function closeOverlay() {
-    if (!overlay) return;
-    saveViewState();
-    graphCtx?.ro?.disconnect(); graphCtx?.ac?.abort();
-    overlay.remove(); overlay=null; toastEl=null; graphCtx=null; clearTimeout(toastTmr);
+  let graphCtx=null,overlay=null,toastEl=null,toastTmr=null;
+  function closeOverlay(){
+    if(!overlay)return;saveViewState();
+    graphCtx?.ro?.disconnect();graphCtx?.ac?.abort();
+    overlay.remove();overlay=null;toastEl=null;graphCtx=null;clearTimeout(toastTmr);
   }
-  function showToast(msg,type='ok') { if(!toastEl)return; clearTimeout(toastTmr); toastEl.textContent=msg; toastEl.className=type; toastTmr=setTimeout(()=>{if(toastEl)toastEl.className='';},3500); }
+  function showToast(msg,type='ok'){if(!toastEl)return;clearTimeout(toastTmr);toastEl.textContent=msg;toastEl.className=type;toastTmr=setTimeout(()=>{if(toastEl)toastEl.className='';},3500);}
 
   /* ── GRAPH NAV ───────────────────────────────────────────────── */
-  function getActiveParentNode(node) {
-    if (!node || !graphCtx?.parentMap) return null;
-    const p = graphCtx.parentMap.get(node.id) ?? null;
-    return (p && p.active) ? p : null;
+  function getActiveParentNode(node){
+    if(!node||!graphCtx?.parentMap)return null;
+    const p=graphCtx.parentMap.get(node.id)??null;
+    return(p&&p.active)?p:null;
   }
-  function getActiveChildNode(node) {
-    if (!node) return null;
-    const c = node.children?.[0] ?? null;
-    return (c && c.active) ? c : null;
+  function getActiveChildNode(node){
+    if(!node)return null;const c=node.children?.[0]??null;return(c&&c.active)?c:null;
   }
-  function panToNode(node) {
-    if (!graphCtx?.canvas || !node) return;
-    const W=graphCtx.canvas.clientWidth, H=graphCtx.canvas.clientHeight;
-    if (!W||!H) return;
+  function panToNode(node){
+    if(!graphCtx?.canvas||!node)return;
+    const W=graphCtx.canvas.clientWidth,H=graphCtx.canvas.clientHeight;if(!W||!H)return;
     const s=graphCtx.tr.s;
-    graphCtx.tr.tx=(W/2)-((node.x+node.w/2)*s);
-    graphCtx.tr.ty=(H/2)-((node.y+node.h/2)*s);
+    graphCtx.tr.tx=(W/2)-((node.x+node.w/2)*s);graphCtx.tr.ty=(H/2)-((node.y+node.h/2)*s);
   }
-  function navigatePreview(targetNode, panelEl) {
-    if (!targetNode || !graphCtx) return;
-    graphCtx.selectedId = targetNode.id;
-    panToNode(targetNode); graphCtx.draw();
-    openPreview(targetNode, panelEl);
+  function navigatePreview(targetNode,panelEl){
+    if(!targetNode||!graphCtx)return;
+    graphCtx.selectedId=targetNode.id;panToNode(targetNode);graphCtx.draw();
+    openPreview(targetNode,panelEl);
   }
 
   /* ── PREVIEW PANEL ───────────────────────────────────────────── */
-  function openPreview(node, panelEl) {
-    if (!node || !panelEl) return;
-    if (graphCtx) { graphCtx.selectedId = node.id; graphCtx.draw(); }
+  function openPreview(node,panelEl){
+    if(!node||!panelEl)return;
+    if(graphCtx){graphCtx.selectedId=node.id;graphCtx.draw();}
 
-    const ia = node.active, steps = node.switchPath?.length || 0, isMeta = !!node.isMeta;
-    const upNode   = getActiveParentNode(node);
-    const downNode = getActiveChildNode(node);
+    const ia=node.active,steps=node.switchPath?.length||0,isMeta=!!node.isMeta;
+    const upNode=getActiveParentNode(node),downNode=getActiveChildNode(node);
 
-    // ── Head: role indicator + ✕ ─────────────────────────────────
-    // v2.8: summary nodes shown with purple dot and "∑ Summary" label
-    const roleLabels = {
-      user: 'USER',
-      ai:   node.isSummary ? '∑ Summary' : 'AI Response',
-      tool: isMeta ? `Tool Calls (×${node.toolMessages?.length||1})` : 'Tool Call'
-    };
-    const dotColors = {
-      user: ia?'#00a884':'#3a7a56',
-      ai:   ia ? (node.isSummary ? '#a855f7' : '#1ea4d4') : (node.isSummary ? '#4a2880' : '#2a5a70'),
-      tool: ia?'#5a6a76':'#2a3a46'
-    };
-    const phead = panelEl.querySelector('.phead');
-    phead.innerHTML = `
+    // Head: role indicator + ✕ (purple for summary, matching palette)
+    const sty=getNodeStyle(node);
+    const dotClr=sty.bd;
+    const roleLabel=isMeta?`Tool Calls (×${node.toolMessages?.length||1})`:node.isSummary?'∑ Summary':node.role==='user'?'USER':'AI Response';
+    const phead=panelEl.querySelector('.phead');
+    phead.innerHTML=`
       <div style="display:flex;align-items:center;gap:7px;min-width:0;flex:1">
-        <span style="width:8px;height:8px;border-radius:${isMeta?'2px':'50%'};background:${dotColors[node.role]||'#444'};flex-shrink:0"></span>
-        <span style="font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${roleLabels[node.role]||'?'}</span>
+        <span style="width:8px;height:8px;border-radius:${isMeta?'2px':'50%'};background:${dotClr};flex-shrink:0"></span>
+        <span style="font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${roleLabel}</span>
       </div>
       <button class="pclose-btn" title="Close preview (Esc)" style="background:none;border:none;cursor:pointer;color:#8696a0;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;flex-shrink:0">✕</button>`;
-    phead.querySelector('.pclose-btn').onclick = () => closePreview(panelEl);
+    phead.querySelector('.pclose-btn').onclick=()=>closePreview(panelEl);
 
-    // ── Status badge (v2.8: context-aware classes and labels) ─────
-    let badgeClass, badgeText;
-    if (isMeta) {
-      if (ia) {
-        const ctxSt = node.contextStatus;
-        if      (ctxSt === 'out')     { badgeClass='ooc';        badgeText='⚙ Tools — ⊘ all out of context'; }
-        else if (ctxSt === 'partial') { badgeClass='partial-ooc'; badgeText='⚙ Tools — ◑ partial out of context'; }
-        else                          { badgeClass='meta';        badgeText='⚙ Aggregated tool calls (active chain)'; }
-      } else {
-        badgeClass='meta';
-        badgeText=`⚙ ${steps>1?steps+' switches to activate':'1 switch to activate'}`;
-      }
-    } else if (node.isSummary) {
-      if (ia) {
-        if (node.isOoc) { badgeClass='ooc-summary'; badgeText='∑ Summary — ⊘ out of context'; }
-        else            { badgeClass='summary';     badgeText='∑ Context summary — in context'; }
-      } else {
-        badgeClass='inactive';
-        badgeText=`∑ ${steps>1?steps+' switches to activate':'1 switch to activate'}`;
-      }
-    } else {
-      if (ia) {
-        if (node.isOoc) { badgeClass='ooc';    badgeText='⊘ Out of context (active chain)'; }
-        else            { badgeClass='active'; badgeText='✓ Currently active in chat'; }
-      } else {
-        badgeClass='inactive';
-        badgeText=steps===1?'⭐ 1 switch to activate':`⚡ ${steps} switches to activate`;
-      }
+    // Status badge reflecting context state
+    let badgeClass,badgeText;
+    if(isMeta){
+      if(ia){
+        const cs=node.contextStatus;
+        if(cs==='out')      {badgeClass='ooc';        badgeText='⚙ Tools — ⊘ all out of context';}
+        else if(cs==='partial'){badgeClass='partial-ooc';badgeText='⚙ Tools — ◑ partial out of context';}
+        else                {badgeClass='meta';       badgeText='⚙ Aggregated tool calls (active chain)';}
+      }else{badgeClass='meta';badgeText=`⚙ ${steps>1?steps+' switches to activate':'1 switch to activate'}`;}
+    }else if(node.isSummary){
+      if(ia){
+        if(node.isOoc){badgeClass='ooc-summary';badgeText='∑ Summary — ⊘ out of context';}
+        else          {badgeClass='summary';    badgeText='∑ Context summary — in context';}
+      }else{badgeClass='inactive';badgeText=`∑ ${steps>1?steps+' switches':'1 switch'} to activate`;}
+    }else{
+      if(ia){
+        if(node.isOoc){badgeClass='ooc';    badgeText='⊘ Out of context (active chain)';}
+        else          {badgeClass='active'; badgeText='✓ Currently active in chat';}
+      }else{badgeClass='inactive';badgeText=steps===1?'⭐ 1 switch to activate':`⚡ ${steps} switches to activate`;}
     }
 
-    const pbody = panelEl.querySelector('.pbody');
-    const contentHtml = isMeta
-      ? buildMetaPreviewHtml(node.toolMessages)
-      : `<div class="${EXT}-content">${renderForPreview(node.rawContent)}</div>`;
-    pbody.innerHTML = `
+    const pbody=panelEl.querySelector('.pbody');
+    const contentHtml=isMeta?buildMetaPreviewHtml(node.toolMessages):`<div class="${EXT}-content">${renderForPreview(node.rawContent)}</div>`;
+    pbody.innerHTML=`
       <div style="margin-bottom:2px"><span class="${EXT}-sbadge ${badgeClass}">${badgeText}</span></div>
       <div class="${EXT}-divider"><span class="${EXT}-divider-label">${isMeta?'Tool Call Details':'Message Content'}</span></div>
       ${contentHtml}`;
 
-    // ── Footer: nav row → divider → action → close ────────────────
-    const pfoot = panelEl.querySelector('.pfoot');
-    pfoot.innerHTML = '';
+    // Footer: nav row → divider → action → close
+    const pfoot=panelEl.querySelector('.pfoot');
+    pfoot.innerHTML='';
 
-    const navRow = document.createElement('div'); navRow.className = EXT + '-nav-row';
-    const mkNavBtn = (label, title) => { const b=document.createElement('button'); b.className=EXT+'-pbtn nav'; b.title=title; b.innerHTML=label; return b; };
-    const upBtn   = mkNavBtn('↑ &nbsp;Parent', 'Navigate to parent node (active chain only)');
-    const downBtn = mkNavBtn('↓ &nbsp;Child',  'Navigate to child node (active chain only)');
-    if (!upNode)   upBtn.disabled   = true;
-    if (!downNode) downBtn.disabled = true;
-    upBtn.onclick   = () => { if (upNode)   navigatePreview(upNode,   panelEl); };
-    downBtn.onclick = () => { if (downNode) navigatePreview(downNode, panelEl); };
-    navRow.appendChild(upBtn); navRow.appendChild(downBtn);
+    const navRow=document.createElement('div');navRow.className=EXT+'-nav-row';
+    const mkNavBtn=(label,title)=>{const b=document.createElement('button');b.className=EXT+'-pbtn nav';b.title=title;b.innerHTML=label;return b;};
+    const upBtn=mkNavBtn('↑ &nbsp;Parent','Navigate to parent node (active chain only)');
+    const downBtn=mkNavBtn('↓ &nbsp;Child','Navigate to child node (active chain only)');
+    if(!upNode)upBtn.disabled=true;if(!downNode)downBtn.disabled=true;
+    upBtn.onclick=()=>{if(upNode)navigatePreview(upNode,panelEl);};
+    downBtn.onclick=()=>{if(downNode)navigatePreview(downNode,panelEl);};
+    navRow.appendChild(upBtn);navRow.appendChild(downBtn);
     pfoot.appendChild(navRow);
 
-    const sep = document.createElement('div'); sep.className = EXT + '-nav-divider';
-    pfoot.appendChild(sep);
+    const sep=document.createElement('div');sep.className=EXT+'-nav-divider';pfoot.appendChild(sep);
 
-    if (ia) {
-      const b = document.createElement('button'); b.className = EXT + '-pbtn primary';
-      b.textContent = isMeta ? '↓ Go to First Tool Call' : '↓ Go to This Message';
-      const scrollTarget  = isMeta ? node.scrollUUID : node.id;
-      const scrollContent = isMeta ? null : node.rawContent;
-      b.onclick = () => { closePreview(panelEl); closeOverlay(); scrollAfterClose(scrollTarget, scrollContent); };
+    if(ia){
+      const b=document.createElement('button');b.className=EXT+'-pbtn primary';
+      b.textContent=isMeta?'↓ Go to First Tool Call':'↓ Go to This Message';
+      const st=isMeta?node.scrollUUID:node.id,sc=isMeta?null:node.rawContent;
+      b.onclick=()=>{closePreview(panelEl);closeOverlay();scrollAfterClose(st,sc);};
       pfoot.appendChild(b);
-    } else if (steps > 0) {
-      const b = document.createElement('button'); b.className = EXT + '-pbtn apply';
-      b.textContent = steps > 1 ? `⚡ Apply Changes (${steps} steps)` : '⭐ Apply Changes';
-      b.onclick = () => applyAndReload(node);
-      pfoot.appendChild(b);
+    }else if(steps>0){
+      const b=document.createElement('button');b.className=EXT+'-pbtn apply';
+      b.textContent=steps>1?`⚡ Apply Changes (${steps} steps)`:'⭐ Apply Changes';
+      b.onclick=()=>applyAndReload(node);pfoot.appendChild(b);
     }
-
-    const cb = document.createElement('button'); cb.className = EXT + '-pbtn muted';
-    cb.textContent = 'Close Preview'; cb.onclick = () => closePreview(panelEl);
-    pfoot.appendChild(cb);
-
+    const cb=document.createElement('button');cb.className=EXT+'-pbtn muted';
+    cb.textContent='Close Preview';cb.onclick=()=>closePreview(panelEl);pfoot.appendChild(cb);
     panelEl.classList.add('open');
   }
 
-  function closePreview(panelEl) {
-    if (graphCtx) { graphCtx.selectedId = null; graphCtx.draw(); }
-    panelEl?.classList.remove('open');
-  }
+  function closePreview(panelEl){if(graphCtx){graphCtx.selectedId=null;graphCtx.draw();}panelEl?.classList.remove('open');}
 
   /* ── PURE SWITCH / APPLY ─────────────────────────────────────── */
-  function computeSingleSwitch(msgs,srcU,bi) {
-    const si=msgs.findIndex(m=>m.uuid===srcU); if(si<0)throw new Error(`UUID ${srcU} not found`);
-    const sm=msgs[si],tgt=sm.threads?.[bi]; if(!tgt)throw new Error(`threads[${bi}] missing`);
-    return [...msgs.slice(0,si),{...sm,content:tgt.userMessageContent,threads:[...sm.threads.filter((_,i)=>i!==bi),{userMessageContent:sm.content,messages:msgs.slice(si+1),createdAt:new Date().toISOString()}],updatedAt:new Date().toISOString()},...(tgt.messages||[])];
+  function computeSingleSwitch(msgs,srcU,bi){
+    const si=msgs.findIndex(m=>m.uuid===srcU);if(si<0)throw new Error(`UUID ${srcU} not found`);
+    const sm=msgs[si],tgt=sm.threads?.[bi];if(!tgt)throw new Error(`threads[${bi}] missing`);
+    return[...msgs.slice(0,si),{...sm,content:tgt.userMessageContent,threads:[...sm.threads.filter((_,i)=>i!==bi),{userMessageContent:sm.content,messages:msgs.slice(si+1),createdAt:new Date().toISOString()}],updatedAt:new Date().toISOString()},...(tgt.messages||[])];
   }
-  function getScrollTargetFromNode(node) {
-    if (!node) return null;
-    if (node.isMeta && node.scrollUUID) return node.scrollUUID;
-    if (node.id && !node.id.includes('__t') && !node.id.includes('__meta')) return node.id;
-    if (node.sourceUUID) return node.sourceUUID;
-    let c = node.children?.[0];
-    while (c) {
-      if (c.isMeta && c.scrollUUID) return c.scrollUUID;
-      if (c.id && !c.id.includes('__t') && !c.id.includes('__meta')) return c.id;
-      c = c.children?.[0];
-    }
+  function getScrollTargetFromNode(node){
+    if(!node)return null;
+    if(node.isMeta&&node.scrollUUID)return node.scrollUUID;
+    if(node.id&&!node.id.includes('__t')&&!node.id.includes('__meta'))return node.id;
+    if(node.sourceUUID)return node.sourceUUID;
+    let c=node.children?.[0];
+    while(c){if(c.isMeta&&c.scrollUUID)return c.scrollUUID;if(c.id&&!c.id.includes('__t')&&!c.id.includes('__meta'))return c.id;c=c.children?.[0];}
     return null;
   }
-  async function applyAndReload(node) {
-    if (!node||!node.switchPath?.length||node.active) return;
-    const cs=getChatState(); if(!cs?.state?.chatID){showToast('Cannot read chat state','err');return;}
+  async function applyAndReload(node){
+    if(!node||!node.switchPath?.length||node.active)return;
+    const cs=getChatState();if(!cs?.state?.chatID){showToast('Cannot read chat state','err');return;}
     showToast('Applying…','warn');
-    try {
+    try{
       let msgs=cs.state.messages;
-      for (const step of node.switchPath) msgs=computeSingleSwitch(msgs,step.sourceUUID,step.branchIdx);
+      for(const step of node.switchPath)msgs=computeSingleSwitch(msgs,step.sourceUUID,step.branchIdx);
       await persistMessages(cs.state.chatID,msgs);
-      const scrollTarget = getScrollTargetFromNode(node) || node.switchPath[0].sourceUUID;
-      sessionStorage.setItem(SCROLL_KEY, scrollTarget);
-      closeOverlay(); window.location.reload();
-    } catch(err) { console.warn('[TM Graph]',err.message); showToast('Error: '+err.message.slice(0,55),'err'); }
+      const scrollTarget=getScrollTargetFromNode(node)||node.switchPath[0].sourceUUID;
+      sessionStorage.setItem(SCROLL_KEY,scrollTarget);
+      closeOverlay();window.location.reload();
+    }catch(err){console.warn('[TM Graph]',err.message);showToast('Error: '+err.message.slice(0,55),'err');}
   }
 
   /* ── OPEN GRAPH ──────────────────────────────────────────────── */
-  function openGraph() {
-    if (overlay) { closeOverlay(); return; }
-    const cs = getChatState(); if(!cs){alert('[TM Graph] No active conversation.');return;}
-    const root = buildChain(cs.state.messages,0,true,[])[0]; if(!root){alert('[TM Graph] No messages found.');return;}
-    const {all,edges,bounds} = doLayout(root);
-    const parentMap = buildParentMap(root);
+  function openGraph(){
+    if(overlay){closeOverlay();return;}
+    const cs=getChatState();if(!cs){alert('[TM Graph] No active conversation.');return;}
+    const root=buildChain(cs.state.messages,0,true,[])[0];if(!root){alert('[TM Graph] No messages found.');return;}
+    const{all,edges,bounds}=doLayout(root);
+    const parentMap=buildParentMap(root);
 
-    overlay = document.createElement('div'); overlay.id = EXT+'-ov';
-    const bar = document.createElement('div'); bar.id = EXT+'-bar';
+    overlay=document.createElement('div');overlay.id=EXT+'-ov';
+    const bar=document.createElement('div');bar.id=EXT+'-bar';
     bar.innerHTML=`
       <div style="display:flex;align-items:center">
         <h2>Chat Branch Graph</h2>
@@ -982,155 +844,165 @@
       </div>
       <button id="${EXT}-xbtn" title="Close — no changes (Esc)">✕</button>`;
 
-    const leg = document.createElement('div'); leg.id = EXT+'-leg';
-    // v2.8: updated legend covering all 9 colour states
+    const leg=document.createElement('div');leg.id=EXT+'-leg';
+    // v2.9: grouped legend — Types | Chain | Context | Graph
     leg.innerHTML = `
-      <span><span class="${EXT}-dot" style="background:#00a884"></span>User</span>
-      <span><span class="${EXT}-dot" style="background:#1ea4d4"></span>AI</span>
+      <span class="${EXT}-leg-label">Types</span>
+      <span><span class="${EXT}-dot" style="background:#00c896"></span>User</span>
+      <span><span class="${EXT}-dot" style="background:#18a8d8"></span>AI</span>
+      <span><span class="${EXT}-dotdash" style="border-color:#5a7080"></span>Tools</span>
       <span><span class="${EXT}-dot" style="background:#a855f7"></span>∑ Summary</span>
-      <span><span class="${EXT}-dotdash" style="border-color:#3c4e5a"></span>Tools</span>
-      <span><span class="${EXT}-dot" style="background:#c47800"></span>⊘ OOC</span>
-      <span><span class="${EXT}-dotdash" style="border-color:#2e8a68"></span>Tools partial OOC</span>
-      <span><span class="${EXT}-dot" style="background:#2e1840;border:1px solid #4a2880;box-sizing:border-box"></span>Inactive</span>
+      <span class="${EXT}-leg-div"></span>
+      <span class="${EXT}-leg-label">Chain</span>
+      <span title="Active chain = full color · Inactive chain = muted">
+        <span class="${EXT}-dot" style="background:#00c896"></span>
+        <span class="${EXT}-dot" style="background:#1a3328;margin-left:3px"></span>
+        Active / Inactive
+      </span>
+      <span class="${EXT}-leg-div"></span>
+      <span class="${EXT}-leg-label">Context</span>
+      <span title="In-context = bright · Out-of-context = dimmed">
+        <span class="${EXT}-dot" style="background:#00c896"></span>
+        <span class="${EXT}-dot" style="background:#006b50;margin-left:3px"></span>
+        In-ctx / OOC
+      </span>
+      <span title="Tools: some messages in context, some out">
+        <span class="${EXT}-dotdash" style="border-color:#3e5864"></span>
+        Partial OOC
+      </span>
+      <span class="${EXT}-leg-div"></span>
       <span><span class="${EXT}-dot" style="background:#f59e0b"></span>Branch</span>
-      <span><span class="${EXT}-dot" style="background:#3b82f6"></span>Selected · Enter=go</span>`;
+      <span><span class="${EXT}-dot" style="background:#3b82f6"></span>Selected · Enter</span>`;
 
-    const main = document.createElement('div'); main.id = EXT+'-main';
-    const wrap = document.createElement('div'); wrap.id = EXT+'-wrap';
-    const canvas = document.createElement('canvas'); canvas.id = EXT+'-cv';
-    toastEl = document.createElement('div'); toastEl.id = EXT+'-toast';
-    wrap.appendChild(canvas); wrap.appendChild(toastEl);
-    const panel = document.createElement('div'); panel.id = EXT+'-panel';
+    const main=document.createElement('div');main.id=EXT+'-main';
+    const wrap=document.createElement('div');wrap.id=EXT+'-wrap';
+    const canvas=document.createElement('canvas');canvas.id=EXT+'-cv';
+    toastEl=document.createElement('div');toastEl.id=EXT+'-toast';
+    wrap.appendChild(canvas);wrap.appendChild(toastEl);
+    const panel=document.createElement('div');panel.id=EXT+'-panel';
     panel.innerHTML=`
       <div class="${EXT}-phead phead" style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.08);flex-shrink:0;gap:8px"></div>
       <div class="${EXT}-pbody pbody" style="flex:1;overflow-y:auto;padding:12px 12px 6px;font-size:13px;line-height:1.65;color:#e9edef;-webkit-overflow-scrolling:touch;min-height:0"></div>
       <div class="${EXT}-pfoot pfoot" style="padding:10px 12px;border-top:1px solid rgba(255,255,255,.08);display:flex;flex-direction:column;gap:7px;flex-shrink:0"></div>`;
-    main.appendChild(wrap); main.appendChild(panel);
-    overlay.appendChild(bar); overlay.appendChild(leg); overlay.appendChild(main);
+    main.appendChild(wrap);main.appendChild(panel);
+    overlay.appendChild(bar);overlay.appendChild(leg);overlay.appendChild(main);
     document.body.appendChild(overlay);
 
-    const ac = new AbortController(), sig = ac.signal;
-    const ro = new ResizeObserver(() => requestAnimationFrame(() => { graphCtx?.draw(); }));
+    const ac=new AbortController(),sig=ac.signal;
+    const ro=new ResizeObserver(()=>requestAnimationFrame(()=>{graphCtx?.draw();}));
     ro.observe(wrap);
 
-    graphCtx = {
-      all, edges, bounds, parentMap, canvas, ac, ro,
-      tr:{tx:0,ty:0,s:1}, hoverId:null, selectedId:null,
-      centre() {
-        const W=canvas.clientWidth,H=canvas.clientHeight; if(!W||!H)return;
-        const cW=this.bounds.maxX-this.bounds.minX+120, cH=this.bounds.maxY-60+120;
+    graphCtx={
+      all,edges,bounds,parentMap,canvas,ac,ro,
+      tr:{tx:0,ty:0,s:1},hoverId:null,selectedId:null,
+      centre(){
+        const W=canvas.clientWidth,H=canvas.clientHeight;if(!W||!H)return;
+        const cW=this.bounds.maxX-this.bounds.minX+120,cH=this.bounds.maxY-60+120;
         this.tr.s=Math.max(0.2,Math.min(1.3,Math.min(W/cW,H/cH)));
         this.tr.tx=(W-cW*this.tr.s)/2-this.bounds.minX*this.tr.s+60*this.tr.s;
         this.tr.ty=(H-cH*this.tr.s)/2-60*this.tr.s+60*this.tr.s;
       },
-      draw() { doRender(canvas,this.all,this.edges,this.tr,this.hoverId,this.selectedId); }
+      draw(){doRender(canvas,this.all,this.edges,this.tr,this.hoverId,this.selectedId);}
     };
 
-    requestAnimationFrame(() => {
-      const didRestore = restoreViewState(panel);
-      if (!didRestore) { graphCtx.centre(); graphCtx.draw(); }
-    });
+    requestAnimationFrame(()=>{const dr=restoreViewState(panel);if(!dr){graphCtx.centre();graphCtx.draw();}});
 
-    bar.querySelector('#'+EXT+'-xbtn').addEventListener('click', closeOverlay, {signal:sig});
-    window.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { if(panel.classList.contains('open')) closePreview(panel); else closeOverlay(); }
-      else if (e.key === 'Enter' && graphCtx?.selectedId) {
-        const nd = graphCtx.all.find(n => n.id === graphCtx.selectedId);
-        if (nd?.active) {
-          const target  = nd.isMeta ? nd.scrollUUID : (nd.id.includes('__t') ? null : nd.id);
-          const content = (!nd.isMeta && !nd.id.includes('__t')) ? nd.rawContent : null;
-          closePreview(panel); closeOverlay(); if (target) scrollAfterClose(target, content);
+    bar.querySelector('#'+EXT+'-xbtn').addEventListener('click',closeOverlay,{signal:sig});
+    window.addEventListener('keydown',e=>{
+      if(e.key==='Escape'){if(panel.classList.contains('open'))closePreview(panel);else closeOverlay();}
+      else if(e.key==='Enter'&&graphCtx?.selectedId){
+        const nd=graphCtx.all.find(n=>n.id===graphCtx.selectedId);
+        if(nd?.active){
+          const target=nd.isMeta?nd.scrollUUID:(nd.id.includes('__t')?null:nd.id);
+          const content=(!nd.isMeta&&!nd.id.includes('__t'))?nd.rawContent:null;
+          closePreview(panel);closeOverlay();if(target)scrollAfterClose(target,content);
         }
       }
-    }, {signal:sig});
+    },{signal:sig});
 
-    canvas.addEventListener('wheel', e => {
+    canvas.addEventListener('wheel',e=>{
       e.preventDefault();
-      const rect=canvas.getBoundingClientRect(), mx=e.clientX-rect.left, my=e.clientY-rect.top, d=e.deltaY<0?1.09:0.92;
-      graphCtx.tr.tx=mx-(mx-graphCtx.tr.tx)*d; graphCtx.tr.ty=my-(my-graphCtx.tr.ty)*d;
-      graphCtx.tr.s=Math.min(3.5,Math.max(0.12,graphCtx.tr.s*d)); graphCtx.draw();
-    }, {passive:false,signal:sig});
+      const rect=canvas.getBoundingClientRect(),mx=e.clientX-rect.left,my=e.clientY-rect.top,d=e.deltaY<0?1.09:0.92;
+      graphCtx.tr.tx=mx-(mx-graphCtx.tr.tx)*d;graphCtx.tr.ty=my-(my-graphCtx.tr.ty)*d;
+      graphCtx.tr.s=Math.min(3.5,Math.max(0.12,graphCtx.tr.s*d));graphCtx.draw();
+    },{passive:false,signal:sig});
 
-    let mdrag=null, dragDist=0;
-    canvas.addEventListener('mousedown', e => { mdrag={sx:e.clientX-graphCtx.tr.tx,sy:e.clientY-graphCtx.tr.ty}; dragDist=0; canvas.classList.add('drag'); }, {signal:sig});
-    window.addEventListener('mousemove', e => {
-      if (!graphCtx) return;
-      const rect=canvas.getBoundingClientRect(), mx=e.clientX-rect.left, my=e.clientY-rect.top;
-      const hit=hitTest(graphCtx.all,mx,my,graphCtx.tr), nid=hit?.id||null;
-      if (nid!==graphCtx.hoverId) { graphCtx.hoverId=nid; graphCtx.draw(); }
-      canvas.style.cursor = mdrag?'grabbing':nid?'pointer':'grab';
-      if (mdrag) { dragDist+=Math.hypot(e.movementX||0,e.movementY||0); graphCtx.tr.tx=e.clientX-mdrag.sx; graphCtx.tr.ty=e.clientY-mdrag.sy; graphCtx.draw(); }
-    }, {signal:sig});
-    window.addEventListener('mouseup', () => { mdrag=null; canvas.classList.remove('drag'); }, {signal:sig});
+    let mdrag=null,dragDist=0;
+    canvas.addEventListener('mousedown',e=>{mdrag={sx:e.clientX-graphCtx.tr.tx,sy:e.clientY-graphCtx.tr.ty};dragDist=0;canvas.classList.add('drag');},{signal:sig});
+    window.addEventListener('mousemove',e=>{
+      if(!graphCtx)return;
+      const rect=canvas.getBoundingClientRect(),mx=e.clientX-rect.left,my=e.clientY-rect.top;
+      const hit=hitTest(graphCtx.all,mx,my,graphCtx.tr),nid=hit?.id||null;
+      if(nid!==graphCtx.hoverId){graphCtx.hoverId=nid;graphCtx.draw();}
+      canvas.style.cursor=mdrag?'grabbing':nid?'pointer':'grab';
+      if(mdrag){dragDist+=Math.hypot(e.movementX||0,e.movementY||0);graphCtx.tr.tx=e.clientX-mdrag.sx;graphCtx.tr.ty=e.clientY-mdrag.sy;graphCtx.draw();}
+    },{signal:sig});
+    window.addEventListener('mouseup',()=>{mdrag=null;canvas.classList.remove('drag');},{signal:sig});
+    canvas.addEventListener('click',e=>{
+      if(dragDist>5){dragDist=0;return;}dragDist=0;
+      const rect=canvas.getBoundingClientRect(),hit=hitTest(graphCtx.all,e.clientX-rect.left,e.clientY-rect.top,graphCtx.tr);
+      if(hit)openPreview(hit,panel);else closePreview(panel);
+    },{signal:sig});
 
-    canvas.addEventListener('click', e => {
-      if (dragDist>5) { dragDist=0; return; } dragDist=0;
-      const rect=canvas.getBoundingClientRect(), hit=hitTest(graphCtx.all,e.clientX-rect.left,e.clientY-rect.top,graphCtx.tr);
-      if (hit) openPreview(hit,panel); else closePreview(panel);
-    }, {signal:sig});
-
-    let lastTouches=null, touchStart=null, panning=false;
-    canvas.addEventListener('touchstart', e => {
+    let lastTouches=null,touchStart=null,panning=false;
+    canvas.addEventListener('touchstart',e=>{
       e.preventDefault();
-      const ts=[...e.touches].map(t=>({x:t.clientX,y:t.clientY})); lastTouches=ts; panning=false;
-      if (e.touches.length===1) {
-        const t=e.touches[0]; touchStart={x:t.clientX,y:t.clientY,time:Date.now()};
-        const rect=canvas.getBoundingClientRect(), hit=hitTest(graphCtx.all,t.clientX-rect.left,t.clientY-rect.top,graphCtx.tr);
-        if ((hit?.id||null)!==graphCtx.hoverId) { graphCtx.hoverId=hit?.id||null; graphCtx.draw(); }
-      } else touchStart=null;
-    }, {passive:false,signal:sig});
-    canvas.addEventListener('touchmove', e => {
+      const ts=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));lastTouches=ts;panning=false;
+      if(e.touches.length===1){
+        const t=e.touches[0];touchStart={x:t.clientX,y:t.clientY,time:Date.now()};
+        const rect=canvas.getBoundingClientRect(),hit=hitTest(graphCtx.all,t.clientX-rect.left,t.clientY-rect.top,graphCtx.tr);
+        if((hit?.id||null)!==graphCtx.hoverId){graphCtx.hoverId=hit?.id||null;graphCtx.draw();}
+      }else touchStart=null;
+    },{passive:false,signal:sig});
+    canvas.addEventListener('touchmove',e=>{
       e.preventDefault();
       const ts=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
-      if (touchStart) { const mv=Math.hypot(ts[0].x-touchStart.x,ts[0].y-touchStart.y); if(mv>8) panning=true; }
-      if (ts.length===1&&lastTouches?.length===1) {
-        graphCtx.tr.tx+=ts[0].x-lastTouches[0].x; graphCtx.tr.ty+=ts[0].y-lastTouches[0].y;
+      if(touchStart){const mv=Math.hypot(ts[0].x-touchStart.x,ts[0].y-touchStart.y);if(mv>8)panning=true;}
+      if(ts.length===1&&lastTouches?.length===1){
+        graphCtx.tr.tx+=ts[0].x-lastTouches[0].x;graphCtx.tr.ty+=ts[0].y-lastTouches[0].y;
         const rect=canvas.getBoundingClientRect();
-        graphCtx.hoverId=hitTest(graphCtx.all,ts[0].x-rect.left,ts[0].y-rect.top,graphCtx.tr)?.id||null; graphCtx.draw();
-      } else if (ts.length===2&&lastTouches?.length===2) {
-        const pd=Math.hypot(lastTouches[1].x-lastTouches[0].x,lastTouches[1].y-lastTouches[0].y), cd=Math.hypot(ts[1].x-ts[0].x,ts[1].y-ts[0].y);
-        if (pd>0) {
-          const d=cd/pd, rect=canvas.getBoundingClientRect(), mx=(ts[0].x+ts[1].x)/2-rect.left, my=(ts[0].y+ts[1].y)/2-rect.top;
-          graphCtx.tr.tx=mx-(mx-graphCtx.tr.tx)*d; graphCtx.tr.ty=my-(my-graphCtx.tr.ty)*d;
-          graphCtx.tr.s=Math.min(3.5,Math.max(0.12,graphCtx.tr.s*d)); graphCtx.draw();
+        graphCtx.hoverId=hitTest(graphCtx.all,ts[0].x-rect.left,ts[0].y-rect.top,graphCtx.tr)?.id||null;graphCtx.draw();
+      }else if(ts.length===2&&lastTouches?.length===2){
+        const pd=Math.hypot(lastTouches[1].x-lastTouches[0].x,lastTouches[1].y-lastTouches[0].y),cd=Math.hypot(ts[1].x-ts[0].x,ts[1].y-ts[0].y);
+        if(pd>0){
+          const d=cd/pd,rect=canvas.getBoundingClientRect(),mx=(ts[0].x+ts[1].x)/2-rect.left,my=(ts[0].y+ts[1].y)/2-rect.top;
+          graphCtx.tr.tx=mx-(mx-graphCtx.tr.tx)*d;graphCtx.tr.ty=my-(my-graphCtx.tr.ty)*d;
+          graphCtx.tr.s=Math.min(3.5,Math.max(0.12,graphCtx.tr.s*d));graphCtx.draw();
         }
       }
       lastTouches=ts;
-    }, {passive:false,signal:sig});
-    canvas.addEventListener('touchend', e => {
+    },{passive:false,signal:sig});
+    canvas.addEventListener('touchend',e=>{
       e.preventDefault();
-      if (touchStart&&!panning&&e.touches.length===0&&e.changedTouches.length===1) {
-        const t=e.changedTouches[0], mv=Math.hypot(t.clientX-touchStart.x,t.clientY-touchStart.y), dt=Date.now()-touchStart.time;
-        if (mv<15&&dt<350) {
-          const rect=canvas.getBoundingClientRect(), hit=hitTest(graphCtx.all,t.clientX-rect.left,t.clientY-rect.top,graphCtx.tr);
-          if (hit) { graphCtx.hoverId=hit.id; graphCtx.draw(); setTimeout(()=>openPreview(hit,panel),60); }
+      if(touchStart&&!panning&&e.touches.length===0&&e.changedTouches.length===1){
+        const t=e.changedTouches[0],mv=Math.hypot(t.clientX-touchStart.x,t.clientY-touchStart.y),dt=Date.now()-touchStart.time;
+        if(mv<15&&dt<350){
+          const rect=canvas.getBoundingClientRect(),hit=hitTest(graphCtx.all,t.clientX-rect.left,t.clientY-rect.top,graphCtx.tr);
+          if(hit){graphCtx.hoverId=hit.id;graphCtx.draw();setTimeout(()=>openPreview(hit,panel),60);}
           else closePreview(panel);
         }
       }
-      touchStart=null; panning=false;
-      if (e.touches.length===0) { lastTouches=null; graphCtx.hoverId=null; graphCtx.draw(); }
+      touchStart=null;panning=false;
+      if(e.touches.length===0){lastTouches=null;graphCtx.hoverId=null;graphCtx.draw();}
       else lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
-    }, {passive:false,signal:sig});
-    canvas.addEventListener('touchcancel', () => {
-      lastTouches=null; touchStart=null; panning=false;
-      if (graphCtx) { graphCtx.hoverId=null; graphCtx.draw(); }
-    }, {passive:false,signal:sig});
+    },{passive:false,signal:sig});
+    canvas.addEventListener('touchcancel',()=>{lastTouches=null;touchStart=null;panning=false;if(graphCtx){graphCtx.hoverId=null;graphCtx.draw();}},{passive:false,signal:sig});
   }
 
   /* ── BUTTON / BOOTSTRAP ──────────────────────────────────────── */
-  const TOOLBAR = '[data-element-id="chat-input-actions"]';
-  function tryInject() {
-    const bar=document.querySelector(TOOLBAR); if(!bar||bar.querySelector('#'+EXT+'-btn'))return;
-    const btn=document.createElement('button'); btn.id=EXT+'-btn'; btn.title='Chat Branch Graph';
+  const TOOLBAR='[data-element-id="chat-input-actions"]';
+  function tryInject(){
+    const bar=document.querySelector(TOOLBAR);if(!bar||bar.querySelector('#'+EXT+'-btn'))return;
+    const btn=document.createElement('button');btn.id=EXT+'-btn';btn.title='Chat Branch Graph';
     btn.innerHTML=`<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="4" cy="4" r="2.2"/><circle cx="16" cy="4" r="2.2"/><circle cx="4" cy="16" r="2.2"/><circle cx="16" cy="16" r="2.2"/><circle cx="10" cy="10" r="2.2"/><line x1="4" y1="4" x2="10" y2="10"/><line x1="16" y1="4" x2="10" y2="10"/><line x1="10" y1="10" x2="4" y2="16"/><line x1="10" y1="10" x2="16" y2="16"/></svg>`;
-    btn.addEventListener('click', openGraph); bar.appendChild(btn);
+    btn.addEventListener('click',openGraph);bar.appendChild(btn);
   }
-  function init() {
-    checkScrollAfterReload(); injectStyles(); tryInject();
-    let r=10; const retry=()=>{ if(document.querySelector('#'+EXT+'-btn'))return; tryInject(); if(--r>0)setTimeout(retry,650); };
+  function init(){
+    checkScrollAfterReload();injectStyles();tryInject();
+    let r=10;const retry=()=>{if(document.querySelector('#'+EXT+'-btn'))return;tryInject();if(--r>0)setTimeout(retry,650);};
     setTimeout(retry,400);
     new MutationObserver(tryInject).observe(document.body,{childList:true,subtree:true});
-    console.log('[TM Chat Graph] ✅ v2.8.0');
+    console.log('[TM Chat Graph] ✅ v2.9.0');
   }
   init();
 })();
