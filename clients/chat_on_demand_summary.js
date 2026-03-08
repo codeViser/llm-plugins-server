@@ -1,39 +1,41 @@
 // ================================================================
-//  TypingMind — Context Summariser Extension              v2.1.0
+//  TypingMind — Context Summariser Extension              v2.2.0
 // ================================================================
 //
-//  CONFIRMED ACTIVE-MESSAGE DETECTION MECHANISM (from live debug):
+//  FIX vs v2.1.0 — message-deletion regression:
 //
-//  TM tracks individual per-message context exclusion via a
-//  `contextClearedAt` timestamp field added to the message object
-//  when the user deselects it from context. Active messages have
-//  NO `contextClearedAt` field (it is absent, not false).
+//  _appendSummary previously used cs.s.messages (React state
+//  snapshot captured at button-press time) as the base for the
+//  IDB write.  The LLM call takes 10-40s.  Any divergence between
+//  that snapshot and the real IDB state during that window caused
+//  a destructive overwrite — messages added/synced during the
+//  LLM call were silently deleted from IDB.
 //
-//  TM also has a block-exclusion mechanism via a
-//  {type:'clear-context'} marker in the messages array (from the
-//  "Clear Context" ⌘⌥J button). Messages before the last such
-//  marker are excluded as a block.
+//  Fix: _appendSummary now opens a single atomic IDB readwrite
+//  transaction, reads the CURRENT authoritative record, appends
+//  the summary message to THAT, and writes back.  The React state
+//  is updated afterwards using a freshly-read fiber state.
+//  The stale cs.s.messages snapshot is never written anywhere.
 //
-//  _getActiveMsgs() handles BOTH mechanisms correctly so that
-//  every summarisation input exactly matches what TM considers
-//  "in context" — regardless of how messages were excluded.
+//  STRICT CONTRACT:
+//    • Only action performed: generate summary → append to chat.
+//    • No messages are ever deleted, filtered, or removed.
+//    • No context inclusion/exclusion is managed by this script.
 //
 //  INSTALL: Preferences → Advanced Settings → Extensions → URL
-//  FIRST RUN: Send any message once (captures API config).
-//  TRIGGER: summarise-icon button in header, or ⌘⌥K / Ctrl+Alt+K
+//  TRIGGER: button in chat header, or ⌘⌥K / Ctrl+Alt+K
 // ================================================================
 
 (() => {
   'use strict';
 
   const ID      = 'tm-summariser';
-  const VERSION = '2.1.0';
+  const VERSION = '2.2.0';
   const ATTR    = `data-${ID}`;
-
   const MAX_CHARS = 80_000;
   const TOOL_MAX  = 1_500;
 
-  /* ── SUMMARISATION PROMPT ──────────────────────────────────── */
+  /* ── PROMPT ─────────────────────────────────────────────────── */
   const PROMPT = `You are resuming an active session that has hit the context window limit. Produce a structured compaction summary that enables a new AI instance to continue this work with minimal information loss.
 
 Write in structured, telegraphic form. This is not a narrative retelling — every token must earn its place.
@@ -148,7 +150,8 @@ Maximum 5 bullets. Omit this section entirely if no aspect is likely to affect t
 Include only what directly affects how to respond going forward: communication depth preference, domain expertise level observed, environment or tooling constraints, and any sensitive context requiring careful handling.`;
 
   /* ══════════════════════════════════════════════════════════════
-   *  FETCH HOOK  —  passive API config capture only
+   *  FETCH HOOK  —  passive API config capture only.
+   *  No filtering, no interception, no message manipulation.
    * ══════════════════════════════════════════════════════════════ */
   const _RAW = window.fetch.bind(window);
   let _BASE      = null;
@@ -204,8 +207,7 @@ Include only what directly affects how to respond going forward: communication d
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  BOOTSTRAP  —  resolve API config from localStorage so the
-   *  button works on pre-existing chats without a dummy message
+   *  BOOTSTRAP  —  resolve API config from TM's custom model store
    * ══════════════════════════════════════════════════════════════ */
   async function _tryBootstrap(chatRecord) {
     const chatID = chatRecord?.chatID ?? chatRecord?.id;
@@ -261,7 +263,7 @@ Include only what directly affects how to respond going forward: communication d
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  REACT FIBER
+   *  REACT FIBER  —  read-only access to live chat state
    * ══════════════════════════════════════════════════════════════ */
   function _chatState() {
     const el = document.querySelector('[data-element-id="chat-space-middle-part"]');
@@ -282,7 +284,8 @@ Include only what directly affects how to respond going forward: communication d
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  IDB
+   *  IDB  —  read helper only
+   *  (_appendSummary handles its own atomic readwrite transaction)
    * ══════════════════════════════════════════════════════════════ */
   const _idb = () => new Promise((ok, no) => {
     const r = indexedDB.open('keyval-store');
@@ -292,76 +295,44 @@ Include only what directly affects how to respond going forward: communication d
   async function _getChat(chatID) {
     const db = await _idb();
     return new Promise((ok, no) => {
-      const req = db.transaction('keyval','readonly').objectStore('keyval').get(`CHAT_${chatID}`);
+      const req = db.transaction('keyval','readonly').objectStore('keyval')
+                    .get(`CHAT_${chatID}`);
       req.onsuccess = () => { db.close(); ok(req.result ?? null); };
       req.onerror   = () => { db.close(); no(req.error); };
     });
   }
 
-  async function _putChat(chatID, messages) {
-    const db = await _idb();
-    return new Promise((ok, no) => {
-      const st  = db.transaction('keyval','readwrite').objectStore('keyval');
-      const key = `CHAT_${chatID}`;
-      const g   = st.get(key);
-      g.onsuccess = () => {
-        if (!g.result) { db.close(); ok(); return; }
-        const w = st.put(
-          { ...g.result, messages, updatedAt: new Date().toISOString() }, key
-        );
-        w.onsuccess = () => { db.close(); ok(); };
-        w.onerror   = () => { db.close(); no(w.error); };
-      };
-      g.onerror = () => { db.close(); no(g.error); };
-    });
-  }
-
   /* ══════════════════════════════════════════════════════════════
-   *  ACTIVE MESSAGE DETECTION  ←  THE CORE FIX IN v2.1.0
+   *  ACTIVE MESSAGE DETECTION
    *
-   *  Confirmed from live debug (Script H output):
+   *  Confirmed mechanisms (from live debug Script H):
    *
-   *  MECHANISM 1 — Individual per-message exclusion
-   *    Field:  message.contextClearedAt
-   *    Value:  Date timestamp set when user individually deselects
-   *            a message from context via TM's selection UI
-   *    Active: field is ABSENT (undefined) on active messages
-   *    Greyed: field is present (truthy Date) on excluded messages
-   *    Scope:  Non-contiguous — any arbitrary set of messages
-   *    Stored: In IDB message object, persists across reload ✓
+   *  1. INDIVIDUAL EXCLUSION — message.contextClearedAt
+   *     Field set to a Date timestamp when the user individually
+   *     deselects a message via TM's per-message selection UI.
+   *     Absent on active messages; truthy on excluded messages.
    *
-   *  MECHANISM 2 — Block exclusion via Clear Context ⌘⌥J
-   *    Marker: {type:'clear-context'} inserted into messages array
-   *    Effect: all messages before the last such marker are excluded
-   *    Scope:  Contiguous block from beginning up to marker
+   *  2. BLOCK EXCLUSION — {type:'clear-context'} marker
+   *     TM's "Clear Context" ⌘⌥J inserts this into the array.
+   *     All messages before the last such marker are excluded.
    *
-   *  A message is ACTIVE if and only if:
-   *    • It appears after the last {type:'clear-context'} marker
-   *      (or there is no such marker), AND
-   *    • Its contextClearedAt field is falsy / absent, AND
-   *    • It has a role field (filters special marker objects)
+   *  This function is used ONLY to build the transcript for the
+   *  LLM call. The filtered array is NEVER written to IDB.
    * ══════════════════════════════════════════════════════════════ */
   function _getActiveMsgs(messages) {
-    // ── Step 1: Handle block exclusion ──────────────────────────
-    // Find the last {type:'clear-context'} marker. Everything before
-    // it (inclusive) is excluded as a block by TM's Clear Context.
+    // Step 1: block exclusion
     let lastClearIdx = -1;
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].type === 'clear-context') { lastClearIdx = i; break; }
     }
-    const afterBlockClear = lastClearIdx >= 0
-      ? messages.slice(lastClearIdx + 1)
-      : messages;
+    const afterBlock = lastClearIdx >= 0 ? messages.slice(lastClearIdx + 1) : messages;
 
-    // ── Step 2: Handle individual exclusion ─────────────────────
-    // Filter out messages that have contextClearedAt set (those are
-    // individually deselected from context by the user via TM's UI).
-    // All remaining messages with a role field are genuinely active.
-    return afterBlockClear.filter(m => m.role && !m.contextClearedAt);
+    // Step 2: individual exclusion (contextClearedAt field)
+    return afterBlock.filter(m => m.role && !m.contextClearedAt);
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  TRANSCRIPT BUILDER  (from active messages only)
+   *  TRANSCRIPT BUILDER  —  read-only, returns a string
    * ══════════════════════════════════════════════════════════════ */
   function _toText(c) {
     if (c === null || c === undefined) return '';
@@ -380,25 +351,16 @@ Include only what directly affects how to respond going forward: communication d
   }
 
   function _buildTranscript(activeMsgs, rec) {
-    const total   = activeMsgs.length;
-    const withRole = activeMsgs.filter(m => m.role).length;
-
     const lines = [
       '===== ACTIVE CONTEXT TRANSCRIPT =====',
       `Chat    : ${rec?.chatTitle ?? '(untitled)'}`,
-      `Active messages: ${withRole} (after block + individual exclusions)`,
+      `Messages: ${activeMsgs.length} (active/non-excluded only)`,
     ];
-
     const sys = rec?.chatParams?.systemMessage;
     if (sys) lines.push(`\n[SYSTEM INSTRUCTION (first 600 chars)]\n${sys.slice(0,600)}${sys.length>600?'…':''}`);
 
     let n = 0;
     for (const m of activeMsgs) {
-      // m has already passed the _getActiveMsgs filter:
-      //   • role is present
-      //   • contextClearedAt is absent
-      //   • not before the last clear-context marker
-
       const role = m.role.toLowerCase();
       const label =
         role === 'user'      ? '👤 USER'        :
@@ -407,7 +369,6 @@ Include only what directly affects how to respond going forward: communication d
         role === 'system'    ? '⚙️  SYSTEM'      : role.toUpperCase();
 
       let body = _toText(m.content);
-
       if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
         m.tool_calls.forEach(tc => {
           const nm = tc.function?.name ?? tc.name ?? '?';
@@ -415,15 +376,12 @@ Include only what directly affects how to respond going forward: communication d
           body += `\n[→ Tool: ${nm}(${typeof ar==='string'?ar:JSON.stringify(ar)})]`;
         });
       }
-
       if (role === 'tool' && body.length > TOOL_MAX)
-        body = body.slice(0, TOOL_MAX) + `\n[…${(body.length-TOOL_MAX).toLocaleString()} chars omitted]`;
-
+        body = body.slice(0, TOOL_MAX) + `\n[…${(body.length-TOOL_MAX).toLocaleString()} chars]`;
       if (!body.trim()) continue;
       lines.push(`\n[${++n}] ${label}:\n${body}`);
     }
-
-    lines.push(`\n===== END OF ACTIVE CONTEXT (${n} messages) =====`);
+    lines.push(`\n===== END (${n} messages) =====`);
     return lines.join('\n');
   }
 
@@ -437,8 +395,7 @@ Include only what directly affects how to respond going forward: communication d
 
     const { model, params } = cfg;
     const base = { ...params };
-    delete base.tool_choice;
-    delete base.parallel_tool_calls;
+    delete base.tool_choice; delete base.parallel_tool_calls;
 
     const usesCompletion = base.max_completion_tokens !== undefined;
     const tokenKey = usesCompletion ? 'max_completion_tokens' : 'max_tokens';
@@ -452,15 +409,13 @@ Include only what directly affects how to respond going forward: communication d
         {
           role    : 'user',
           content :
-            '[CONVERSATION_CONTEXT_LIMIT_REACHED]\n\n' +
-            'Summarise the following active context window strictly per your system instructions.\n\n' +
-            transcript,
+            '[CONVERSATION_CONTEXT_LIMIT_REACHED]\n\nSummarise the following active ' +
+            'context window strictly per your system instructions.\n\n' + transcript,
         },
       ],
     };
 
     _log('→ API:', model, '| params:', JSON.stringify(base));
-
     const res = await _RAW(_BASE.url, {
       method  : 'POST',
       headers : { ..._BASE.hdrs, 'Content-Type': 'application/json' },
@@ -469,12 +424,10 @@ Include only what directly affects how to respond going forward: communication d
 
     if (!res.ok) {
       let d = ''; try { d = await res.text(); } catch (_) {}
-      _errLog('Failed body:\n', JSON.stringify(reqBody, null, 2));
       throw new Error(`API ${res.status} — ${d.slice(0, 250)}`);
     }
 
     const data = await res.json();
-    // Explicit parens on Anthropic branch prevent ??/:? precedence bug
     const text =
         data?.choices?.[0]?.message?.content
      ?? (Array.isArray(data?.content) ? data.content.find(b => b?.type==='text')?.text : null)
@@ -482,45 +435,87 @@ Include only what directly affects how to respond going forward: communication d
      ?? null;
 
     if (!text?.trim())
-      throw new Error('Model returned empty content. Raw: ' + JSON.stringify(data).slice(0, 300));
+      throw new Error('Model returned empty content. Raw: ' + JSON.stringify(data).slice(0,300));
     return text;
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  APPEND SUMMARY
-   *  Appends to the FULL messages array (active + excluded alike)
-   *  so the summary appears at the bottom of the chat regardless
-   *  of which messages are currently greyed out.
+   *  APPEND SUMMARY  ←  THE CORE FIX IN v2.2.0
+   *
+   *  This function's ONLY job: append ONE new message to the chat.
+   *  It MUST NOT delete, overwrite, filter, or modify any existing
+   *  messages.
+   *
+   *  HOW THE BUG WAS INTRODUCED (v2.1.0 and earlier):
+   *    _appendSummary received `cs` (the full React state snapshot
+   *    captured at button-press time) and did:
+   *      const updated = [...cs.s.messages, summaryMsg]
+   *      _putChat(chatID, updated)
+   *    The LLM call takes 10-40s. During that window, TM may sync
+   *    with cloud, save new messages, or modify state. The stale
+   *    cs.s.messages snapshot would overwrite those changes in IDB,
+   *    silently deleting messages added or synced during the call.
+   *
+   *  THE FIX:
+   *    Open a single atomic IDB readwrite transaction.
+   *    Read the CURRENT authoritative record inside the transaction.
+   *    Append the summary to THAT — never to a stale snapshot.
+   *    Write back within the same transaction.
+   *    cs / React state is never used for the message array write.
    * ══════════════════════════════════════════════════════════════ */
   const _uid = () =>
     crypto.randomUUID ? crypto.randomUUID()
     : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
         const r = Math.random()*16|0; return (c==='x'?r:r&3|8).toString(16); });
 
-  async function _appendSummary(cs, rawSummary) {
-    const { s, d } = cs;
+  async function _appendSummary(chatID, rawSummary) {
     const now = new Date().toISOString();
     const ts  = new Date().toLocaleString();
 
     const summaryMsg = {
       uuid      : _uid(),
       role      : 'assistant',
-      content   :
-        `**[🗜️ Context Summary]** · *${ts}*\n\n` +
-        `---\n\n` +
-        rawSummary,
+      content   : `**[🗜️ Context Summary]** · *${ts}*\n\n---\n\n` + rawSummary,
       createdAt : now,
     };
 
-    // Append to full array → summary visible at bottom of entire chat
-    const updated = [...s.messages, summaryMsg];
+    // ── Atomic IDB read → append → write ─────────────────────────
+    // Opening a single readwrite transaction ensures the read and
+    // write are serialised by the IDB engine — no race with TM's
+    // own saves can corrupt the message list.
+    const db = await _idb();
+    const updated = await new Promise((ok, no) => {
+      const st  = db.transaction('keyval', 'readwrite').objectStore('keyval');
+      const key = `CHAT_${chatID}`;
+      const g   = st.get(key);
 
-    // IDB first — persists across reloads and cloud sync
-    await _putChat(s.chatID, updated);
+      g.onsuccess = () => {
+        const record = g.result;
+        if (!record) { db.close(); no(new Error(`Chat record not found: ${chatID}`)); return; }
 
-    // React dispatch — immediate visual update in current session
-    try { d?.({ ...s, messages: updated, updatedAt: now }); }
-    catch (e) { _warnLog('dispatch failed (reload to see summary):', e.message); }
+        // currentMessages is the authoritative list as of RIGHT NOW.
+        // Appending here guarantees no messages are lost regardless
+        // of what happened during the preceding LLM call.
+        const currentMessages = record.messages ?? [];
+        const updatedMessages  = [...currentMessages, summaryMsg];  // append only
+
+        const w = st.put({ ...record, messages: updatedMessages, updatedAt: now }, key);
+        w.onsuccess = () => { db.close(); ok(updatedMessages); };
+        w.onerror   = () => { db.close(); no(w.error); };
+      };
+      g.onerror = () => { db.close(); no(g.error); };
+    });
+
+    _log(`Summary appended. Chat now has ${updated.length} messages in IDB.`);
+
+    // ── React dispatch — best-effort immediate visual update ──────
+    // Re-read the fiber state AFTER the IDB write to ensure we're
+    // working with the current React state, not an old snapshot.
+    const freshCs = _chatState();
+    if (freshCs?.s?.chatID === chatID) {
+      try { freshCs.d?.({ ...freshCs.s, messages: updated, updatedAt: now }); }
+      catch (e) { _warnLog('dispatch failed (page reload will show summary):', e.message); }
+    }
   }
 
   /* ══════════════════════════════════════════════════════════════
@@ -535,31 +530,34 @@ Include only what directly affects how to respond going forward: communication d
       _toast('⚠️ Wait for the AI to finish first.', 'warn'); return;
     }
 
-    const allMsgs    = cs.s.messages;
-    const activeMsgs = _getActiveMsgs(allMsgs);
+    const chatID   = cs.s.chatID;
+    const allMsgs  = cs.s.messages;
 
+    // Build transcript from active (non-excluded) messages.
+    // This uses the React state snapshot at button-press time which
+    // is correct: we're summarising the context AS IT WAS when the
+    // user pressed the button.
+    const activeMsgs = _getActiveMsgs(allMsgs);
     if (activeMsgs.length < 1) {
       _toast('ℹ️ No active messages in context — nothing to summarise.', 'info'); return;
     }
 
-    // Bootstrap API config from localStorage if not yet captured
-    if (!_BASE || !(_CHAT_CFGS[cs.s.chatID] ?? _CHAT_CFGS['_latest'])) {
+    // Bootstrap API config if not yet captured via fetch interceptor
+    if (!_BASE || !(_CHAT_CFGS[chatID] ?? _CHAT_CFGS['_latest'])) {
       _toast('⏳ Resolving API config…', 'info');
-      const rec = await _getChat(cs.s.chatID).catch(() => null);
-      await _tryBootstrap(rec ?? { chatID: cs.s.chatID, model: cs.s.model });
+      const chatRec = await _getChat(chatID).catch(() => null);
+      await _tryBootstrap(chatRec ?? { chatID, model: cs.s.model });
     }
-
     if (!_BASE) {
-      _toast('⚠️ No API config — send one message first, then retry.', 'warn', 7000);
-      return;
+      _toast('⚠️ No API config — send one message first, then retry.', 'warn', 7000); return;
     }
 
     _btnLoading(btn, true);
     try {
       _toast(`📖 Reading ${activeMsgs.length} active messages…`, 'info');
-      const rec = await _getChat(cs.s.chatID).catch(() => null);
+      const chatRec = await _getChat(chatID).catch(() => null);
 
-      let tx = _buildTranscript(activeMsgs, rec);
+      let tx = _buildTranscript(activeMsgs, chatRec);
       if (tx.length > MAX_CHARS) {
         const cut = tx.length - MAX_CHARS;
         tx = `[…${cut.toLocaleString()} chars of earlier active content omitted]\n\n` + tx.slice(-MAX_CHARS);
@@ -567,14 +565,18 @@ Include only what directly affects how to respond going forward: communication d
       }
 
       _toast('🧠 Generating summary… (may take 10–40 s)', 'info', 60_000);
-      const summary = await _callLLM(tx, cs.s.chatID);
+      const summary = await _callLLM(tx, chatID);
 
-      _toast('✅ Saving summary…', 'info');
-      await _appendSummary(cs, summary);
+      _toast('✅ Appending summary to chat…', 'info');
+
+      // Pass chatID only — _appendSummary reads IDB itself, never
+      // uses cs.s.messages. This is the protection against the
+      // stale-snapshot message-deletion regression.
+      await _appendSummary(chatID, summary);
 
       _toast(
-        `✅ Summary appended (${activeMsgs.length} active msgs summarised). ` +
-        `Use TM's selection tools to manage context.`,
+        `✅ Summary appended (${activeMsgs.length} active msgs). ` +
+        `Manage context manually via TM's selection tools.`,
         'success', 7000
       );
     } catch (err) {
@@ -586,10 +588,7 @@ Include only what directly affects how to respond going forward: communication d
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  BUTTON
-   *  Icon: text lines converging to a single output point —
-   *  "many messages → one summary". Confirmed position from
-   *  Script D: inserted before the headlessui More-actions wrapper.
+   *  BUTTON  — confirmed position and class from v2.0 debug
    * ══════════════════════════════════════════════════════════════ */
   const ICON = `<svg class="w-[18px] h-[18px]" viewBox="0 0 18 18"
     fill="none" stroke="currentColor" stroke-width="1.5"
@@ -618,7 +617,7 @@ Include only what directly affects how to respond going forward: communication d
 
   function _btnLoading(btn, on) {
     if (on)  { btn.disabled=true;  btn._h=btn.innerHTML; btn.innerHTML=SPIN; }
-    else     { btn.disabled=false; if(btn._h){btn.innerHTML=btn._h; delete btn._h;} }
+    else     { btn.disabled=false; if(btn._h){btn.innerHTML=btn._h;delete btn._h;} }
   }
 
   function _injectBtn() {
@@ -628,7 +627,6 @@ Include only what directly affects how to respond going forward: communication d
     const moreTrigger = header.querySelector('[data-tooltip-content="More actions"]');
     if (!moreTrigger) return false;
     const insertBefore = moreTrigger.closest('[data-headlessui-state]') ?? moreTrigger;
-
     const btn = document.createElement('button');
     btn.setAttribute(ATTR, '1');
     btn.setAttribute('data-tooltip-id', 'global');
@@ -667,14 +665,12 @@ Include only what directly affects how to respond going forward: communication d
       document.body.appendChild(el);
     }
     el.style.background = _PAL[type] ?? _PAL.info;
-    el.textContent      = msg;
-    el.style.opacity    = '1';
-    clearTimeout(_tid);
-    _tid = setTimeout(() => { el.style.opacity = '0'; }, ms);
+    el.textContent = msg; el.style.opacity = '1';
+    clearTimeout(_tid); _tid = setTimeout(() => { el.style.opacity='0'; }, ms);
   }
 
   /* ══════════════════════════════════════════════════════════════
-   *  LOGGING + DEBUG HELPER
+   *  LOGGING + DEBUG
    * ══════════════════════════════════════════════════════════════ */
   const P = `[${ID} v${VERSION}]`;
   const _log    = (...a) => console.info(P,  ...a);
@@ -685,24 +681,19 @@ Include only what directly affects how to respond going forward: communication d
     const cs  = _chatState();
     const all = cs?.s?.messages ?? [];
     const act = _getActiveMsgs(all);
-
+    const indivEx = all.filter(m => m.contextClearedAt).length;
     let lastCI = -1;
     for (let i = all.length-1; i>=0; i--) {
       if (all[i].type==='clear-context') { lastCI=i; break; }
     }
-
-    const blockExcluded = lastCI >= 0 ? lastCI : 0;
-    const indivExcluded = all.filter(m => m.contextClearedAt).length;
-
     console.group(P + ' State');
-    console.log('API base           :', _BASE ? `✅ ${_BASE.url}` : '❌ not captured');
-    console.log('Model config       :', _CHAT_CFGS[cs?.s?.chatID]?.model ?? _CHAT_CFGS['_latest']?.model ?? '❌ not captured');
-    console.log('Total messages     :', all.length);
-    console.log('Block-excluded     :', blockExcluded > 0 ? `${blockExcluded} (before last clear-context marker at index ${lastCI})` : 'none');
-    console.log('Individually excluded (contextClearedAt) :', indivExcluded);
-    console.log('Active (will be summarised) :', act.length);
-    console.log('Active message UUIDs:',
-                act.map(m => ({ role: m.role, uuid: m.uuid?.slice(-8) })));
+    console.log('API base      :', _BASE ? `✅ ${_BASE.url}` : '❌ not captured');
+    console.log('Model         :', _CHAT_CFGS[cs?.s?.chatID]?.model ?? _CHAT_CFGS['_latest']?.model ?? '❌');
+    console.log('chatID        :', cs?.s?.chatID);
+    console.log('Total messages:', all.length);
+    console.log('Block-excluded:', lastCI >= 0 ? `${lastCI + 1} (before clear-context at [${lastCI}])` : 'none');
+    console.log('Indiv-excluded (contextClearedAt):', indivEx);
+    console.log('Active (for summarisation):', act.length);
     console.groupEnd();
   };
 
@@ -711,7 +702,6 @@ Include only what directly affects how to respond going forward: communication d
    * ══════════════════════════════════════════════════════════════ */
   function _boot() {
     _hookFetch();
-
     if (!_injectBtn()) {
       const obs = new MutationObserver(() => { if (_injectBtn()) obs.disconnect(); });
       obs.observe(document.body, { childList: true, subtree: true });
@@ -719,7 +709,6 @@ Include only what directly affects how to respond going forward: communication d
     new MutationObserver(() => {
       if (!document.querySelector(`[${ATTR}]`)) _injectBtn();
     }).observe(document.body, { childList: true, subtree: true });
-
     _log('Loaded. window.__tmsum_debug() to inspect.');
   }
 
