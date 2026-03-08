@@ -4,32 +4,26 @@
 //  Changes from v2.8.0:
 //
 //  1. Summary Detection (Bug Fix)
-//     Old .includes() check was fragile — any message mentioning
-//     the tag was falsely detected. New rule: opening tag must
-//     appear within the first 300 chars of trimmed content AND
-//     the closing tag must be the final text. Supports both the
-//     <CONVERSATION_SUMMARY> and <CONVERSATIONAL_SUMMARY> spellings.
+//     Opening tag must appear within first 300 chars AND closing
+//     tag must be final content. Supports both tag spellings.
 //
 //  2. Color System Redesign (Three-Dimensional)
-//     Dimension A — Type (base hue, always recognizable):
-//       User → Green  |  AI → Blue  |  Tool → Slate  |  Summary → Purple
-//     Dimension B — Chain (brightness):
-//       Active = full color  |  Inactive = muted/dark
-//     Dimension C — Context (brightness within active chain only):
-//       In-context = full  |  OOC = dimmed  |  Partial = intermediate (tool only)
-//     All states are variants of the same hue — type identity
-//     is preserved across every combination.
+//     Dim A — Type: User=Green | AI=Blue | Tool=Slate | Summary=Purple
+//     Dim B — Chain: Active (full) | Inactive (muted)
+//     Dim C — Context (active chain only):
+//       In-context = full  |  OOC = dimmed
+//     Tool calls in the active chain use exactly two states:
+//       In-context (bright slate) and Out-of-context (mid slate).
+//       Partial OOC is treated the same as full OOC — coloured
+//       identically and labelled "out of context (partial)".
+//     Brightness order:  inactive < active-OOC < active-in-ctx
 //
 //  3. Legend Redesign
-//     Grouped into Types and State Modifiers — short, scannable,
-//     no per-combination entries.
+//     Grouped into Types and State Modifiers.
 //
-//  Bug fix (v2.9.0 patch): corrected unclosed string literal in
-//  doRender label computation that caused a parse-time SyntaxError
-//  preventing the entire script from running (no button injection).
-//
-//  No changes to scroll/locate, navigation, branch switching,
-//  view-state, or any other functional behaviour from v2.7.0.
+//  Bug fix: corrected unclosed string literal in doRender that
+//  caused a parse-time SyntaxError (no button injection in v2.9.0
+//  initial release).
 // ================================================================
 (() => {
   'use strict';
@@ -247,8 +241,7 @@
   function closeMinimapPanel() {
     if (!document.querySelector('[data-element-id="chat-minimap-content"]')) return;
     const t = document.querySelector('[data-element-id="chat-space-middle-part"]') ||
-              document.querySelector('[data-element-id="chat-body"]') ||
-              document.querySelector('main');
+              document.querySelector('[data-element-id="chat-body"]') || document.querySelector('main');
     if (t) { t.click(); return; }
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
   }
@@ -301,14 +294,13 @@
     let phase = 1, p1 = 0, p2 = 0, mmTried = false;
 
     const onFound = (tag, method) => {
-      showLocateToast(`Locate: ${tag ? tag + ' → ' : ''}${method} ✓`, 'ok');
+      showLocateToast(`Locate: ${tag ? tag + ' \u2192 ' : ''}${method} \u2713`, 'ok');
       if (highlight) setTimeout(() => scrollToMessage(uuid, true), 250);
     };
 
     const tick = () => {
       const res = scrollToMessage(uuid, false);
       if (res.ok) { onFound(phase === 2 ? 'idx-jump' : phase === 3 ? 'minimap' : '', res.method); return; }
-
       if (phase === 1) {
         if (++p1 < 3) { setTimeout(tick, 80); return; }
         phase = 2;
@@ -316,28 +308,19 @@
           const t = computeJumpTarget(scroller, idxInfo.idx, idxInfo.total);
           if (t != null) scroller.scrollTo({ top: t, behavior: 'auto' });
         }
-        setTimeout(tick, 300);
-        return;
+        setTimeout(tick, 300); return;
       }
-
-      if (phase === 2) {
-        if (++p2 < 6) { setTimeout(tick, 200); return; }
-        phase = 3;
-      }
-
+      if (phase === 2) { if (++p2 < 6) { setTimeout(tick, 200); return; } phase = 3; }
       if (!mmTried) {
         mmTried = true;
         if (rawContent) {
           tryMinimapNavigation(uuid, rawContent).then(ok => {
-            if (ok) { showLocateToast('Locate: minimap ✓', 'ok'); setTimeout(() => scrollToMessage(uuid, true), 1500); }
+            if (ok) { showLocateToast('Locate: minimap \u2713', 'ok'); setTimeout(() => scrollToMessage(uuid, true), 1500); }
             else { showLocateToast('Locate: failed', 'err'); }
           });
-        } else {
-          showLocateToast('Locate: failed (not in DOM)', 'err');
-        }
+        } else { showLocateToast('Locate: failed (not in DOM)', 'err'); }
       }
     };
-
     requestAnimationFrame(() => requestAnimationFrame(tick));
   }
 
@@ -395,7 +378,6 @@
       .${EXT}-sbadge.ooc         { color:#e07040;background:rgba(224,112,64,.1);border-color:rgba(224,112,64,.3); }
       .${EXT}-sbadge.summary     { color:#a855f7;background:rgba(168,85,247,.1);border-color:rgba(168,85,247,.3); }
       .${EXT}-sbadge.ooc-summary { color:#7040b8;background:rgba(112,64,184,.1);border-color:rgba(112,64,184,.28); }
-      .${EXT}-sbadge.partial-ooc { color:#3c7488;background:rgba(60,116,136,.1);border-color:rgba(60,116,136,.28); }
       .${EXT}-divider { display:flex;align-items:center;gap:8px;margin:12px 0 10px; }
       .${EXT}-divider::before,.${EXT}-divider::after { content:'';flex:1;height:1px;background:rgba(255,255,255,.12); }
       .${EXT}-divider-label { font-size:8.5px;font-weight:700;color:rgba(255,255,255,.3);letter-spacing:1.3px;text-transform:uppercase;white-space:nowrap; }
@@ -477,7 +459,7 @@
         if (!prev) { db.close(); res(); return; }
         const p = st.put({ ...prev, messages: msgs, updatedAt: new Date() }, key);
         p.onsuccess = () => { db.close(); res(); };
-        p.onerror = () => { db.close(); rej(p.error); };
+        p.onerror  = () => { db.close(); rej(p.error); };
       };
       g.onerror = () => { db.close(); rej(g.error); };
     });
@@ -486,17 +468,13 @@
   /* ── TEXT / CLASSIFY ─────────────────────────────────────────── */
   const extractText = c => !c ? '' : typeof c === 'string' ? c : Array.isArray(c) ? c.map(x => x?.text ?? x?.content ?? '').join(' ') : '';
   function classifyMsg(m) {
-    if (m.role === 'user') return 'user';
-    if (m.role === 'tool') return 'tool';
+    if (m.role === 'user')      return 'user';
+    if (m.role === 'tool')      return 'tool';
     if (m.role === 'assistant') return (m.tool_calls?.length > 0) ? 'tool' : 'ai';
     return 'tool';
   }
 
   /* ── CONTEXT / SUMMARY HELPERS ───────────────────────────────── */
-
-  // Opening tag must appear within the first 300 chars AND closing tag must
-  // be the last content — prevents false positives from messages that merely
-  // mention or discuss the tag. Both spellings of the tag are accepted.
   function isSummaryMessage(content) {
     const text = extractText(content).trim();
     const variants = [
@@ -519,54 +497,49 @@
     return 'partial';
   }
 
-  /* ── COLOUR SYSTEM (v2.9: three-dimensional, systematic) ──────
-   *
+  /* ── COLOUR SYSTEM ───────────────────────────────────────────── */
+  /*
    *  PALETTE — per-node style lookup
    *    Dim A  type:    user(green) | asst(blue) | tool(slate) | summ(purple)
    *    Dim B  chain:   active (full) | inactive (muted)
-   *    Dim C  context: in-ctx (full) | ooc (dimmed) | partial (tool only)
+   *    Dim C  context: in-ctx (full) | ooc (dimmed)             [active only]
    *
-   *  Each entry: { bg, bd, bbg, bbc }
-   *    bg  — node background fill
-   *    bd  — border / accent colour
-   *    bbg — badge pill background
-   *    bbc — badge pill text colour
+   *  Tool calls — exactly two active states (change from v2.8):
+   *    tool_a_in   bright slate  — fully in context
+   *    tool_a_out  mid slate     — not fully in context (partial OR full OOC)
+   *    tool_i      dark slate    — inactive chain (unchanged)
    *
-   *  All states for a given type share the same base hue, varying
-   *  only in brightness — type identity stays legible in all states.
-   * ─────────────────────────────────────────────────────────────── */
+   *  Brightness order:  tool_i < tool_a_out < tool_a_in
+   *  Each step is +30/+36/+40 per RGB channel — symmetric, clear.
+   */
   const PALETTE = {
-    // ── USER  (Green  #00c896) ────────────────────────────────────
+    // ── USER  (Green  #00c896) — UNCHANGED ───────────────────────
     user_a_in:  { bg: '#004d3a', bd: '#00c896', bbg: 'rgba(0,200,150,.18)',  bbc: '#00c896' },
     user_a_out: { bg: '#002a20', bd: '#006b50', bbg: 'rgba(0,107,80,.16)',   bbc: '#00975e' },
     user_i:     { bg: '#0d1e18', bd: '#1a3328', bbg: 'rgba(26,51,40,.3)',    bbc: '#2a5040' },
 
-    // ── ASSISTANT  (Blue  #18a8d8) ────────────────────────────────
+    // ── ASSISTANT  (Blue  #18a8d8) — UNCHANGED ───────────────────
     asst_a_in:  { bg: '#09344a', bd: '#18a8d8', bbg: 'rgba(24,168,216,.18)', bbc: '#18a8d8' },
     asst_a_out: { bg: '#051c28', bd: '#0d5a78', bbg: 'rgba(13,90,120,.16)',  bbc: '#107898' },
     asst_i:     { bg: '#0b1e28', bd: '#143040', bbg: 'rgba(20,48,64,.3)',    bbc: '#1e4058' },
 
-    // ── TOOL CALLS  (Slate  #5a7080) ──────────────────────────────
-    tool_a_in:  { bg: '#242c34', bd: '#5a7080', bbg: 'rgba(90,112,128,.18)', bbc: '#5a7080' },
-    tool_a_par: { bg: '#1c2428', bd: '#3e5864', bbg: 'rgba(62,88,100,.16)',  bbc: '#3e6070' },
-    tool_a_out: { bg: '#141a1e', bd: '#2e404a', bbg: 'rgba(46,64,74,.16)',   bbc: '#3a5060' },
-    tool_i:     { bg: '#0f1418', bd: '#1e2830', bbg: 'rgba(30,40,48,.28)',   bbc: '#283848' },
+    // ── TOOL CALLS  (Slate) — TWO ACTIVE STATES ──────────────────
+    //   bd steps:  #1e2830 → +30/+36/+40 → #3c4c58 → +30/+36/+40 → #5a7080
+    tool_a_in:  { bg: '#242c34', bd: '#5a7080', bbg: 'rgba(90,112,128,.18)', bbc: '#5a7080' }, // bright — in context
+    tool_a_out: { bg: '#1a2026', bd: '#3c4c58', bbg: 'rgba(60,76,88,.16)',   bbc: '#3c4c58' }, // mid    — not fully in context
+    tool_i:     { bg: '#0f1418', bd: '#1e2830', bbg: 'rgba(30,40,48,.28)',   bbc: '#283848' }, // dark   — inactive chain
 
-    // ── SUMMARY  (Purple  #a855f7) ────────────────────────────────
+    // ── SUMMARY  (Purple  #a855f7) — UNCHANGED ───────────────────
     summ_a_in:  { bg: '#220a40', bd: '#a855f7', bbg: 'rgba(168,85,247,.18)', bbc: '#a855f7' },
     summ_a_out: { bg: '#14062a', bd: '#5a2ea0', bbg: 'rgba(90,46,160,.16)',  bbc: '#7040c0' },
     summ_i:     { bg: '#0c0618', bd: '#2a1040', bbg: 'rgba(42,16,64,.28)',   bbc: '#381848' },
   };
 
-  // Edge / text / interaction colours (not node-type specific)
+  // Interaction / edge / text colours — UNCHANGED
   const C = {
-    eA:  '#00c896',              // active chain edge
-    eI:  'rgba(40,60,70,.5)',    // inactive chain edge
-    txA: '#e9edef',              // active node label text
-    txI: '#3a5262',              // inactive node label text
-    hov: '#f59e0b',              // hover highlight
-    dot: '#f59e0b',              // branch point dot
-    sel: '#3b82f6'               // selected node border
+    eA:  '#00c896', eI:  'rgba(40,60,70,.5)',
+    txA: '#e9edef', txI: '#3a5262',
+    hov: '#f59e0b', dot: '#f59e0b', sel: '#3b82f6'
   };
 
   function getNodeStyle(n) {
@@ -574,24 +547,24 @@
     const isActiveOoc = active && isOoc;
 
     if (isMeta) {
-      if (!active)                  return PALETTE.tool_i;
-      if (contextStatus === 'out')  return PALETTE.tool_a_out;
-      if (contextStatus === 'partial') return PALETTE.tool_a_par;
+      if (!active)                return PALETTE.tool_i;
+      // Two states only: in-context = bright, anything else = mid (OOC)
+      if (contextStatus !== 'in') return PALETTE.tool_a_out;
       return PALETTE.tool_a_in;
     }
     if (isSummary) {
-      if (!active)      return PALETTE.summ_i;
-      if (isActiveOoc)  return PALETTE.summ_a_out;
+      if (!active)     return PALETTE.summ_i;
+      if (isActiveOoc) return PALETTE.summ_a_out;
       return PALETTE.summ_a_in;
     }
     if (role === 'user') {
-      if (!active)      return PALETTE.user_i;
-      if (isActiveOoc)  return PALETTE.user_a_out;
+      if (!active)     return PALETTE.user_i;
+      if (isActiveOoc) return PALETTE.user_a_out;
       return PALETTE.user_a_in;
     }
     if (role === 'ai') {
-      if (!active)      return PALETTE.asst_i;
-      if (isActiveOoc)  return PALETTE.asst_a_out;
+      if (!active)     return PALETTE.asst_i;
+      if (isActiveOoc) return PALETTE.asst_a_out;
       return PALETTE.asst_a_in;
     }
     return active ? PALETTE.tool_a_in : PALETTE.tool_i;
@@ -614,7 +587,7 @@
     }
     return toolMsgs.length === 1 ? '1 tool call' : `${toolMsgs.length} tool calls`;
   }
-  function escH(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  function escH(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
   function buildMetaPreviewHtml(toolMsgs) {
     const parts = toolMsgs.map(m => {
       if (m.role === 'assistant' && m.tool_calls?.length > 0) {
@@ -623,14 +596,14 @@
           let args = '';
           try { args = JSON.stringify(JSON.parse(tc.function?.arguments || '{}'), null, 2); }
           catch (_) { args = tc.function?.arguments || ''; }
-          const ap = args.slice(0, 400) + (args.length > 400 ? '\n…' : '');
+          const ap = args.slice(0, 400) + (args.length > 400 ? '\n\u2026' : '');
           return `<div class="tmg-meta-fn">${escH(nm)}()</div>${ap ? `<div class="tmg-meta-args">${escH(ap)}</div>` : ''}`;
         }).join('');
-        return `<div class="tmg-meta-group"><div class="tmg-meta-section-label tmg-meta-invoke-label">🔧 Tool Invoke</div>${calls}</div>`;
+        return `<div class="tmg-meta-group"><div class="tmg-meta-section-label tmg-meta-invoke-label">\uD83D\uDD27 Tool Invoke</div>${calls}</div>`;
       }
       if (m.role === 'tool') {
         const raw = extractText(m.content), p = raw.slice(0, 350);
-        return `<div class="tmg-meta-group"><div class="tmg-meta-section-label tmg-meta-result-label">📤 Tool Result</div><div class="tmg-meta-output">${escH(p)}${raw.length > 350 ? '\n…' : ''}</div></div>`;
+        return `<div class="tmg-meta-group"><div class="tmg-meta-section-label tmg-meta-result-label">\uD83D\uDCE4 Tool Result</div><div class="tmg-meta-output">${escH(p)}${raw.length > 350 ? '\n\u2026' : ''}</div></div>`;
       }
       return '';
     }).filter(Boolean).join('');
@@ -641,7 +614,7 @@
     if (!text.trim()) return '<em style="opacity:.45">(empty)</em>';
     if (typeof window.marked !== 'undefined') { try { return window.marked.parse(text); } catch (_) {} }
     return text
-      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
       .replace(/```([\s\S]*?)```/g, (_, c) => `<pre><code>${c}</code></pre>`)
       .replace(/`([^`\n]+)`/g, (_, c) => `<code>${c}</code>`)
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -655,7 +628,6 @@
     const m = msgs[start];
     const cls = classifyMsg(m);
 
-    // Collapse consecutive tool run into one META node
     if (cls === 'tool') {
       let end = start;
       const toolMsgs = [];
@@ -674,8 +646,7 @@
       return [metaNode];
     }
 
-    // Normal (non-tool) node
-    const isOoc = !!(m.contextClearedAt);
+    const isOoc    = !!(m.contextClearedAt);
     const isSummary = cls === 'ai' && isSummaryMessage(m.content);
     const node = {
       id: m.uuid, role: cls,
@@ -775,7 +746,6 @@
     ctx.scale(dpr, dpr); ctx.clearRect(0, 0, W, H);
     ctx.save(); ctx.translate(tr.tx, tr.ty); ctx.scale(tr.s, tr.s);
 
-    // Edges
     edges.forEach(e => {
       ctx.beginPath(); ctx.moveTo(e.fx, e.fy);
       const m = (e.fy + e.ty) / 2; ctx.bezierCurveTo(e.fx, m, e.tx, m, e.tx, e.ty);
@@ -783,31 +753,26 @@
       ctx.setLineDash(e.active ? [] : [6, 4]); ctx.stroke(); ctx.setLineDash([]);
     });
 
-    // Nodes — active drawn on top
     const sorted = [...all].sort((a, b) => a.active === b.active ? 0 : a.active ? -1 : 1);
     sorted.forEach(n => {
       const ia = n.active, isMeta = !!n.isMeta;
       const isSel = n.id === selectedId, isHov = n.id === hoverId && !isSel;
 
-      // Per-node style from three-dimensional palette lookup
       const sty = getNodeStyle(n);
       const bg  = sty.bg;
       const bdr = isSel ? C.sel : isHov ? C.hov : sty.bd;
 
-      // Node fill + shadow
       ctx.shadowColor = 'rgba(0,0,0,.35)'; ctx.shadowBlur = isSel ? 22 : isHov ? 14 : ia ? 6 : 3; ctx.shadowOffsetY = isSel ? 5 : 2;
       rr(ctx, n.x, n.y, n.w, n.h, 10); ctx.fillStyle = bg; ctx.fill();
       ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0;
 
-      // Border (dashed for collapsed tool meta)
       if (isMeta) ctx.setLineDash([5, 3]);
       rr(ctx, n.x, n.y, n.w, n.h, 10);
       ctx.strokeStyle = bdr; ctx.lineWidth = (isSel || isHov) ? 2.5 : (ia ? 1.5 : 1);
       ctx.stroke(); ctx.setLineDash([]);
 
-      // Badge — "SUM" for summary, "×N" for meta, role label otherwise
-      const badgeText = isMeta       ? `\u00d7${n.toolMessages.length}` :
-                        n.isSummary  ? 'SUM' :
+      const badgeText = isMeta      ? `\u00d7${n.toolMessages.length}` :
+                        n.isSummary ? 'SUM' :
                         n.role === 'user' ? 'USER' :
                         n.role === 'ai'   ? 'AI'   : 'TOOL';
       const badgeW = isMeta ? 28 : n.isSummary ? 26 : (n.role === 'user' ? 34 : n.role === 'ai' ? 20 : 32);
@@ -817,19 +782,16 @@
       ctx.font = `bold ${isMeta ? 8.5 : 7.5}px system-ui`; ctx.textAlign = 'left';
       ctx.fillText(badgeText, n.x + 11, n.y + 16.5);
 
-      // Label — "∑ " prefix for summary, "⚙ " for meta
-      // FIXED: was `':')` (unclosed string literal); now correctly `+ ''`
       ctx.fillStyle = ia ? C.txA : C.txI;
       ctx.font = `${ia ? 500 : 400} 10px system-ui`;
+      // FIXED: split into two statements to avoid unclosed-string bug
       const pfx = isMeta ? '\u2699 ' : n.isSummary ? '\u2211 ' : '';
       let lbl = pfx + (n.label || '(empty)');
       const maxW = n.w - 16;
       while (ctx.measureText(lbl).width > maxW && lbl.length > 6) lbl = lbl.slice(0, -4) + '\u2026';
       ctx.fillText(lbl, n.x + 8, n.y + 38);
 
-      // Branch point dot
       if (n.variants?.length) { ctx.fillStyle = C.dot; ctx.beginPath(); ctx.arc(n.x + n.w - 8, n.y + 8, 4, 0, Math.PI * 2); ctx.fill(); }
-      // Multi-step depth indicator
       if (!ia && n.switchPath?.length > 1) {
         ctx.fillStyle = 'rgba(245,158,11,.7)'; ctx.font = 'bold 8px system-ui'; ctx.textAlign = 'right';
         ctx.fillText(`${n.switchPath.length}\u2193`, n.x + n.w - 5, n.y + n.h - 6);
@@ -893,7 +855,6 @@
     const upNode   = getActiveParentNode(node);
     const downNode = getActiveChildNode(node);
 
-    // Head: role label uses palette accent colour, purple for summary
     const sty = getNodeStyle(node);
     const dotClr = sty.bd;
     const roleLabel = isMeta
@@ -910,14 +871,19 @@
       <button class="pclose-btn" title="Close preview (Esc)" style="background:none;border:none;cursor:pointer;color:#8696a0;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;flex-shrink:0">\u2715</button>`;
     phead.querySelector('.pclose-btn').onclick = () => closePreview(panelEl);
 
-    // Status badge
     let badgeClass, badgeText;
     if (isMeta) {
       if (ia) {
-        const cs = node.contextStatus;
-        if      (cs === 'out')     { badgeClass = 'ooc';         badgeText = '\u2699 Tools \u2014 \u2298 all out of context'; }
-        else if (cs === 'partial') { badgeClass = 'partial-ooc'; badgeText = '\u2699 Tools \u2014 \u25d1 partial out of context'; }
-        else                       { badgeClass = 'meta';        badgeText = '\u2699 Aggregated tool calls (active chain)'; }
+        // Two states only: fully in context, or out of context (any degree)
+        if (node.contextStatus !== 'in') {
+          badgeClass = 'ooc';
+          badgeText = node.contextStatus === 'partial'
+            ? '\u2699 Tools \u2014 \u2298 out of context (partial)'
+            : '\u2699 Tools \u2014 \u2298 out of context';
+        } else {
+          badgeClass = 'meta';
+          badgeText = '\u2699 Aggregated tool calls (active chain)';
+        }
       } else {
         badgeClass = 'meta';
         badgeText = `\u2699 ${steps > 1 ? steps + ' switches to activate' : '1 switch to activate'}`;
@@ -949,7 +915,6 @@
       <div class="${EXT}-divider"><span class="${EXT}-divider-label">${isMeta ? 'Tool Call Details' : 'Message Content'}</span></div>
       ${contentHtml}`;
 
-    // Footer: nav row → divider → action → close
     const pfoot = panelEl.querySelector('.pfoot');
     pfoot.innerHTML = '';
 
@@ -985,7 +950,6 @@
     const cb = document.createElement('button'); cb.className = EXT + '-pbtn muted';
     cb.textContent = 'Close Preview'; cb.onclick = () => closePreview(panelEl);
     pfoot.appendChild(cb);
-
     panelEl.classList.add('open');
   }
 
@@ -1054,7 +1018,7 @@
       <button id="${EXT}-xbtn" title="Close \u2014 no changes (Esc)">\u2715</button>`;
 
     const leg = document.createElement('div'); leg.id = EXT + '-leg';
-    // v2.9: grouped legend — Types | Chain | Context | Graph nav
+    // Legend updated: "Partial OOC" replaced with "Tools OOC" at the new mid-slate colour
     leg.innerHTML = `
       <span class="${EXT}-leg-label">Types</span>
       <span><span class="${EXT}-dot" style="background:#00c896"></span>User</span>
@@ -1075,9 +1039,9 @@
         <span class="${EXT}-dot" style="background:#006b50;margin-left:3px"></span>
         In-ctx / OOC
       </span>
-      <span title="Tools: some messages in context, some out">
-        <span class="${EXT}-dotdash" style="border-color:#3e5864"></span>
-        Partial OOC
+      <span title="Active tool calls — not fully in context (partial or full)">
+        <span class="${EXT}-dotdash" style="border-color:#3c4c58"></span>
+        Tools OOC
       </span>
       <span class="${EXT}-leg-div"></span>
       <span><span class="${EXT}-dot" style="background:#f59e0b"></span>Branch</span>
@@ -1098,7 +1062,6 @@
     document.body.appendChild(overlay);
 
     const ac = new AbortController(), sig = ac.signal;
-    // draw() only — never recentres so user zoom is always preserved
     const ro = new ResizeObserver(() => requestAnimationFrame(() => { graphCtx?.draw(); }));
     ro.observe(wrap);
 
@@ -1108,14 +1071,13 @@
       centre() {
         const W = canvas.clientWidth, H = canvas.clientHeight; if (!W || !H) return;
         const cW = this.bounds.maxX - this.bounds.minX + 120, cH = this.bounds.maxY - 60 + 120;
-        this.tr.s = Math.max(0.2, Math.min(1.3, Math.min(W / cW, H / cH)));
+        this.tr.s  = Math.max(0.2, Math.min(1.3, Math.min(W / cW, H / cH)));
         this.tr.tx = (W - cW * this.tr.s) / 2 - this.bounds.minX * this.tr.s + 60 * this.tr.s;
         this.tr.ty = (H - cH * this.tr.s) / 2 - 60 * this.tr.s + 60 * this.tr.s;
       },
       draw() { doRender(canvas, this.all, this.edges, this.tr, this.hoverId, this.selectedId); }
     };
 
-    // Restore saved view OR fall back to auto-fit — runs once on open
     requestAnimationFrame(() => {
       const didRestore = restoreViewState(panel);
       if (!didRestore) { graphCtx.centre(); graphCtx.draw(); }
@@ -1141,7 +1103,7 @@
       const rect = canvas.getBoundingClientRect(), mx = e.clientX - rect.left, my = e.clientY - rect.top, d = e.deltaY < 0 ? 1.09 : 0.92;
       graphCtx.tr.tx = mx - (mx - graphCtx.tr.tx) * d;
       graphCtx.tr.ty = my - (my - graphCtx.tr.ty) * d;
-      graphCtx.tr.s = Math.min(3.5, Math.max(0.12, graphCtx.tr.s * d));
+      graphCtx.tr.s  = Math.min(3.5, Math.max(0.12, graphCtx.tr.s * d));
       graphCtx.draw();
     }, { passive: false, signal: sig });
 
