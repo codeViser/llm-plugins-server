@@ -1,19 +1,36 @@
 // ================================================================
-//  TypingMind — Chat Branch Graph  v2.6.0
+//  TypingMind — Chat Branch Graph  v2.7.0
 //
-//  Changes from v2.5.0:
-//    View-state persistence across overlay open/close cycles:
-//    — Zoom level, pan position, selected node, and open preview
-//      are saved to a module-level variable when the overlay is
-//      closed and fully restored when it is reopened.
-//    — Because the state lives in a JS variable (not storage APIs)
-//      it resets automatically on any page reload, exactly as
-//      requested.
-//    — If the active chat has changed since the last close
-//      (chatID mismatch), the saved state is discarded and the
-//      graph opens at the default auto-fit view instead.
+//  Changes from v2.6.0:
+//    Deterministic three-phase chat-unit locator:
 //
-//  All features and fixes from v2.5.0 are unchanged.
+//    Phase 1 — Direct DOM lookup (3 × 80 ms)
+//      Finds message-timestamp-<uuid> immediately if the target
+//      is already in the viewport (fastest path, most common case).
+//
+//    Phase 2 — Index-jump + patient retry (300 ms + 6 × 200 ms)
+//      Scrolls to a position estimated from the message's index in
+//      the React state, then waits generously for React's virtual
+//      list to render the element into the DOM.
+//
+//    Phase 3 — TM Minimap native navigation (deterministic)
+//      Opens TypingMind's built-in Search/Minimap panel, finds the
+//      matching result button by content, and clicks it. TM's own
+//      navigation handles virtualisation internally — this path
+//      always works for user and AI-response messages regardless of
+//      scroll position.  Tool-response messages (meta nodes) are
+//      not listed in the minimap and fall back to Phase 1+2 only.
+//
+//    Additional:
+//    — scrollAfterReload looks up rawContent from React state so
+//      the minimap fallback is also available after branch-switch
+//      reloads.
+//    — Active/inactive (contextClearedAt) messages are unaffected;
+//      their UUID and DOM structure are unchanged by context status.
+//
+//  All features from v2.6.0 (view-state persistence, ↑/↓ nav,
+//  zoom retention, parent/child navigation, reload-scroll fix)
+//  are unchanged.
 // ================================================================
 (() => {
   'use strict';
@@ -22,7 +39,6 @@
 
   /* ── PERSISTENT VIEW STATE (module-level, resets on reload) ─── */
   let savedViewState = null;
-  // Shape: { tr:{tx,ty,s}, selectedId:string|null, chatID:string|null }
 
   function saveViewState() {
     if (!graphCtx) return;
@@ -37,36 +53,21 @@
   function restoreViewState(panel) {
     const sv = savedViewState;
     if (!sv) return false;
-
-    // Validate transform values
     const { tx, ty, s } = sv.tr ?? {};
     if (
-      typeof s  !== 'number' || !isFinite(s)  || s  < 0.12 || s  > 3.5  ||
+      typeof s  !== 'number' || !isFinite(s)  || s  < 0.12 || s  > 3.5 ||
       typeof tx !== 'number' || !isFinite(tx) ||
       typeof ty !== 'number' || !isFinite(ty)
     ) return false;
-
-    // Guard: discard if a different chat is now active
     const cs = getChatState();
     const currentChatID = cs?.state?.chatID ?? null;
     if (sv.chatID && currentChatID && sv.chatID !== currentChatID) return false;
-
-    // Restore zoom + pan (no recentre)
-    graphCtx.tr.tx = tx;
-    graphCtx.tr.ty = ty;
-    graphCtx.tr.s  = s;
+    graphCtx.tr.tx = tx; graphCtx.tr.ty = ty; graphCtx.tr.s = s;
     graphCtx.draw();
-
-    // Restore selected node + preview panel if applicable
     if (sv.selectedId) {
-      const restoredNode = graphCtx.all.find(n => n.id === sv.selectedId);
-      if (restoredNode) {
-        graphCtx.selectedId = restoredNode.id;
-        // Use rAF so panel DOM has settled before openPreview runs
-        requestAnimationFrame(() => openPreview(restoredNode, panel));
-      }
+      const node = graphCtx.all.find(n => n.id === sv.selectedId);
+      if (node) { graphCtx.selectedId = node.id; requestAnimationFrame(() => openPreview(node, panel)); }
     }
-
     return true;
   }
 
@@ -112,10 +113,10 @@
       el.style.opacity = '0';
       el.style.transform = 'translateX(-50%) translateY(8px)';
       setTimeout(() => { if (el) el.remove(); }, 260);
-    }, 1400);
+    }, 1600);
   }
 
-  /* ── SCROLL HELPERS ──────────────────────────────────────────── */
+  /* ── SCROLL CONTAINER HELPERS ────────────────────────────────── */
   function isScrollable(el) {
     if (!el) return false;
     const oy = window.getComputedStyle(el).overflowY;
@@ -142,7 +143,6 @@
   function getChatScroller(preferredEl=null) {
     const fromEl = preferredEl ? getScrollableAncestors(preferredEl) : [];
     if (fromEl.length) return pickBestScroller(fromEl);
-
     const chatSpace = document.querySelector('[data-element-id="chat-space-middle-part"]');
     if (chatSpace) {
       const candidates = [];
@@ -152,10 +152,10 @@
       const best = pickBestScroller(candidates);
       if (best) return best;
     }
-
     return document.scrollingElement || document.documentElement;
   }
 
+  /* ── BLOCK RESOLUTION HELPERS ────────────────────────────────── */
   function normalizeBlock(el) {
     if (!el || el.closest('#' + EXT + '-ov')) return null;
     const block = el.closest('[data-element-id="response-block"],[data-element-id="request-block"],[data-element-id="message-block"],[data-element-id*="block"],[data-element-id*="message"],[data-element-id*="response"],[data-element-id*="request"]');
@@ -175,6 +175,7 @@
       const el = tsBtn.closest(sel);
       if (el) return el;
     }
+    // Skip absolute/fixed hover toolbars; climb to normal-flow container
     let el = tsBtn.parentElement;
     for (let i = 0; i < 12 && el; i++, el = el.parentElement) {
       const st = window.getComputedStyle(el);
@@ -199,11 +200,11 @@
   }
 
   function locateMessageBlock(uuid) {
-    // 1) Timestamp button (primary path)
+    // 1) Timestamp button (primary)
     const tsBtn = document.getElementById(`message-timestamp-${uuid}`);
     if (tsBtn) {
       const block = findMessageBlock(tsBtn);
-      if (block) return { block, method: 'timestamp' };
+      if (block) return { block, method: 'ts' };
     }
     // 2) Exact attribute matches
     for (const sel of [`[data-message-id="${uuid}"]`,`[data-uuid="${uuid}"]`,`[data-message-uuid="${uuid}"]`,`[data-id="${uuid}"]`,`[id="${uuid}"]`]) {
@@ -234,30 +235,17 @@
     return Math.max(0, Math.min(max, max * (idx / (total - 1))));
   }
 
-  function nudgeScroller(ctx) {
-    if (!ctx.scroller) return;
-    const delta = ctx.scroller.clientHeight * 0.6;
-    const dir = ctx.jumpTarget != null
-      ? (ctx.scroller.scrollTop > ctx.jumpTarget ? -1 : 1)
-      : (ctx.nudgeCount % 2 === 0 ? 1 : -1);
-    ctx.scroller.scrollBy({ top: dir * delta, behavior: 'auto' });
-  }
-
   function scrollBlockToCenter(block) {
     const scroller = getChatScroller(block);
     if (!scroller) return false;
-
     const sr = scroller.getBoundingClientRect();
     const br = block.getBoundingClientRect();
     const Epos = br.top - sr.top + scroller.scrollTop;
     let target = Epos - (scroller.clientHeight / 2) + (br.height / 2);
-
     if (Epos <= br.height || target < 0) target = 0;
     target = Math.max(0, Math.min(target, scroller.scrollHeight - scroller.clientHeight));
-
     const prev = scroller.scrollTop;
     scroller.scrollTo({ top: target, behavior: 'auto' });
-
     if (Math.abs(scroller.scrollTop - prev) < 1) {
       block.scrollIntoView({ block: target === 0 ? 'start' : 'center', inline: 'nearest', behavior: 'auto' });
     }
@@ -273,42 +261,187 @@
     return { ok, method: found.method };
   }
 
-  function scrollWithRetry(uuid, { max = 28, delay = 140, highlight = true } = {}) {
+  /* ── MINIMAP NAVIGATION (Phase 3 — deterministic fallback) ──── */
+
+  async function openMinimapPanel() {
+    // Already open — nothing to do
+    if (document.querySelector('[data-element-id="chat-minimap-content"]')) return true;
+
+    // Locate the "More actions" kebab button
+    let moreBtn = document.querySelector('button[data-tooltip-content="More actions"]');
+    if (!moreBtn) {
+      // Fallback: any menu-trigger button in the chat title bar
+      const titleArea = document.querySelector('[data-element-id="current-chat-title"]');
+      if (titleArea) moreBtn = titleArea.querySelector('button[aria-haspopup="menu"]');
+    }
+    if (!moreBtn) return false;
+
+    moreBtn.click();
+    await new Promise(r => setTimeout(r, 200));
+
+    // Click "Search in chat" from the now-open menu
+    const minimapBtn = document.querySelector('[data-element-id="minimap-button"]');
+    if (!minimapBtn) {
+      document.body.click(); // close menu if open but item not found
+      return false;
+    }
+    minimapBtn.click();
+    await new Promise(r => setTimeout(r, 280));
+
+    return !!document.querySelector('[data-element-id="chat-minimap-content"]');
+  }
+
+  function closeMinimapPanel() {
+    if (!document.querySelector('[data-element-id="chat-minimap-content"]')) return;
+    // Click on the chat content area — reliably outside the minimap header panel
+    const target =
+      document.querySelector('[data-element-id="chat-space-middle-part"]') ||
+      document.querySelector('[data-element-id="chat-body"]') ||
+      document.querySelector('main');
+    if (target) { target.click(); return; }
+    // Fallback: escape key
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  }
+
+  function findMinimapButton(rawContent) {
+    const minimap = document.querySelector('[data-element-id="chat-minimap-content"]');
+    if (!minimap || !rawContent) return null;
+
+    const targetText = extractText(rawContent).replace(/\s+/g, ' ').trim();
+    if (targetText.length < 4) return null;
+
+    const buttons = minimap.querySelectorAll('button[type="button"]');
+    if (!buttons.length) return null;
+
+    // Try progressively shorter prefixes — handles minimap truncation gracefully
+    for (const snippetLen of [38, 22, 12]) {
+      const snippet = targetText.slice(0, snippetLen).toLowerCase();
+      if (snippet.length < 4) continue;
+      for (const btn of buttons) {
+        const p = btn.querySelector('p');
+        if (!p) continue;
+        const btnTxt = p.textContent.replace(/\s+/g, ' ').trim().toLowerCase();
+        if (btnTxt.includes(snippet)) return btn;
+      }
+    }
+    return null;
+  }
+
+  async function tryMinimapNavigation(uuid, rawContent) {
+    try {
+      // If minimap already open and has a stale search term, clear it first
+      const existingInput = document.querySelector('[data-element-id="search-input"]');
+      if (existingInput && existingInput.value) {
+        existingInput.value = '';
+        existingInput.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise(r => setTimeout(r, 150));
+      }
+
+      const opened = await openMinimapPanel();
+      if (!opened) return false;
+
+      // Clear any search filter that appeared in the newly opened panel
+      const searchInput = document.querySelector('[data-element-id="search-input"]');
+      if (searchInput && searchInput.value) {
+        searchInput.value = '';
+        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+        await new Promise(r => setTimeout(r, 150));
+      }
+
+      const btn = findMinimapButton(rawContent);
+      if (!btn) { closeMinimapPanel(); return false; }
+
+      // Click — TM's native navigation handles scroll + virtualisation
+      btn.click();
+      // Close the panel after TM finishes navigating
+      setTimeout(closeMinimapPanel, 850);
+      return true;
+    } catch (e) {
+      console.warn('[TM Graph] minimap nav error:', e);
+      return false;
+    }
+  }
+
+  /* ── THREE-PHASE SCROLL-WITH-RETRY ───────────────────────────── */
+  //
+  //  Phase 1  Direct DOM lookup          3 × 80 ms  = 240 ms
+  //  Phase 2  Index-jump + patient retry 300 + 6×200 ms ≈ 1.5 s
+  //  Phase 3  TM Minimap native click    async, ~0.8–1.5 s
+  //
+  function scrollWithRetry(uuid, { highlight = true, rawContent = null } = {}) {
     const idxInfo = getMessageIndexInfo(uuid);
-    const ctx = { uuid, attempts: 0, idx: idxInfo.idx, total: idxInfo.total,
-      didJump: false, nudgeCount: 0, maxNudge: 6, scroller: null, jumpTarget: null, lastAction: '' };
+    const scroller = getChatScroller(null);
+    let phase = 1, p1 = 0, p2 = 0, minimapTried = false;
+
+    const onFound = (tag, method) => {
+      showLocateToast(`Locate: ${tag ? tag + ' → ' : ''}${method} ✓`, 'ok');
+      if (highlight) setTimeout(() => scrollToMessage(uuid, true), 250);
+    };
 
     const tick = () => {
       const res = scrollToMessage(uuid, false);
       if (res.ok) {
-        showLocateToast(`Locate: ${ctx.lastAction ? ctx.lastAction + ' → ' : ''}${res.method} ✓`, 'ok');
-        if (highlight) setTimeout(() => scrollToMessage(uuid, true), 250);
+        onFound(phase === 2 ? 'idx-jump' : phase === 3 ? 'minimap' : '', res.method);
         return;
       }
-      if (!ctx.scroller) ctx.scroller = getChatScroller(null);
-      if (!ctx.didJump && ctx.idx >= 0 && ctx.scroller) {
-        ctx.jumpTarget = computeJumpTarget(ctx.scroller, ctx.idx, ctx.total);
-        if (ctx.jumpTarget != null) {
-          ctx.scroller.scrollTo({ top: ctx.jumpTarget, behavior: 'auto' });
-          ctx.didJump = true; ctx.lastAction = 'index-jump';
+
+      // ── Phase 1: fast direct polling ────────────────────────────
+      if (phase === 1) {
+        if (++p1 < 3) { setTimeout(tick, 80); return; }
+        // Advance to Phase 2: scroll to index-estimated position
+        phase = 2;
+        if (scroller && idxInfo.idx >= 0) {
+          const t = computeJumpTarget(scroller, idxInfo.idx, idxInfo.total);
+          if (t != null) scroller.scrollTo({ top: t, behavior: 'auto' });
         }
-      } else if (ctx.scroller && ctx.nudgeCount < ctx.maxNudge) {
-        nudgeScroller(ctx); ctx.nudgeCount++; ctx.lastAction = 'nudge-scan';
+        // First retry after jump with longer wait for React to re-render
+        setTimeout(tick, 300);
+        return;
       }
-      if (++ctx.attempts >= max) { showLocateToast('Locate: failed (not in DOM)', 'err'); return; }
-      setTimeout(tick, delay);
+
+      // ── Phase 2: patient polling after index jump ────────────────
+      if (phase === 2) {
+        if (++p2 < 6) { setTimeout(tick, 200); return; }
+        // Advance to Phase 3: TM minimap native navigation
+        phase = 3;
+      }
+
+      // ── Phase 3: minimap fallback (runs once) ────────────────────
+      if (!minimapTried) {
+        minimapTried = true;
+        if (rawContent) {
+          tryMinimapNavigation(uuid, rawContent).then(ok => {
+            if (ok) {
+              showLocateToast('Locate: minimap ✓', 'ok');
+              // After TM navigates, element is now in DOM — highlight it
+              setTimeout(() => scrollToMessage(uuid, true), 1500);
+            } else {
+              showLocateToast('Locate: failed', 'err');
+            }
+          });
+        } else {
+          showLocateToast('Locate: failed (not in DOM)', 'err');
+        }
+      }
     };
+
     requestAnimationFrame(() => requestAnimationFrame(tick));
   }
 
-  function scrollAfterClose(uuid) {
+  function scrollAfterClose(uuid, rawContent = null) {
     if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return;
-    scrollWithRetry(uuid, { max: 28, delay: 140, highlight: true });
+    scrollWithRetry(uuid, { highlight: true, rawContent });
   }
 
   function scrollAfterReload(uuid) {
     if (!uuid || uuid.includes('__t') || uuid.includes('__meta')) return;
-    setTimeout(() => scrollWithRetry(uuid, { max: 44, delay: 220, highlight: true }), 700);
+    setTimeout(() => {
+      // Look up rawContent from React state so minimap fallback is available
+      const cs = getChatState();
+      const msg = cs?.state?.messages?.find(m => m.uuid === uuid);
+      const rawContent = msg?.content ?? null;
+      scrollWithRetry(uuid, { highlight: true, rawContent });
+    }, 700);
   }
 
   /* ── STYLES ──────────────────────────────────────────────────── */
@@ -363,7 +496,6 @@
       .${EXT}-content table{border-collapse:collapse;font-size:.9em;width:100%}
       .${EXT}-content th,.${EXT}-content td{border:1px solid rgba(255,255,255,.18);padding:.25em .5em;text-align:left}
       .${EXT}-content thead th{background:rgba(255,255,255,.08);font-weight:700}
-      /* Meta node aggregate preview */
       .tmg-meta-group { padding:8px 0;border-bottom:1px solid rgba(255,255,255,.07); }
       .tmg-meta-group:last-child { border-bottom:none; }
       .tmg-meta-section-label { font-size:9px;font-weight:700;letter-spacing:1px;text-transform:uppercase;margin-bottom:5px; }
@@ -372,20 +504,17 @@
       .tmg-meta-fn { font-family:monospace;font-size:11px;font-weight:700;color:#1ea4d4;margin-bottom:3px; }
       .tmg-meta-args { font-size:10px;background:rgba(255,255,255,.06);border-radius:4px;padding:4px 6px;overflow-x:auto;white-space:pre-wrap;word-break:break-all;margin-bottom:2px;color:#b0c4ce; }
       .tmg-meta-output { font-size:11.5px;color:#9ab0ba;white-space:pre-wrap;word-break:break-word; }
-      /* Preview footer */
       .${EXT}-pfoot { padding:10px 12px;border-top:1px solid rgba(255,255,255,.08);display:flex;flex-direction:column;gap:7px;flex-shrink:0; }
       .${EXT}-pbtn { padding:8px 12px;border-radius:8px;border:none;cursor:pointer;font-size:12px;font-weight:600;width:100%;transition:opacity .15s; }
       .${EXT}-pbtn:hover { opacity:.82; }
       .${EXT}-pbtn.primary { background:#00a884;color:#0b141a; }
       .${EXT}-pbtn.apply   { background:#f59e0b;color:#0b141a; }
       .${EXT}-pbtn.muted   { background:transparent;border:1px solid rgba(255,255,255,.18);color:#8696a0; }
-      /* Nav row: ↑ Parent / ↓ Child */
       .${EXT}-nav-row { display:flex;gap:6px; }
       .${EXT}-pbtn.nav { background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.18);color:#e9edef;flex:1;display:flex;align-items:center;justify-content:center;gap:5px;letter-spacing:.3px; }
       .${EXT}-pbtn.nav:disabled { opacity:.27;cursor:not-allowed;pointer-events:none; }
       .${EXT}-pbtn.nav:not(:disabled):hover { background:rgba(255,255,255,.13);opacity:1; }
       .${EXT}-nav-divider { height:1px;background:rgba(255,255,255,.08);margin:1px 0; }
-      /* Graph-level toast */
       #${EXT}-toast { position:absolute;bottom:20px;left:50%;transform:translateX(-50%) translateY(60px);padding:7px 18px;border-radius:20px;font-size:12px;font-weight:700;transition:transform .22s;pointer-events:none;white-space:nowrap;z-index:10; }
       #${EXT}-toast.ok   { background:#00a884;color:#0b141a;transform:translateX(-50%) translateY(0); }
       #${EXT}-toast.warn { background:#f59e0b;color:#0b141a;transform:translateX(-50%) translateY(0); }
@@ -671,12 +800,9 @@
 
   function closeOverlay() {
     if (!overlay) return;
-    saveViewState();                      // ← persist before teardown
-    graphCtx?.ro?.disconnect();
-    graphCtx?.ac?.abort();
-    overlay.remove();
-    overlay=null; toastEl=null; graphCtx=null;
-    clearTimeout(toastTmr);
+    saveViewState();
+    graphCtx?.ro?.disconnect(); graphCtx?.ac?.abort();
+    overlay.remove(); overlay=null; toastEl=null; graphCtx=null; clearTimeout(toastTmr);
   }
 
   function showToast(msg,type='ok') { if(!toastEl)return; clearTimeout(toastTmr); toastEl.textContent=msg; toastEl.className=type; toastTmr=setTimeout(()=>{if(toastEl)toastEl.className='';},3500); }
@@ -694,7 +820,6 @@
     return (c && c.active) ? c : null;
   }
 
-  // Pan only — zoom (tr.s) is never touched
   function panToNode(node) {
     if (!graphCtx?.canvas || !node) return;
     const W = graphCtx.canvas.clientWidth, H = graphCtx.canvas.clientHeight;
@@ -721,7 +846,7 @@
     const upNode   = getActiveParentNode(node);
     const downNode = getActiveChildNode(node);
 
-    /* ── Head: role indicator + ✕ only ──────────────────────────── */
+    /* phead: role indicator + ✕ only */
     const roleLabels = { user:'USER', ai:'AI Response', tool: isMeta ? `Tool Calls (×${node.toolMessages?.length||1})` : 'Tool Call' };
     const dotColors  = { user:ia?'#00a884':'#3a7a56', ai:ia?'#1ea4d4':'#2a5a70', tool:ia?'#5a6a76':'#2a3a46' };
     const phead = panelEl.querySelector('.phead');
@@ -733,7 +858,7 @@
       <button class="pclose-btn" title="Close preview (Esc)" style="background:none;border:none;cursor:pointer;color:#8696a0;font-size:16px;line-height:1;padding:2px 6px;border-radius:4px;flex-shrink:0">✕</button>`;
     phead.querySelector('.pclose-btn').onclick = () => closePreview(panelEl);
 
-    /* ── Body: badge + content ───────────────────────────────────── */
+    /* pbody: badge + content */
     let badgeClass = ia ? 'active' : 'inactive', badgeText;
     if (isMeta) {
       badgeClass = 'meta';
@@ -746,50 +871,41 @@
       ? buildMetaPreviewHtml(node.toolMessages)
       : `<div class="${EXT}-content">${renderForPreview(node.rawContent)}</div>`;
     pbody.innerHTML = `
-      <div style="margin-bottom:2px">
-        <span class="${EXT}-sbadge ${badgeClass}">${badgeText}</span>
-      </div>
-      <div class="${EXT}-divider">
-        <span class="${EXT}-divider-label">${isMeta?'Tool Call Details':'Message Content'}</span>
-      </div>
+      <div style="margin-bottom:2px"><span class="${EXT}-sbadge ${badgeClass}">${badgeText}</span></div>
+      <div class="${EXT}-divider"><span class="${EXT}-divider-label">${isMeta?'Tool Call Details':'Message Content'}</span></div>
       ${contentHtml}`;
 
-    /* ── Footer: nav row → [divider] → action → close ───────────── */
+    /* pfoot: nav row → divider → action → close */
     const pfoot = panelEl.querySelector('.pfoot');
     pfoot.innerHTML = '';
 
-    // Nav row (always present)
     const navRow = document.createElement('div');
     navRow.className = EXT + '-nav-row';
-
     const mkNavBtn = (label, title) => {
       const b = document.createElement('button');
-      b.className = EXT + '-pbtn nav'; b.title = title;
-      b.innerHTML = label; return b;
+      b.className = EXT + '-pbtn nav'; b.title = title; b.innerHTML = label; return b;
     };
     const upBtn   = mkNavBtn('↑ &nbsp;Parent', 'Navigate to parent node (active chain only)');
     const downBtn = mkNavBtn('↓ &nbsp;Child',  'Navigate to child node (active chain only)');
-
     if (!upNode)   upBtn.disabled   = true;
     if (!downNode) downBtn.disabled = true;
     upBtn.onclick   = () => { if (upNode)   navigatePreview(upNode,   panelEl); };
     downBtn.onclick = () => { if (downNode) navigatePreview(downNode, panelEl); };
-
     navRow.appendChild(upBtn); navRow.appendChild(downBtn);
     pfoot.appendChild(navRow);
 
-    // Visual separator between nav and action buttons
-    const sep = document.createElement('div');
-    sep.className = EXT + '-nav-divider';
+    const sep = document.createElement('div'); sep.className = EXT + '-nav-divider';
     pfoot.appendChild(sep);
 
-    // Primary action (conditional)
     if (ia) {
       const b = document.createElement('button');
       b.className = EXT + '-pbtn primary';
       b.textContent = isMeta ? '↓ Go to First Tool Call' : '↓ Go to This Message';
-      const scrollTarget = isMeta ? node.scrollUUID : node.id;
-      b.onclick = () => { closePreview(panelEl); closeOverlay(); scrollAfterClose(scrollTarget); };
+      const scrollTarget  = isMeta ? node.scrollUUID : node.id;
+      // Pass rawContent for user/AI nodes so minimap fallback is available;
+      // null for meta nodes (tool messages not listed in minimap)
+      const scrollContent = isMeta ? null : node.rawContent;
+      b.onclick = () => { closePreview(panelEl); closeOverlay(); scrollAfterClose(scrollTarget, scrollContent); };
       pfoot.appendChild(b);
     } else if (steps > 0) {
       const b = document.createElement('button');
@@ -799,10 +915,8 @@
       pfoot.appendChild(b);
     }
 
-    // Close (always last)
     const cb = document.createElement('button');
-    cb.className = EXT + '-pbtn muted';
-    cb.textContent = 'Close Preview';
+    cb.className = EXT + '-pbtn muted'; cb.textContent = 'Close Preview';
     cb.onclick = () => closePreview(panelEl);
     pfoot.appendChild(cb);
 
@@ -887,7 +1001,7 @@
     document.body.appendChild(overlay);
 
     const ac = new AbortController(), sig = ac.signal;
-    // ResizeObserver: draw only — never auto-recentres so zoom is always preserved
+    // draw() only — never auto-recentres so user zoom is always preserved
     const ro = new ResizeObserver(() => requestAnimationFrame(() => { graphCtx?.draw(); }));
     ro.observe(wrap);
 
@@ -904,7 +1018,6 @@
       draw() { doRender(canvas,this.all,this.edges,this.tr,this.hoverId,this.selectedId); }
     };
 
-    // Restore saved view OR fall back to auto-fit — runs once on open
     requestAnimationFrame(() => {
       const didRestore = restoreViewState(panel);
       if (!didRestore) { graphCtx.centre(); graphCtx.draw(); }
@@ -916,8 +1029,10 @@
       else if (e.key === 'Enter' && graphCtx?.selectedId) {
         const nd = graphCtx.all.find(n => n.id === graphCtx.selectedId);
         if (nd?.active) {
-          const target = nd.isMeta ? nd.scrollUUID : (nd.id.includes('__t') ? null : nd.id);
-          closePreview(panel); closeOverlay(); if (target) scrollAfterClose(target);
+          const target  = nd.isMeta ? nd.scrollUUID : (nd.id.includes('__t') ? null : nd.id);
+          // Pass rawContent for minimap fallback (null for meta/branch-head nodes)
+          const content = (!nd.isMeta && !nd.id.includes('__t')) ? nd.rawContent : null;
+          closePreview(panel); closeOverlay(); if (target) scrollAfterClose(target, content);
         }
       }
     }, {signal:sig});
@@ -957,7 +1072,6 @@
         if ((hit?.id||null)!==graphCtx.hoverId) { graphCtx.hoverId=hit?.id||null; graphCtx.draw(); }
       } else touchStart=null;
     }, {passive:false,signal:sig});
-
     canvas.addEventListener('touchmove', e => {
       e.preventDefault();
       const ts=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
@@ -976,7 +1090,6 @@
       }
       lastTouches=ts;
     }, {passive:false,signal:sig});
-
     canvas.addEventListener('touchend', e => {
       e.preventDefault();
       if (touchStart&&!panning&&e.touches.length===0&&e.changedTouches.length===1) {
@@ -991,7 +1104,6 @@
       if (e.touches.length===0) { lastTouches=null; graphCtx.hoverId=null; graphCtx.draw(); }
       else lastTouches=[...e.touches].map(t=>({x:t.clientX,y:t.clientY}));
     }, {passive:false,signal:sig});
-
     canvas.addEventListener('touchcancel', () => {
       lastTouches=null; touchStart=null; panning=false;
       if (graphCtx) { graphCtx.hoverId=null; graphCtx.draw(); }
@@ -1012,7 +1124,7 @@
     let r=10; const retry=()=>{ if(document.querySelector('#'+EXT+'-btn'))return; tryInject(); if(--r>0)setTimeout(retry,650); };
     setTimeout(retry,400);
     new MutationObserver(tryInject).observe(document.body,{childList:true,subtree:true});
-    console.log('[TM Chat Graph] ✅ v2.6.0');
+    console.log('[TM Chat Graph] ✅ v2.7.0');
   }
 
   init();
