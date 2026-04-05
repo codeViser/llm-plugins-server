@@ -29,3 +29,8 @@ public/images/*
 plans/
 demo_repos/
 ecosystem.*
+# Runtime data directory (SQLite DB and WAL files)
+data/
+*.db
+*.db-shm
+*.db-wal

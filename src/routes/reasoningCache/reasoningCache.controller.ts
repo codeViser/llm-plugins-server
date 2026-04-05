@@ -10,7 +10,7 @@ const gunzip = promisify(zlib.gunzip);
 const logger = pino({ name: 'reasoning-cache' });
 
 // Resolve db path relative to the project root (one level above dist/)
-const DATA_DIR = path.resolve(__dirname, '../data');
+const DATA_DIR = process.env.RC_DATA_DIR || path.resolve(process.cwd(), 'data');
 const DB_PATH  = path.join(DATA_DIR, 'reasoning_cache.db');
 
 if (!fs.existsSync(DATA_DIR)) {
