@@ -29,6 +29,7 @@ import { powerpointGeneratorRouter } from './routes/powerpointGenerator/powerpoi
 import { webPageReaderRouter } from './routes/webPageReader/webPageReaderRouter';
 import { wordGeneratorRouter } from './routes/wordGenerator/wordGeneratorRouter';
 import { youtubeTranscriptRouter } from './routes/youtubeTranscript/youtubeTranscriptRouter';
+import { wolframAlphaRouter } from './routes/wolframAlpha';
 
 const logger = pino({ name: 'server start' });
 const app: Express = express();
@@ -132,6 +133,7 @@ app.use('/api/tavily/extract', tavilyExtractRouter);
 app.use('/api/tavily/crawl', tavilyCrawlRouter);
 app.use('/api/tavily/map', tavilyMapRouter);
 app.use('/reasoning-cache', reasoningCacheRouter);
+app.use('/wolfram-alpha', wolframAlphaRouter);
 app.use(mcpRouter);
 
 // List of all registries for OpenAPI documentation
