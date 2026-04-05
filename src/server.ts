@@ -14,6 +14,7 @@ import errorHandler from '@/common/middleware/errorHandler';
 import requestLogger from '@/common/middleware/requestLogger';
 import { env } from '@/common/utils/envConfig';
 import { mcpRouter } from '@/mcp/mcp.router';
+import { reasoningCacheRouter } from '@/routes/reasoningCache';
 import { healthCheckRegistry, healthCheckRouter } from '@/routes/healthCheck/healthCheckRouter';
 import { paperDiscoveryRegistry, paperDiscoveryRouter } from '@/routes/paperDiscovery/paperDiscoveryRouter';
 import { tavilyCrawlRegistry, tavilyCrawlRouter } from '@/routes/tavilyCrawl';
@@ -130,6 +131,7 @@ app.use('/google-places', googlePlacesRouter);
 app.use('/api/tavily/extract', tavilyExtractRouter);
 app.use('/api/tavily/crawl', tavilyCrawlRouter);
 app.use('/api/tavily/map', tavilyMapRouter);
+app.use('/reasoning-cache', reasoningCacheRouter);
 app.use(mcpRouter);
 
 // List of all registries for OpenAPI documentation
