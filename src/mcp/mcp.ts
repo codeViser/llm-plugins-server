@@ -1,8 +1,15 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import fs from 'fs';
+import path from 'path';
+
 import { pino } from 'pino';
 
 const logger = pino({ name: 'mcp-server' });
+
+// Managed workspace for all MCP subprocess artifacts (git-ignored via data/)
+const MCP_WORKSPACE_DIR = path.join(process.cwd(), 'data', 'mcp-workspace');
+fs.mkdirSync(MCP_WORKSPACE_DIR, { recursive: true });
 
 // Store active MCP clients
 export const clients = new Map<
@@ -31,6 +38,7 @@ export async function startClient(clientId: string, config: any) {
   const transport = new StdioClientTransport({
     command,
     args,
+    cwd: config.cwd || MCP_WORKSPACE_DIR,
     env:
       Object.values(env).length > 0
         ? {
