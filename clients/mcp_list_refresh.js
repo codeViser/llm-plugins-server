@@ -1,71 +1,65 @@
 /**
  * TypingMind — MCP Hard Refresh Extension
- * v2.1 — Fixed: localStorage double-encoding unwrapped correctly
+ * v2.2 — Cross-device: Mac browser + Android TWA + iPad + any device
  *
- * Root cause of v2.0 bug:
- *   TM_useDraftMCPServersJSON stores the config as JSON.stringify(configString),
- *   so localStorage.getItem() returns a JSON-encoded string like:
- *     "{\n  \"mcpServers\": { ... }\n}"   ← has outer quotes + escaped chars
- *   One JSON.parse() unwraps it to the actual clean config:
- *     {                                   ← real newlines, real quotes
- *       "mcpServers": { ... }
- *     }
- *   The old code wrote the double-encoded version straight into the textarea =
- *   TypingMind received literal \n and \" characters = parse error.
+ * v2.2 changes:
+ *   DETECTION:  3 independent signals for onMCPPage() — any one is sufficient
+ *               1. "Edit Servers" button exists (unique to MCP page, fastest)
+ *               2. h1/h2/h3/h4 with exact text "Model Context Protocol"
+ *               3. MCP subtitle text present in DOM (ultimate fallback)
  *
- * Confirmed element map (all from live DevTools investigation):
- *   localStorage key : TM_useDraftMCPServersJSON  (double-encoded JSON string)
- *   Edit Servers     : adds 1 <textarea> + "Setup Connector" / "Cancel" / "Save Changes"
- *   Save button      : "Save Changes"  (exact text, bg-blue-600)
- *   Cancel button    : "Cancel"        (exact text, bg-red-600)
- *   Clear signal     : set textarea to ""  →  click "Save Changes"
- *   Phantom state    : all "Stop Server" buttons become visible simultaneously
- *   Stop button      : "Stop Server"   (exact, no hover needed in phantom state)
- *   Confirm button   : "Sure?"         (same-position toggle after Stop Server click)
+ *   INJECTION:  4 cascading strategies — never gives up:
+ *               A. Before "Edit Servers" (desktop/primary layout)
+ *               B. After "Refresh" button (if Edit Servers not in DOM yet)
+ *               C. Inline after the MCP heading element
+ *               D. Fixed floating button bottom-right (mobile last resort —
+ *                  always visible on the MCP page regardless of layout)
+ *
+ *   CLEANUP:    Floating button auto-removes when navigating away from MCP page
+ *
+ *   WATCHER:    hashchange + popstate events added for SPA navigation detection
+ *               Poll interval reduced 1200ms → 500ms for faster mobile detection
+ *               MutationObserver debounced to avoid expensive calls on every paint
+ *
+ *   BUG FIX:    localStorage double-encoding unwrap (v2.1) retained
  */
 (function () {
   'use strict';
 
-  /* ══════════════════════════════════════════════════════════════
+  /* ═══════════════════════════════════════════════════════════════
      CONSTANTS
-  ══════════════════════════════════════════════════════════════ */
+  ═══════════════════════════════════════════════════════════════ */
 
   const EXT    = 'tm-mcp-hr';
-  const LS_KEY = 'TM_useDraftMCPServersJSON';
+  const LS_KEY = 'TM_useDraftMCPServersJSON';   // confirmed from DevTools
   const TAG    = '[MCP Hard Refresh]';
 
   const MS = {
-    poll        :  1200,   // SPA watcher fallback poll
-    panelOpen   :  1000,   // after clicking Edit Servers, wait for textarea
-    afterSave   :  2800,   // after saving "", wait for phantom state to settle
-    stopTimeout :  5000,   // max extra wait for first Stop Server button to appear
-    sureWait    :   450,   // between Stop Server click and Sure? appearing
-    afterStop   :   650,   // after each confirmed Stop before the next
+    poll        :   500,   // ↓ from 1200 — faster detection on mobile
+    debounce    :   200,   // MutationObserver debounce — avoids thrashing
+    panelOpen   :  1000,   // wait after clicking Edit Servers
+    afterSave   :  2800,   // wait after saving "" for phantom state
+    stopTimeout :  5000,   // max wait for first Stop Server button
+    sureWait    :   450,   // between Stop Server click and Sure?
+    afterStop   :   650,   // after each confirmed Stop
     toast       :  7000,   // toast auto-dismiss
   };
 
 
-  /* ══════════════════════════════════════════════════════════════
+  /* ═══════════════════════════════════════════════════════════════
      UTILITIES
-  ══════════════════════════════════════════════════════════════ */
+  ═══════════════════════════════════════════════════════════════ */
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const log   = (...a) => console.log(TAG,  ...a);
   const warn  = (...a) => console.warn(TAG, ...a);
 
-  /** First <button> matching text (exact or contains) */
   const findBtn = (text, root = document, exact = false) =>
     Array.from(root.querySelectorAll('button'))
       .find(b => exact
         ? b.textContent.trim() === text
         : b.textContent.trim().includes(text));
 
-  /**
-   * Set value on a React-controlled <textarea> so React's synthetic
-   * onChange fires and internal state updates properly.
-   * Uses the native property setter (bypasses React's own descriptor),
-   * then dispatches bubbling input + change events.
-   */
   function reactSet(ta, value) {
     const setter = Object.getOwnPropertyDescriptor(
       HTMLTextAreaElement.prototype, 'value'
@@ -75,7 +69,6 @@
     ta.dispatchEvent(new Event('change', { bubbles: true }));
   }
 
-  /** Poll until CSS selector resolves in DOM; returns element or null */
   async function waitFor(sel, ms, root = document) {
     const end = Date.now() + ms;
     while (Date.now() < end) {
@@ -86,7 +79,6 @@
     return null;
   }
 
-  /** Poll until predicate returns truthy; returns the truthy value or null */
   async function waitUntil(fn, ms) {
     const end = Date.now() + ms;
     while (Date.now() < end) {
@@ -98,37 +90,59 @@
   }
 
 
-  /* ══════════════════════════════════════════════════════════════
-     PAGE DETECTION
-  ══════════════════════════════════════════════════════════════ */
+  /* ═══════════════════════════════════════════════════════════════
+     PAGE DETECTION — 3 independent signals, any one sufficient
+  ═══════════════════════════════════════════════════════════════ */
 
-  const mcpH1     = () => Array.from(document.querySelectorAll('h1'))
-    .find(h => h.textContent.trim() === 'Model Context Protocol');
-  const onMCPPage = () => !!mcpH1();
+  function onMCPPage() {
+    // Signal 1 (fastest): "Edit Servers" button — only exists on MCP settings page
+    if (findBtn('Edit Servers')) return true;
+
+    // Signal 2: heading element with exact text (covers h1–h5 and mobile variants)
+    if (Array.from(document.querySelectorAll('h1,h2,h3,h4,h5'))
+        .some(el => el.textContent.trim() === 'Model Context Protocol')) return true;
+
+    // Signal 3 (slowest but most resilient): unique MCP subtitle text
+    // Only evaluated if faster checks failed — text search is opt-in here
+    if (document.body.textContent.includes('MCP enables LLMs to access custom tools')) return true;
+
+    return false;
+  }
+
+  // Lightweight version for the high-frequency MutationObserver path
+  // Avoids the expensive textContent scan on every DOM mutation
+  function onMCPPageFast() {
+    if (findBtn('Edit Servers')) return true;
+    return Array.from(document.querySelectorAll('h1,h2,h3,h4,h5'))
+      .some(el => el.textContent.trim() === 'Model Context Protocol');
+  }
 
 
-  /* ══════════════════════════════════════════════════════════════
-     BUTTON INJECTION
-  ══════════════════════════════════════════════════════════════ */
+  /* ═══════════════════════════════════════════════════════════════
+     BUTTON CREATION
+  ═══════════════════════════════════════════════════════════════ */
 
-  function injectButton() {
-    if (document.getElementById(`${EXT}-btn`)) return;
-    if (!onMCPPage()) return;
+  function makeBtn() {
+    // Inherit class from "Edit Servers" or "Refresh" for consistent native look
+    const ref = findBtn('Edit Servers')
+             ?? Array.from(document.querySelectorAll('button'))
+                  .find(b => b.textContent.trim() === 'Refresh');
 
-    const editBtn = findBtn('Edit Servers');
-    if (!editBtn) return;
+    const btn   = document.createElement('button');
+    btn.id      = `${EXT}-btn`;
+    btn.type    = 'button';
+    btn.title   = 'Hard Refresh — clears phantom connections and reloads MCP config for a clean reconnect on any device';
 
-    const btn     = document.createElement('button');
-    btn.id        = `${EXT}-btn`;
-    btn.type      = 'button';
-    btn.title     = 'Hard Refresh — clears phantom server connections then reloads config for a clean reconnect on any device';
-    btn.className = editBtn.className;   // inherit sizing/rounding/font from Edit Servers
+    if (ref) btn.className = ref.className;   // consistent sizing/font/radius with existing buttons
+
+    // Amber colour — clearly distinct from the existing dark/blue/red buttons
     btn.style.cssText = `
       background-color : #b45309 !important;
       color            : #ffffff !important;
       border           : 2px solid #92400e !important;
       cursor           : pointer;
     `;
+
     btn.innerHTML = `
       <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"
            aria-hidden="true" style="flex-shrink:0">
@@ -137,150 +151,175 @@
       Hard Refresh`;
 
     btn.addEventListener('click', () => run(btn));
-
-    // Insert BEFORE Edit Servers → order: [Refresh] [⚡ Hard Refresh] [Edit Servers]
-    editBtn.parentElement.insertBefore(btn, editBtn);
-    log('Button injected ✓');
+    return btn;
   }
 
 
-  /* ══════════════════════════════════════════════════════════════
-     PHASE 1 — READ CONFIG
-  ══════════════════════════════════════════════════════════════ */
+  /* ═══════════════════════════════════════════════════════════════
+     INJECTION — 4 strategies, cascading
+  ═══════════════════════════════════════════════════════════════ */
 
-  /**
-   * Returns the clean, properly-formatted MCP config JSON string.
-   *
-   * THE KEY FIX (v2.1):
-   *   TM_useDraftMCPServersJSON stores the config via JSON.stringify(configString),
-   *   creating DOUBLE encoding. localStorage.getItem() returns something like:
-   *
-   *     "{\n  \"mcpServers\": { ... }\n}"   ← JSON string with outer quotes + escapes
-   *
-   *   One JSON.parse() unwraps it to the actual clean config:
-   *
-   *     {
-   *       "mcpServers": { ... }             ← real newlines, real quotes — textarea-ready
-   *     }
-   *
-   * Fallback: open Edit Servers panel → read ta.value directly (never double-encoded).
-   */
+  function injectButton() {
+    if (document.getElementById(`${EXT}-btn`)) return;
+    if (!onMCPPage()) return;
+
+    const btn = makeBtn();
+
+    /* ── Strategy A: before "Edit Servers" (desktop, primary) ────── */
+    const editBtn = findBtn('Edit Servers');
+    if (editBtn?.parentElement) {
+      editBtn.parentElement.insertBefore(btn, editBtn);
+      log('Injected A: before Edit Servers ✓');
+      return;
+    }
+
+    /* ── Strategy B: after "Refresh" button ──────────────────────── */
+    const refreshBtn = Array.from(document.querySelectorAll('button'))
+      .find(b => b.textContent.trim() === 'Refresh');
+    if (refreshBtn?.parentElement) {
+      refreshBtn.after(btn);
+      log('Injected B: after Refresh ✓');
+      return;
+    }
+
+    /* ── Strategy C: inline after the MCP heading ────────────────── */
+    const heading = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5'))
+      .find(el => el.textContent.trim() === 'Model Context Protocol');
+    if (heading) {
+      heading.insertAdjacentElement('afterend', btn);
+      btn.style.display      = 'block';
+      btn.style.marginTop    = '8px';
+      btn.style.marginBottom = '8px';
+      log('Injected C: after MCP heading ✓');
+      return;
+    }
+
+    /* ── Strategy D: floating pill button fixed to bottom-right ───── */
+    // This ALWAYS works regardless of page layout.
+    // bottom: 72px clears the Android bottom nav bar.
+    // Removed when navigating away from the MCP page (see tick() below).
+    btn.style.cssText += `
+      position      : fixed      !important;
+      bottom        : 72px       !important;
+      right         : 16px       !important;
+      z-index       : 2147483646 !important;
+      border-radius : 999px      !important;
+      box-shadow    : 0 4px 20px rgba(0,0,0,0.35) !important;
+      padding       : 12px 20px  !important;
+      font-size     : 14px       !important;
+      line-height   : 1          !important;
+    `;
+    document.body.appendChild(btn);
+    log('Injected D: floating button (mobile fallback) ✓');
+  }
+
+
+  /* ═══════════════════════════════════════════════════════════════
+     PHASE 1 — READ CONFIG
+     Primary path: localStorage with double-encoding unwrap (v2.1 fix)
+     Fallback path: open Edit Servers panel, read textarea directly
+  ═══════════════════════════════════════════════════════════════ */
+
   async function readConfig() {
     const raw = localStorage.getItem(LS_KEY);
 
     if (raw && raw.trim()) {
       try {
-        // Step 1: unwrap the outer JSON encoding
+        // TM stores config as JSON.stringify(configString) — must unwrap once
         const unwrapped = JSON.parse(raw);
 
         if (typeof unwrapped === 'string' && unwrapped.trim()) {
-          // Normal case: double-encoded string → unwrapped is the real config text
-          JSON.parse(unwrapped);   // validate the inner content is parseable JSON
+          JSON.parse(unwrapped);   // validate inner JSON (throws if corrupt)
           log(`Config from localStorage (${unwrapped.length} chars) ✓`);
           return unwrapped.trim();
         }
 
         if (unwrapped && typeof unwrapped === 'object') {
-          // Edge case: somehow stored as a plain object already
           const str = JSON.stringify(unwrapped, null, 2);
           log(`Config from localStorage as object (${str.length} chars) ✓`);
           return str;
         }
 
       } catch {
-        // Edge case: stored as plain JSON (not double-encoded) — try raw directly
+        // Edge case: stored as plain JSON (not double-encoded)
         try {
           JSON.parse(raw);
-          log(`Config from localStorage (direct, ${raw.length} chars) ✓`);
+          log(`Config from localStorage direct (${raw.length} chars) ✓`);
           return raw.trim();
         } catch {
-          warn('localStorage value unparseable in all modes — falling back to panel UI');
+          warn('localStorage unparseable — falling back to panel UI');
         }
       }
     }
 
-    // Fallback: open Edit Servers → read textarea (ta.value is NEVER double-encoded) → Cancel
-    log('Reading config via Edit Servers panel (localStorage fallback)…');
+    // Fallback: open Edit Servers → ta.value is never double-encoded → Cancel
+    log('Reading config from Edit Servers panel (localStorage fallback)…');
     const ta = await openPanel();
     const val = ta.value.trim();
     findBtn('Cancel')?.click();
     await sleep(300);
 
-    if (!val) throw new Error('Config is empty in localStorage and in the Edit Servers textarea.');
-    JSON.parse(val);   // validate before returning
+    if (!val) throw new Error('Config is empty in localStorage and in Edit Servers.');
+    JSON.parse(val);   // validate
     return val;
   }
 
 
-  /* ══════════════════════════════════════════════════════════════
-     EDIT SERVERS PANEL HELPERS
-  ══════════════════════════════════════════════════════════════ */
+  /* ═══════════════════════════════════════════════════════════════
+     PANEL HELPERS
+  ═══════════════════════════════════════════════════════════════ */
 
-  /**
-   * Click "Edit Servers" and return the newly-rendered <textarea>.
-   * Confirmed: the panel adds exactly 1 new textarea when opened.
-   */
   async function openPanel() {
     const editBtn = findBtn('Edit Servers');
     if (!editBtn) throw new Error('"Edit Servers" button not found');
-
     const before = new Set(document.querySelectorAll('textarea'));
     editBtn.click();
     await sleep(MS.panelOpen);
-
     let ta = Array.from(document.querySelectorAll('textarea')).find(t => !before.has(t));
     if (!ta) ta = await waitFor('textarea', 3000);
-    if (!ta) throw new Error('JSON textarea not found — Edit Servers panel did not open');
+    if (!ta) throw new Error('JSON textarea not found — did the panel open?');
     return ta;
   }
 
-  /**
-   * Find the "Save Changes" button in the open Edit Servers panel.
-   * Confirmed exact text: "Save Changes" (bg-blue-600).
-   */
   function findSaveBtn() {
     const ours = document.getElementById(`${EXT}-btn`);
     return (
-      findBtn('Save Changes', document, true) ??
+      findBtn('Save Changes', document, true) ??          // confirmed exact text
       findBtn('Save Changes') ??
       findBtn('Save') ??
       Array.from(document.querySelectorAll('button')).find(b =>
         b !== ours &&
-        b.className.includes('bg-blue') &&
+        (b.className ?? '').includes('bg-blue') &&
         b.textContent.trim().length > 0
       )
     );
   }
 
 
-  /* ══════════════════════════════════════════════════════════════
+  /* ═══════════════════════════════════════════════════════════════
      PHASE 2 — CLEAR CONFIG → PHANTOM STATE
-     Confirmed: textarea = "" + "Save Changes" orphans all running
-     connections and makes every "Stop Server" button visible.
-  ══════════════════════════════════════════════════════════════ */
+  ═══════════════════════════════════════════════════════════════ */
 
   async function clearConfig() {
     const ta = await openPanel();
-    reactSet(ta, '');      // confirmed: empty string triggers phantom state
+    reactSet(ta, '');      // empty string — confirmed trigger for phantom state
     await sleep(150);
-
     const sb = findSaveBtn();
     if (!sb) throw new Error('"Save Changes" not found in Edit Servers panel');
-    log(`Clearing config via "${sb.textContent.trim()}"…`);
+    log(`Clearing via "${sb.textContent.trim()}"…`);
     sb.click();
     await sleep(300);
   }
 
 
-  /* ══════════════════════════════════════════════════════════════
+  /* ═══════════════════════════════════════════════════════════════
      PHASE 3 — STOP ALL PHANTOM SERVERS
-     All Stop Server buttons visible simultaneously in phantom state.
-     Loop re-queries the DOM each cycle — the list shrinks as rows
-     are removed after each confirmed Stop + Sure?.
-  ══════════════════════════════════════════════════════════════ */
+     All Stop Server buttons become visible simultaneously after
+     clearing config — no hover-reveal needed.
+  ═══════════════════════════════════════════════════════════════ */
 
   async function stopAllPhantomServers() {
-    log('Waiting for "Stop Server" buttons to appear…');
+    log('Waiting for "Stop Server" buttons…');
     await waitUntil(
       () => Array.from(document.querySelectorAll('button'))
                .find(b => b.textContent.trim() === 'Stop Server'),
@@ -293,8 +332,7 @@
     for (let i = 0; i < MAX; i++) {
       const stopBtn = Array.from(document.querySelectorAll('button'))
         .find(b => b.textContent.trim() === 'Stop Server');
-
-      if (!stopBtn) { log(`No more "Stop Server" buttons — ${n} stopped ✓`); break; }
+      if (!stopBtn) { log(`No more Stop buttons — ${n} stopped ✓`); break; }
 
       const row  = stopBtn.closest('div.p-4.border.border-slate-300.rounded-lg.bg-slate-100');
       const name = row?.querySelector('span')?.textContent?.trim() ?? `#${n + 1}`;
@@ -303,47 +341,37 @@
       stopBtn.click();
       await sleep(MS.sureWait);
 
-      // "Sure?" appears at same position (confirmed same-spot toggle)
       const sureBtn = Array.from(document.querySelectorAll('button'))
         .find(b => b.textContent.trim() === 'Sure?');
-
-      if (sureBtn) {
-        sureBtn.click();
-        log(`  ✓ "${name}" confirmed and removed`);
-      } else {
-        warn(`  ⚠ "Sure?" not found for "${name}"`);
-      }
+      if (sureBtn) { sureBtn.click(); log(`  ✓ "${name}" removed`); }
+      else         { warn(`  ⚠ "Sure?" not found for "${name}"`); }
 
       n++;
       await sleep(MS.afterStop);
     }
-
     return n;
   }
 
 
-  /* ══════════════════════════════════════════════════════════════
+  /* ═══════════════════════════════════════════════════════════════
      PHASE 4 — RESTORE CONFIG
-     configJSON is already the clean, properly-formatted JSON string
-     (real newlines, real quotes) — safe to write straight to textarea.
-  ══════════════════════════════════════════════════════════════ */
+  ═══════════════════════════════════════════════════════════════ */
 
   async function restoreConfig(configJSON) {
     const ta = await openPanel();
-    reactSet(ta, configJSON);    // writes clean JSON — no escaping issues
+    reactSet(ta, configJSON);   // clean JSON string — no escaping issues
     await sleep(150);
-
     const sb = findSaveBtn();
-    if (!sb) throw new Error('"Save Changes" not found during config restore');
-    log(`Restoring via "${sb.textContent.trim()}" (${configJSON.length} chars)…`);
+    if (!sb) throw new Error('"Save Changes" not found during restore');
+    log(`Restoring ${configJSON.length} chars via "${sb.textContent.trim()}"…`);
     sb.click();
     await sleep(400);
   }
 
 
-  /* ══════════════════════════════════════════════════════════════
+  /* ═══════════════════════════════════════════════════════════════
      MAIN ORCHESTRATOR
-  ══════════════════════════════════════════════════════════════ */
+  ═══════════════════════════════════════════════════════════════ */
 
   async function run(btn) {
     btn.disabled   = true;
@@ -352,14 +380,11 @@
       (btn.innerHTML = `<span style="font-size:11px;white-space:nowrap;letter-spacing:0">${html}</span>`);
 
     try {
-
-      /* PHASE 1 ── read config ──────────────────────────────────── */
       setLabel('📋 Reading…');
       log('══ PHASE 1: read config ══');
+      const configJSON = await readConfig();
+      if (!configJSON) throw new Error('Config is empty.');
 
-      const configJSON = await readConfig();   // clean, unwrapped JSON string
-
-      // Final validation before we touch anything
       let parsed;
       try   { parsed = JSON.parse(configJSON); }
       catch { throw new Error('Config is not valid JSON — fix it in Edit Servers first.'); }
@@ -367,37 +392,26 @@
       const count = Object.keys(parsed.mcpServers ?? {}).length;
       log(`Config valid — ${count} server(s) ✓`);
 
-
-      /* PHASE 2 ── clear → phantom ─────────────────────────────── */
       setLabel('🧹 Clearing…');
       log('══ PHASE 2: clear config → phantom state ══');
-
       await clearConfig();
 
       setLabel('⏳ Waiting…');
       log(`Waiting ${MS.afterSave}ms for phantom state to settle…`);
       await sleep(MS.afterSave);
 
-
-      /* PHASE 3 ── stop all phantom servers ────────────────────── */
       setLabel('🛑 Stopping…');
       log('══ PHASE 3: stop all phantom servers ══');
-
       const stopped = await stopAllPhantomServers();
-      log(`Phase 3 complete — ${stopped} server(s) stopped ✓`);
+      log(`${stopped} server(s) stopped ✓`);
       await sleep(400);
 
-
-      /* PHASE 4 ── restore ─────────────────────────────────────── */
       setLabel('💉 Restoring…');
-      log('══ PHASE 4: restore original config ══');
-
+      log('══ PHASE 4: restore config ══');
       await restoreConfig(configJSON);
-      log('Config restored ✓');
+      log('Restored ✓');
 
-
-      /* DONE ───────────────────────────────────────────────────── */
-      log(`✅ Hard Refresh complete — ${count} server(s) reconnecting`);
+      log(`✅ Done — ${count} server(s) reconnecting`);
       showToast(
         `✅ Hard Refresh complete!\n` +
         `${count} server(s) reconnecting on this device.\n` +
@@ -415,9 +429,9 @@
   }
 
 
-  /* ══════════════════════════════════════════════════════════════
+  /* ═══════════════════════════════════════════════════════════════
      TOAST
-  ══════════════════════════════════════════════════════════════ */
+  ═══════════════════════════════════════════════════════════════ */
 
   function showToast(msg, type = 'info') {
     document.getElementById(`${EXT}-toast`)?.remove();
@@ -426,11 +440,11 @@
       id: `${EXT}-toast`, textContent: msg,
     });
     Object.assign(el.style, {
-      position: 'fixed', top: '20px', right: '20px', zIndex: '2147483647',
+      position: 'fixed', top: '16px', right: '16px', zIndex: '2147483647',
       padding: '14px 18px', borderRadius: '12px', background: bg,
       color: '#fff', fontWeight: '600', fontSize: '13px',
-      lineHeight: '1.6', whiteSpace: 'pre-line', maxWidth: '380px',
-      boxShadow: '0 8px 28px rgba(0,0,0,.28)', cursor: 'pointer',
+      lineHeight: '1.6', whiteSpace: 'pre-line', maxWidth: '340px',
+      boxShadow: '0 8px 28px rgba(0,0,0,.30)', cursor: 'pointer',
       transition: 'opacity .4s ease',
     });
     el.addEventListener('click', () => el.remove());
@@ -439,18 +453,41 @@
   }
 
 
-  /* ══════════════════════════════════════════════════════════════
+  /* ═══════════════════════════════════════════════════════════════
      SPA-AWARE WATCHER
-  ══════════════════════════════════════════════════════════════ */
+  ═══════════════════════════════════════════════════════════════ */
+
+  function tick(useFastDetection = false) {
+    const existing = document.getElementById(`${EXT}-btn`);
+    const onPage   = useFastDetection ? onMCPPageFast() : onMCPPage();
+
+    if (onPage) {
+      if (!existing) injectButton();
+    } else {
+      // Remove the button (especially the floating variant) when leaving MCP page
+      existing?.remove();
+    }
+  }
 
   function startWatcher() {
-    injectButton();
+    tick();   // immediate check on load
+
+    // Debounced MutationObserver: catches React re-renders without thrashing
+    // Uses fast detection (no textContent scan) because it fires very frequently
+    let debounceTimer;
     new MutationObserver(() => {
-      if (!document.getElementById(`${EXT}-btn`) && onMCPPage()) injectButton();
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => tick(true), MS.debounce);
     }).observe(document.body, { childList: true, subtree: true });
-    setInterval(() => {
-      if (!document.getElementById(`${EXT}-btn`) && onMCPPage()) injectButton();
-    }, MS.poll);
+
+    // SPA navigation events (React Router hash changes, back/forward)
+    window.addEventListener('hashchange', () => tick());
+    window.addEventListener('popstate',   () => tick());
+
+    // Fallback poll — catches anything the observer/events miss
+    // Also uses full onMCPPage() including the textContent fallback signal
+    setInterval(() => tick(), MS.poll);
+
     log('Extension active — watching for MCP settings page ✓');
   }
 
