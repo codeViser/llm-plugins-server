@@ -1,23 +1,36 @@
-// Previous replaced: https://cdn.jsdelivr.net/gh/codeViser/typingmind-reasoning-support@main/script.js
-
 // ══════════════════════════════════════════════════════════════════════════════
-//  TypingMind Reasoning Continuity Extension  ·  v3.2 (logging fix)
+//  TypingMind Reasoning Continuity Extension  ·  v3.3
 // ══════════════════════════════════════════════════════════════════════════════
 //
-//  What changed from previous version:
-//  • Critical operation logs are now always visible (not behind debug flag):
-//      [RCEv3] 🔑 server detected   — first time URL + token captured from MCP
-//      [RCEv3] 💾 saved             — reasoning written to Pi after each response
-//      [RCEv3] 📤 injected N blocks — reasoning injected before each LLM call
-//      [RCEv3] ⚠️ Pi offline       — Pi unreachable, using local fallback
-//  • Verbose per-hash detail and Miss logs remain behind debug(true)
-//  • All core logic is identical to previous version
+//  Fixes in this version (all in the response-handling layer):
 //
-//  RUNTIME COMMANDS:
-//    window.RCE.debug(true/false)    toggle verbose per-hash logs
-//    window.RCE.stats()              server + cache status
-//    window.RCE.clear()              wipe Pi + local cache
-//    window.RCE.reset()              forget captured URL and token
+//  FIX 1 — handleNonStream: clone response before reading body
+//    Was: resp.json() consumed resp.body; catch block returned broken resp to
+//         TM; TM called resp.json() → "body stream already read" error.
+//    Now: resp.clone() is read; original resp is untouched; catch returns it
+//         safely so TM can read it normally.
+//
+//  FIX 2 — handleStream: error path uses ctrl.error() not ctrl.close()
+//    Was: network interruption (app backgrounded on Android) caused reader to
+//         throw; catch fell through to ctrl.close() which signals normal EOF;
+//         TM tried to parse a truncated response as complete → catastrophic error.
+//    Now: catch calls ctrl.error(e) and returns immediately; TM sees a proper
+//         network error and offers retry, not a parse failure.
+//
+//  FIX 3 — handleStream: stream closes before Pi save (non-blocking)
+//    Was: await saveMsg() blocked ctrl.close(); TM saw a stalled response
+//         until the Pi round-trip completed after the model finished speaking.
+//    Now: ctrl.close() fires immediately when the model finishes; Pi save runs
+//         in the background without blocking TM's UI.
+//
+//  FIX 4 — handleStream: cancel() tears down the underlying reader
+//    Was: if TM cancelled the stream (Stop button, navigation), our reader kept
+//         running and consuming the original response body until exhaustion.
+//    Now: ReadableStream cancel() cancels the original reader immediately.
+//
+//  FIX 5 — handleStream: reasoning saved only on clean completion
+//    Was: interrupted streams could save partial/corrupt reasoning_details.
+//    Now: save only fires when done === true (model finished cleanly).
 //
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -49,9 +62,7 @@
     if (b && t) { CFG.piBase = b; CFG.piApiKey = t; CFG.piUrl = b + RC_PATH_SUFFIX; }
   } catch {}
 
-  // Always-visible activity log (concise, one line per event)
   const info = (emoji, ...a) => console.log(`%c[RCEv3] ${emoji}`, 'color:#7c3aed;font-weight:600', ...a);
-  // Verbose detail — only when debug is on
   const log  = (...a) => CFG.debug && console.log('%c[RCEv3]', 'color:#7c3aed', ...a);
   const warn = (...a) => console.warn('%c[RCEv3]', 'color:#d97706;font-weight:600', ...a);
 
@@ -72,12 +83,12 @@
       if (!(u.pathname === '/start' || u.pathname === '/ping' || u.pathname.startsWith('/clients/'))) return;
       const token = readBearerToken(opts?.headers);
       if (!token) return;
-      CFG.piBase = `${u.protocol}//${u.host}`;
+      CFG.piBase   = `${u.protocol}//${u.host}`;
       CFG.piApiKey = token;
-      CFG.piUrl = CFG.piBase + RC_PATH_SUFFIX;
+      CFG.piUrl    = CFG.piBase + RC_PATH_SUFFIX;
       try { localStorage.setItem(LS_KEY_BASE, CFG.piBase); localStorage.setItem(LS_KEY_TOKEN, CFG.piApiKey); } catch {}
       pi.available = true;
-      info('🔑', 'server detected →', CFG.piUrl.replace(CFG.piBase, '<host>'));
+      info('🔑', 'server detected');
     } catch {}
   }
 
@@ -92,11 +103,11 @@
       if (!this._ready()) return null;
       try {
         const r = await withTimeout(fetch(`${CFG.piUrl}/${hash}`, { headers: this._headers() }), CFG.piTimeoutMs);
-        if (r.status === 401) { warn('Pi 401 — token mismatch'); return null; }
+        if (r.status === 401) { warn('Pi 401'); return null; }
         if (r.status === 404) return null;
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return (await r.json())?.responseObject?.data ?? null;
-      } catch (e) { warn('Pi GET failed:', e.message); this._goOffline(); return null; }
+      } catch (e) { warn('Pi GET:', e.message); this._goOffline(); return null; }
     },
 
     async set(hash, value) {
@@ -108,7 +119,7 @@
         if (r.status === 401) { warn('Pi POST 401'); return false; }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return true;
-      } catch (e) { warn('Pi SET failed:', e.message); this._goOffline(); return false; }
+      } catch (e) { warn('Pi SET:', e.message); this._goOffline(); return false; }
     },
 
     async stats() {
@@ -128,7 +139,7 @@
     _goOffline() {
       if (!this.available) return;
       this.available = false;
-      warn('⚠️ Pi offline — using local fallback. Will retry in 60s.');
+      warn('⚠️ Pi offline — local fallback active. Retry in 60s.');
       clearTimeout(this._retryTimer);
       this._retryTimer = setTimeout(async () => {
         try {
@@ -171,7 +182,7 @@
   const mem = (() => {
     const m = new Map();
     return {
-      name: 'Memory (volatile)',
+      name:  'Memory (volatile)',
       get:   async k        => m.get(k)??null,
       set:   async (k,v,ts) => m.set(k,{v,ts}),
       prune: async cut      => { for(const[k,e]of m)if((e.ts??0)<cut)m.delete(k); },
@@ -191,19 +202,18 @@
       const rec = await local.get(hash);
       if (rec && Date.now()-(rec.ts??0) <= CFG.localTtlMs) { log('💡 Local HIT', hash.slice(0,10)); return rec.v; }
     } catch {}
-    log('❌ Miss', hash.slice(0,10));
-    return null;
+    log('❌ Miss', hash.slice(0,10)); return null;
   }
 
   async function cachePut(hash, value) {
-    const piOk = await pi.set(hash, value);
-    if (!piOk) log('⚠️ Pi write failed, local only', hash.slice(0,10));
+    const ok = await pi.set(hash, value);
+    if (!ok) log('⚠️ Pi write failed, local only');
     try {
       const n = await local.count();
       if (n >= CFG.maxEntries) await local.evict(Math.ceil(CFG.maxEntries * 0.1));
       await local.set(hash, value, Date.now());
     } catch {}
-    return piOk;
+    return ok;
   }
 
   // ── Hashing ───────────────────────────────────────────────────────────────
@@ -221,27 +231,25 @@
 
   // ── Field helpers ─────────────────────────────────────────────────────────
 
-  const BASE = new Set(['role','content','tool_calls','tool_call_id','name']);
-
+  const BASE         = new Set(['role','content','tool_calls','tool_call_id','name']);
   const hasExtra     = m => Object.keys(m).some(k => !BASE.has(k));
   const hasReasoning = m => Array.isArray(m.reasoning_details) && m.reasoning_details.length > 0;
   const getExtra     = m => { const{role,content,tool_calls,tool_call_id,name,...x}=m; return Object.keys(x).length?x:null; };
-  const rdText       = d  => (d??[]).map(r=>r.text||r.summary||'').join('');
+  const rdText       = d => (d??[]).map(r=>r.text||r.summary||'').join('');
 
   // ── Save + inject ─────────────────────────────────────────────────────────
 
   async function saveMsg(msg) {
     const extra = getExtra(msg);
     if (!extra) return false;
-    const piOk = await cachePut(await msgKey(msg), extra);
-    return piOk;
+    return cachePut(await msgKey(msg), extra);
   }
 
   async function injectMsgs(messages) {
     let hits = 0, attempts = 0;
     for (const msg of messages) {
       if (msg.role !== 'assistant') continue;
-      if (hasReasoning(msg)) { log('⏭ skip — reasoning_details already present'); continue; }
+      if (hasReasoning(msg)) { log('⏭ already has reasoning_details'); continue; }
       attempts++;
       const v = await cacheGet(await msgKey(msg));
       if (!v) continue;
@@ -269,156 +277,232 @@
     function accRD(ds){for(const d of ds??[]){const idx=d.index??0,b=rds.get(idx)??{type:d.type,id:d.id,format:d.format,index:idx};if(d.text)b.text=(b.text??'')+d.text;if(d.data)b.data=(b.data??'')+d.data;if(d.summary)b.summary=(b.summary??'')+d.summary;if(d.signature)b.signature=d.signature;rds.set(idx,b);}}
 
     function finalise(){
-      if(tcs.size)msg.tool_calls=[...tcs.values()].sort((a,b)=>a.index-b.index).map(b=>({id:b.id,type:b.type||'function',function:{name:b.fn.name,arguments:b.fn.args}}));
-      if(rds.size)msg.reasoning_details=[...rds.values()].sort((a,b)=>(a.index??0)-(b.index??0));
+      if(tcs.size) msg.tool_calls=[...tcs.values()].sort((a,b)=>a.index-b.index).map(b=>({id:b.id,type:b.type||'function',function:{name:b.fn.name,arguments:b.fn.args}}));
+      if(rds.size) msg.reasoning_details=[...rds.values()].sort((a,b)=>(a.index??0)-(b.index??0));
       return msg;
     }
-    return{applyDelta,finalise};
+    return {applyDelta, finalise};
   }
 
   // ── Response handlers ─────────────────────────────────────────────────────
 
   async function handleStream(resp) {
+    // Guard: if body is already consumed (edge case), return as-is
+    if (!resp.body || resp.bodyUsed) return resp;
+
     const reader = resp.body.getReader();
     const enc    = new TextEncoder();
     const acc    = makeAcc();
+    let   completedCleanly = false;
 
     const stream = new ReadableStream({
+
       async start(ctrl) {
-        const dec=new TextDecoder();
-        let buf='';
+        const dec = new TextDecoder();
+        let buf = '';
+
         try {
-          while(true){
-            const{done,value}=await reader.read();
-            if(done)break;
-            buf+=dec.decode(value,{stream:true});
-            const parts=buf.split('\n\n');
-            buf=parts.pop()??'';
-            for(const chunk of parts){
-              if(!chunk.startsWith('data:')){ctrl.enqueue(enc.encode(chunk+'\n\n'));continue;}
-              const raw=chunk.slice(chunk.indexOf(':')+1).trim();
-              if(raw==='[DONE]'){ctrl.enqueue(enc.encode(chunk+'\n\n'));continue;}
-              try{
-                const parsed=JSON.parse(raw);
-                const delta=parsed.choices?.[0]?.delta;
-                if(!delta){ctrl.enqueue(enc.encode(chunk+'\n\n'));continue;}
+          while (true) {
+            const { done, value } = await reader.read();
+
+            if (done) {
+              completedCleanly = true;
+              break;
+            }
+
+            buf += dec.decode(value, { stream: true });
+            const parts = buf.split('\n\n');
+            buf = parts.pop() ?? '';
+
+            for (const chunk of parts) {
+              if (!chunk.startsWith('data:')) {
+                ctrl.enqueue(enc.encode(chunk + '\n\n'));
+                continue;
+              }
+
+              const raw = chunk.slice(chunk.indexOf(':') + 1).trim();
+
+              if (raw === '[DONE]') {
+                ctrl.enqueue(enc.encode(chunk + '\n\n'));
+                continue;
+              }
+
+              try {
+                const parsed = JSON.parse(raw);
+                const delta  = parsed.choices?.[0]?.delta;
+
+                if (!delta) { ctrl.enqueue(enc.encode(chunk + '\n\n')); continue; }
+
                 acc.applyDelta(delta);
-                if(delta.reasoning_details?.length){
-                  const text=rdText(delta.reasoning_details);
-                  const safeDelta={...delta};
+
+                if (delta.reasoning_details?.length) {
+                  // Strip reasoning_details; convert to plain text for TM display.
+                  // This prevents TM from writing local UUID attachment files
+                  // which break cross-device chat import/export.
+                  const text      = rdText(delta.reasoning_details);
+                  const safeDelta = { ...delta };
                   delete safeDelta.reasoning_details;
-                  if(text)safeDelta.reasoning=(safeDelta.reasoning??'')+text;
-                  const safe={...parsed,choices:[{...parsed.choices[0],delta:safeDelta}]};
-                  ctrl.enqueue(enc.encode('data: '+JSON.stringify(safe)+'\n\n'));
-                }else{
-                  ctrl.enqueue(enc.encode(chunk+'\n\n'));
+                  if (text) safeDelta.reasoning = (safeDelta.reasoning ?? '') + text;
+                  const safe = { ...parsed, choices: [{ ...parsed.choices[0], delta: safeDelta }] };
+                  ctrl.enqueue(enc.encode('data: ' + JSON.stringify(safe) + '\n\n'));
+                } else {
+                  ctrl.enqueue(enc.encode(chunk + '\n\n'));
                 }
-              }catch{ctrl.enqueue(enc.encode(chunk+'\n\n'));}
+              } catch {
+                // Malformed SSE chunk — forward raw so TM still receives it
+                ctrl.enqueue(enc.encode(chunk + '\n\n'));
+              }
             }
           }
-        }catch(e){warn('stream error:',e);}
-
-        const full=acc.finalise();
-        if(hasExtra(full)){
-          const piOk=await saveMsg(full);
-          // Always-visible save confirmation
-          info('💾', `saved reasoning to ${piOk?'Pi':'local'}`);
+        } catch (e) {
+          // FIX 2: network interruption / app backgrounded / reader aborted.
+          // Signal a proper error to TM — NOT a normal close.
+          // Before this fix: ctrl.close() was called, TM saw a truncated
+          // response that looked complete, tried to parse it → catastrophic error.
+          // Now: TM sees a stream error and handles it like a network failure
+          // (offers retry rather than showing a parse-failure crash).
+          warn('stream interrupted:', e.message ?? e);
+          try { ctrl.error(e); } catch {}
+          return; // exit start(); do NOT fall through to ctrl.close() below
         }
+
+        // FIX 3: close the stream immediately so TM's UI updates without
+        // waiting for the Pi round-trip.
+        // FIX 5: only save reasoning when stream completed without interruption
+        // (completedCleanly === true) to avoid persisting partial/corrupt data.
         ctrl.close();
+
+        if (completedCleanly) {
+          // Save runs after ctrl.close() — background, non-blocking for TM
+          const full = acc.finalise();
+          if (hasExtra(full)) {
+            saveMsg(full)
+              .then(ok => info('💾', `saved reasoning to ${ok ? 'Pi' : 'local'}`))
+              .catch(e  => warn('save failed:', e.message));
+          }
+        }
       },
+
+      // FIX 4: when TM cancels the stream (Stop button, navigation, app close),
+      // cancel the underlying reader so we stop consuming the response body.
+      // Before this fix: our reader kept running until it exhausted the body.
+      cancel() {
+        reader.cancel().catch(() => {});
+      },
+
     });
 
-    return new Response(stream,{status:resp.status,statusText:resp.statusText,headers:resp.headers});
+    return new Response(stream, { status: resp.status, statusText: resp.statusText, headers: resp.headers });
   }
 
   async function handleNonStream(resp) {
+    // Guard: nothing to process on an already-used body
+    if (resp.bodyUsed) return resp;
+
+    // FIX 1: clone BEFORE reading. If clone.json() throws for any reason
+    // (network interruption, JSON parse error, body in unexpected state),
+    // the catch block returns the original unread resp safely.
+    // Before this fix: resp.json() consumed resp.body; catch returned the
+    // broken resp to TM; TM called resp.json() → "body stream already read".
+    const clone = resp.clone();
     try {
-      const body=await resp.json();
-      const msg=body?.choices?.[0]?.message;
-      if(msg&&hasExtra(msg)){
-        const piOk=await saveMsg(msg);
-        info('💾', `saved reasoning to ${piOk?'Pi':'local'} (non-stream)`);
-        if(msg.reasoning_details?.length){
-          const text=rdText(msg.reasoning_details);
+      const body = await clone.json();
+      const msg  = body?.choices?.[0]?.message;
+
+      if (msg && hasExtra(msg)) {
+        // Save to Pi (non-blocking — don't await)
+        saveMsg(msg)
+          .then(ok => info('💾', `saved reasoning to ${ok ? 'Pi' : 'local'} (non-stream)`))
+          .catch(e  => warn('save failed:', e.message));
+
+        // Strip reasoning_details from what TM sees (same as streaming path)
+        if (msg.reasoning_details?.length) {
+          const text = rdText(msg.reasoning_details);
           delete msg.reasoning_details;
-          if(text&&!msg.reasoning)msg.reasoning=text;
+          if (text && !msg.reasoning) msg.reasoning = text;
         }
       }
-      const headers=new Headers(resp.headers);
-      headers.delete('content-length');
-      return new Response(JSON.stringify(body),{status:resp.status,statusText:resp.statusText,headers});
-    }catch{return resp;}
+
+      const headers = new Headers(resp.headers);
+      headers.delete('content-length'); // length changed after stripping
+      return new Response(JSON.stringify(body), { status: resp.status, statusText: resp.statusText, headers });
+    } catch {
+      // clone.json() failed — resp.body is still unread, return it safely
+      return resp;
+    }
   }
 
   // ── Fetch interceptor ─────────────────────────────────────────────────────
 
-  if(window.__rce_active)window.fetch=window.__rce_orig??window.fetch;
-  const _orig=window.__rce_orig=window.fetch;
-  window.__rce_active=true;
+  if (window.__rce_active) window.fetch = window.__rce_orig ?? window.fetch;
+  const _orig = window.__rce_orig = window.fetch;
+  window.__rce_active = true;
 
-  window.fetch=async function(...args){
-    let[url,opts]=args;
-    const urlStr=String(url);
+  window.fetch = async function (...args) {
+    let [url, opts] = args;
+    const urlStr = String(url);
 
-    tryDetect(urlStr,opts);
+    tryDetect(urlStr, opts);
 
-    const isLLM=CFG.endpoints.some(ep=>urlStr.includes(ep));
-    if(isLLM&&opts?.body){
-      try{
-        const body=JSON.parse(opts.body);
-        if(Array.isArray(body?.messages)){
-          const{hits,attempts}=await injectMsgs(body.messages);
-          if(hits>0){
-            opts={...opts,body:JSON.stringify(body)};
-            // Always-visible injection confirmation
-            info('📤',`injected reasoning into ${hits}/${attempts} assistant messages`);
-          }else if(attempts>0){
-            log(`looked up ${attempts} messages, no cached reasoning found`);
+    const isLLM = CFG.endpoints.some(ep => urlStr.includes(ep));
+    if (isLLM && opts?.body) {
+      try {
+        const body = JSON.parse(opts.body);
+        if (Array.isArray(body?.messages)) {
+          const { hits, attempts } = await injectMsgs(body.messages);
+          if (hits > 0) {
+            opts = { ...opts, body: JSON.stringify(body) };
+            info('📤', `injected reasoning into ${hits}/${attempts} assistant messages`);
+          } else if (attempts > 0) {
+            log(`${attempts} messages checked, no cached reasoning`);
           }
         }
-      }catch(e){warn('inject error:',e);}
+      } catch (e) { warn('inject error:', e); }
     }
 
-    const resp=await _orig.call(this,url,opts);
-    if(!isLLM)return resp;
+    const resp = await _orig.call(this, url, opts);
+    if (!isLLM) return resp;
 
-    const ct=resp.headers.get('content-type')??'';
-    if(ct.includes('event-stream'))    return handleStream(resp);
-    if(ct.includes('application/json'))return handleNonStream(resp);
+    const ct = resp.headers.get('content-type') ?? '';
+    if (ct.includes('event-stream'))     return handleStream(resp);
+    if (ct.includes('application/json')) return handleNonStream(resp);
     return resp;
   };
 
   // ── Public API ────────────────────────────────────────────────────────────
 
-  window.RCE={
-    debug:v=>{CFG.debug=!!v;console.log(`[RCEv3] debug ${CFG.debug?'ON (verbose)':'OFF'}`);},
-    stats:async()=>{
-      const piS=await pi.stats(),locN=await local?.count().catch(()=>'?')??'?';
+  window.RCE = {
+    debug: v => { CFG.debug = !!v; console.log(`[RCEv3] debug ${CFG.debug ? 'ON' : 'OFF'}`); },
+    stats: async () => {
+      const piS  = await pi.stats();
+      const locN = await local?.count().catch(() => '?') ?? '?';
       console.group('[RCEv3] Status');
-      console.log('Server:',CFG.piBase?`${CFG.piBase} (${pi.available?'online':'OFFLINE'})`:'not yet detected — waiting for first MCP call');
-      console.log('Pi cache:',piS?`${piS.entries} entries · ${piS.total_mb}MB · newest ${piS.newest}`:'n/a');
-      console.log('Local fallback:',local?.name??'—',`(${locN} entries)`);
+      console.log('Server:', CFG.piBase ? `${CFG.piBase} (${pi.available ? 'online' : 'OFFLINE'})` : 'not yet detected');
+      console.log('Pi cache:', piS ? `${piS.entries} entries · ${piS.total_mb}MB · newest ${piS.newest}` : 'n/a');
+      console.log('Local fallback:', local?.name ?? '—', `(${locN} entries)`);
       console.groupEnd();
     },
-    clear:async()=>{
-      await pi.prune(0).catch(()=>{});
-      await local?.prune(Infinity).catch(()=>{});
-      info('🗑️','cache cleared');
+    clear: async () => {
+      await pi.prune(0).catch(() => {});
+      await local?.prune(Infinity).catch(() => {});
+      info('🗑️', 'cache cleared');
     },
-    reset:()=>{
-      CFG.piBase=CFG.piUrl=CFG.piApiKey='';
-      try{localStorage.removeItem(LS_KEY_BASE);localStorage.removeItem(LS_KEY_TOKEN);}catch{}
-      info('⟳','detection reset — will re-detect on next MCP call');
+    reset: () => {
+      CFG.piBase = CFG.piUrl = CFG.piApiKey = '';
+      try { localStorage.removeItem(LS_KEY_BASE); localStorage.removeItem(LS_KEY_TOKEN); } catch {}
+      info('⟳', 'detection reset');
     },
   };
 
-  Object.defineProperty(window,'debugReasoning',{get:()=>CFG.debug,set:v=>window.RCE.debug(v),configurable:true});
+  Object.defineProperty(window, 'debugReasoning', {
+    get: () => CFG.debug, set: v => window.RCE.debug(v), configurable: true,
+  });
 
   // ── Init ──────────────────────────────────────────────────────────────────
 
-  try{local=await buildIDB();await local.prune(Date.now()-CFG.localTtlMs);}catch{local=mem;}
+  try { local = await buildIDB(); await local.prune(Date.now() - CFG.localTtlMs); }
+  catch { local = mem; }
 
-  info('✅',`ready — ${CFG.piBase?'Pi loaded from localStorage':'waiting for first MCP call'} | local: ${local?.name}`);
+  info('✅', `ready — ${CFG.piBase ? 'Pi loaded from localStorage' : 'waiting for first MCP call'} | local: ${local?.name}`);
 
 })();
-
