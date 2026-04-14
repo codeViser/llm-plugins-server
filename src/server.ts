@@ -20,6 +20,7 @@ import { paperDiscoveryRegistry, paperDiscoveryRouter } from '@/routes/paperDisc
 import { tavilyCrawlRegistry, tavilyCrawlRouter } from '@/routes/tavilyCrawl';
 import { tavilyExtractRegistry, tavilyExtractRouter } from '@/routes/tavilyExtract';
 import { tavilyMapRegistry, tavilyMapRouter } from '@/routes/tavilyMap';
+import { perplexitySearchRegistry, perplexitySearchRouter } from '@/routes/perplexitySearch';
 
 import { excelGeneratorRouter } from './routes/excelGenerator/excelGeneratorRouter';
 import { googlePlacesRouter } from './routes/googlePlaces/googlePlacesRouter';
@@ -132,6 +133,7 @@ app.use('/google-places', googlePlacesRouter);
 app.use('/api/tavily/extract', tavilyExtractRouter);
 app.use('/api/tavily/crawl', tavilyCrawlRouter);
 app.use('/api/tavily/map', tavilyMapRouter);
+app.use('/api/perplexity/search', perplexitySearchRouter);
 app.use('/reasoning-cache', reasoningCacheRouter);
 app.use('/wolfram-alpha', wolframAlphaRouter);
 app.use(mcpRouter);
@@ -142,6 +144,7 @@ const allRegistries = [
   tavilyCrawlRegistry,
   tavilyExtractRegistry,
   tavilyMapRegistry,
+  perplexitySearchRegistry,
   paperDiscoveryRegistry,
   // Ensure other registries like excelGeneratorRegistry etc., are included here
   // if they were present in the original hardcoded list in openAPIDocumentGenerator.ts
