@@ -1938,14 +1938,29 @@ async download(key, isMetadata = false) {
           resolve({ deviceToken: data.deviceToken, userEmail: data.userEmail || "" });
         };
 
+        // Poll for popup closure. On close, do NOT call cleanup() immediately —
+        // the popup may have already sent a postMessage that is still queued in
+        // the event loop.  We give a 2-second grace period so the message event
+        // can fire and onMessage() can resolve the promise before we give up.
+        let gracePending = false;
         const closeWatcher = setInterval(() => {
-          if (popup.closed) {
-            cleanup();
-            if (!this.connectionToken) {
-              reject(new Error("Authentication window closed before completion."));
-            }
+          if (popup.closed && !gracePending) {
+            gracePending = true;
+            clearInterval(closeWatcher);
+            setTimeout(() => {
+              // If onMessage already ran it called cleanup() and set connectionToken.
+              // Only reject if we still have no token.
+              if (!this.connectionToken) {
+                cleanup();
+                reject(new Error(
+                  "Authentication window closed before the token could be received. " +
+                  "If the window displayed a token, copy it and paste it into the " +
+                  "Google Connection Token field in the extension settings, then click Save."
+                ));
+              }
+            }, 2500);
           }
-        }, 300);
+        }, 400);
 
         window.addEventListener("message", onMessage);
       });

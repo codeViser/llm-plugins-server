@@ -150,12 +150,39 @@ function renderManualSuccessPage(params: { appType: GoogleAppType; deviceToken: 
 }
 
 function renderPopupSuccessPage(params: { deviceToken: string; userEmail: string; appType: GoogleAppType; origin: string }) {
+  const label = params.appType === 'sync' ? 'Google Connection Token' : 'Google Workspace Connection Token';
   return `<!doctype html>
 <html>
-<head><meta charset="utf-8" /><title>Auth Complete</title></head>
-<body style="font-family: system-ui, sans-serif; background:#18181b; color:#fafafa; padding:24px;">
-  <h2>Authentication successful</h2>
-  <p>You can close this window if it does not close automatically.</p>
+<head>
+  <meta charset="utf-8" />
+  <title>Auth Complete</title>
+  <style>
+    body{font-family:system-ui,-apple-system,sans-serif;background:#18181b;color:#fafafa;margin:0;padding:24px}
+    .card{max-width:560px;margin:0 auto;background:#27272a;border:1px solid #3f3f46;border-radius:14px;padding:24px}
+    h2{color:#4ade80;margin-top:0}
+    .token-label{font-size:12px;color:#a1a1aa;margin-bottom:4px}
+    .token-box{background:#09090b;border:1px solid #52525b;border-radius:8px;padding:12px;font-family:ui-monospace,monospace;font-size:13px;word-break:break-all;margin:8px 0 12px}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    button{padding:9px 16px;border:none;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600}
+    .btn-copy{background:#2563eb;color:#fff}
+    .btn-close{background:#3f3f46;color:#d4d4d8}
+    .hint{font-size:12px;color:#71717a;margin-top:16px;line-height:1.5}
+    .auto-msg{font-size:13px;color:#a1a1aa;margin-bottom:12px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>&#x2705; Authentication Successful</h2>
+    <p class="auto-msg">Signed in as <strong>${params.userEmail}</strong>.<br>
+    The extension should auto-fill your token. If not, copy it below.</p>
+    <div class="token-label">${label}</div>
+    <div class="token-box" id="tok">${params.deviceToken}</div>
+    <div class="row">
+      <button class="btn-copy" onclick="doCopy()">&#x1F4CB; Copy Token</button>
+      <button class="btn-close" onclick="window.close()">Close Window</button>
+    </div>
+    <p class="hint">This window will close in <span id="secs">10</span>&#160;seconds.</p>
+  </div>
   <script>
     (function () {
       var payload = {
@@ -166,14 +193,34 @@ function renderPopupSuccessPage(params: { deviceToken: string; userEmail: string
         userEmail: ${JSON.stringify(params.userEmail)}
       };
       try {
-        if (window.opener && ${JSON.stringify(params.origin)}) {
-          window.opener.postMessage(payload, ${JSON.stringify(params.origin)});
+        if (window.opener && ${JSON.stringify(params.origin || '')}) {
+          window.opener.postMessage(payload, ${JSON.stringify(params.origin || '')});
         }
-      } catch (error) {
-        console.error(error);
-      }
-      setTimeout(function () { window.close(); }, 300);
+      } catch (e) { console.error('postMessage error:', e); }
+
+      var s = 10;
+      var el = document.getElementById('secs');
+      var t = setInterval(function () {
+        s -= 1;
+        if (el) el.textContent = s;
+        if (s <= 0) { clearInterval(t); window.close(); }
+      }, 1000);
     })();
+
+    function doCopy() {
+      var txt = document.getElementById('tok').textContent;
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(txt).then(function () {
+          document.querySelector('.btn-copy').textContent = '\u2705 Copied!';
+        });
+      } else {
+        var r = document.createRange();
+        r.selectNodeContents(document.getElementById('tok'));
+        var s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+        document.execCommand('copy');
+        document.querySelector('.btn-copy').textContent = '\u2705 Copied!';
+      }
+    }
   </script>
 </body>
 </html>`;
