@@ -54,3 +54,17 @@ We welcome your contributions! Help expand TypingMind Plugins Server's capabilit
 - **Plugin Development:** Check out our 'CONTRIBUTING.md' guide for details on creating plugins.
 - **Bug Reports & Ideas:** Open issues to report bugs or suggest new features.
 - **Documentation:** Help improve our documentation for other developers.
+
+
+## Deployment note for PM2 environment changes
+
+If you change secrets or environment variables in `SECRET.js`, PM2 may continue running the old process environment until the app is restarted with environment refresh enabled.
+
+Use:
+
+```bash
+export NVM_DIR="$HOME/.nvm"
+. "$NVM_DIR/nvm.sh"
+nvm use 22
+pm2 restart SECRET.js --only typingmind-proxy --update-env
+```

@@ -25,6 +25,7 @@ import { perplexitySearchRegistry, perplexitySearchRouter } from '@/routes/perpl
 import { excelGeneratorRouter } from './routes/excelGenerator/excelGeneratorRouter';
 import { googlePlacesRouter } from './routes/googlePlaces/googlePlacesRouter';
 import { googleWorkspaceRouter } from './routes/googleWorkspace/googleWorkspace.router';
+import { gdriveSyncAuthRouter } from './routes/gdriveSyncAuth/gdriveSyncAuth.router';
 import { notionDatabaseRouter } from './routes/notionDatabase/notionDatabaseRouter';
 import { powerpointGeneratorRouter } from './routes/powerpointGenerator/powerpointGeneratorRouter';
 import { webPageReaderRouter } from './routes/webPageReader/webPageReaderRouter';
@@ -121,8 +122,10 @@ app.use(requestLogger());
 
 // Routes
 app.use('/workspace', googleWorkspaceRouter);
+app.use('/gdrive-sync', gdriveSyncAuthRouter);
 app.use('/health-check', healthCheckRouter);
 app.use('/images', express.static('public/images'));
+app.use('/clients', express.static('clients'));
 app.use('/youtube-transcript', youtubeTranscriptRouter);
 app.use('/web-page-reader', webPageReaderRouter);
 app.use('/powerpoint-generator', powerpointGeneratorRouter);

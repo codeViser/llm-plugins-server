@@ -4,6 +4,7 @@ import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import { env } from '@/common/utils/envConfig';
+import { buildGoogleAuthUrl, ensureValidOAuthClientForConnection, getConnectionPublicView } from '@/common/utils/googleConnectionVault';
 import { createFormattedGoogleDoc, updateFormattedGoogleDoc } from '@/common/utils/googleDocsFormatter';
 
 // Import PDF parsing library for PDF text extraction
@@ -19,45 +20,72 @@ import * as ExcelJS from 'exceljs';
 
 export const googleWorkspaceRouter: Router = express.Router();
 
-// New Middleware: Expects Google Access Token as Bearer token
-export const verifyGoogleAccessTokenAndSetClient = (req: Request, res: Response, next: NextFunction) => {
-  const authHeader = req.headers.authorization;
+// New Middleware: Expects private server-issued Google Workspace connection token as Bearer token
+export const verifyGoogleWorkspaceConnectionAndSetClient = async (req: Request, res: Response, next: NextFunction) => {
+  // Accept token from custom header (primary) or Authorization Bearer (fallback).
+  // Using a custom header avoids plugin-sandbox restrictions that strip Authorization.
+  const xToken = (req.headers['x-connection-token'] as string | undefined)?.trim() || '';
+  const authHeader = req.headers.authorization || '';
+  const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const deviceToken = xToken || bearerToken;
 
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  if (!deviceToken) {
     return res
       .status(StatusCodes.UNAUTHORIZED)
-      .json({ error: 'User not authenticated: Missing or invalid Authorization header.' });
+      .json({ error: 'Workspace connection token missing.' });
   }
 
-  const googleAccessToken = authHeader.split(' ')[1];
+  try {
+    const reqProtocol = ((req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim()) || req.protocol;
+    const reqHost = req.get('host');
+    if (!reqHost) {
+      return res.status(StatusCodes.BAD_REQUEST).json({ error: 'Missing request host.' });
+    }
 
-  if (!googleAccessToken) {
-    return res.status(StatusCodes.UNAUTHORIZED).json({ error: 'User not authenticated: No access token provided.' });
+    const { oauth2Client } = await ensureValidOAuthClientForConnection({
+      deviceToken,
+      reqProtocol,
+      reqHost,
+      expectedAppType: 'workspace',
+    });
+
+    (req as any).oauth2Client = oauth2Client;
+    (req as any).workspaceDeviceToken = deviceToken;
+    next();
+  } catch (error: any) {
+    return res.status(StatusCodes.UNAUTHORIZED).json({
+      error: error.message || 'Invalid or expired Workspace connection token.',
+    });
   }
-
-  // We still need CLIENT_ID and CLIENT_SECRET to instantiate the OAuth2 client object,
-  // even if this instance is primarily used to set the access token for API calls.
-  // These are used by the library for some internal mechanics or if you were to use it for token refresh (though TM should handle refresh).
-  const oauth2Client = new google.auth.OAuth2(
-    env.GOOGLE_CLIENT_ID,
-    env.GOOGLE_CLIENT_SECRET
-    // No callback URL needed here as we are not initiating auth, just using a token
-  );
-
-  oauth2Client.setCredentials({
-    access_token: googleAccessToken,
-    // Note: We don't have the refresh token here. TypingMind is expected to manage token refresh.
-    // If the access token is expired, Google API calls will fail, and TypingMind should ideally re-authenticate the user.
-  });
-
-  // Make OAuth2 client available in the request object
-  (req as any).oauth2Client = oauth2Client;
-  (req as any).googleAccessToken = googleAccessToken; // Also store the raw token if needed
-  next();
 };
 
-// Apply this new middleware to all routes in this router
-googleWorkspaceRouter.use(verifyGoogleAccessTokenAndSetClient);
+googleWorkspaceRouter.get('/auth/start', (req: Request, res: Response) => {
+  const reqProtocol = ((req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim()) || req.protocol;
+  const reqHost = req.get('host');
+  if (!reqHost) {
+    return res.status(StatusCodes.BAD_REQUEST).send('Missing request host');
+  }
+  const authUrl = buildGoogleAuthUrl({ reqProtocol, reqHost, appType: 'workspace', mode: 'manual' });
+  res.redirect(authUrl);
+});
+
+googleWorkspaceRouter.get('/auth/status', (req: Request, res: Response) => {
+  const xToken = (req.headers['x-connection-token'] as string | undefined)?.trim() || '';
+  const authHeader = req.headers.authorization || '';
+  const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const deviceToken = xToken || bearerToken;
+  if (!deviceToken) {
+    return res.status(StatusCodes.UNAUTHORIZED).json({ error: 'Workspace connection token missing.' });
+  }
+  const connection = getConnectionPublicView(deviceToken);
+  if (!connection || connection.appType !== 'workspace') {
+    return res.status(StatusCodes.NOT_FOUND).json({ error: 'Workspace connection not found.' });
+  }
+  return res.status(StatusCodes.OK).json({ ok: true, connection });
+});
+
+// Apply this new middleware to all operational routes in this router
+googleWorkspaceRouter.use(verifyGoogleWorkspaceConnectionAndSetClient);
 
 // Schemas for validation
 const listFilesSchema = z.object({

@@ -13,6 +13,7 @@ export const env = cleanEnv(process.env, {
   // Rate limiting completely disabled for power users
   GOOGLE_CLIENT_ID: str({ default: isTest ? 'TEST_GOOGLE_CLIENT_ID' : '' }),
   GOOGLE_CLIENT_SECRET: str({ default: isTest ? 'TEST_GOOGLE_CLIENT_SECRET' : '' }),
+  GDRIVE_SYNC_TOKEN_KEY: str({ default: isTest ? '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' : '' }),
   MCP_AUTH_TOKEN: str({ default: '' }),
   // GOOGLE_CALLBACK_URL: str({
   //   default: isTest ? 'http://localhost:3001/auth/google/callback' : 'http://localhost:3000/auth/google/callback'
