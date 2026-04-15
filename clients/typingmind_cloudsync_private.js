@@ -3243,7 +3243,11 @@ async download(key, isMetadata = false) {
         const result = await this.storageService.downloadWithResponse(
           "metadata.json"
         );
-        const metadata = JSON.parse(result.Body.toString());
+        const _bodyStr = (result.Body || "").toString().trim();
+        if (!_bodyStr) {
+          return { metadata: { lastSync: 0, items: {} }, etag: result.ETag || null };
+        }
+        const metadata = JSON.parse(_bodyStr);
         const etag = result.ETag;
         if (!metadata || typeof metadata !== "object") {
           return { metadata: { lastSync: 0, items: {} }, etag };
@@ -3253,14 +3257,15 @@ async download(key, isMetadata = false) {
         }
         return { metadata, etag };
       } catch (error) {
-        if (error.code === "NoSuchKey" || error.statusCode === 404) {
-          return { metadata: { lastSync: 0, items: {} }, etag: null };
-        }
-        if (
-          error.result &&
-          error.result.error &&
-          error.result.error.code === 404
-        ) {
+        const _msg = String(error?.message || "").toLowerCase();
+        const _is404 =
+          error.code === "NoSuchKey" ||
+          error.statusCode === 404 ||
+          _msg.includes("not found") ||
+          _msg.includes("nosuchkey") ||
+          _msg.includes("404") ||
+          (error.result && error.result.error && error.result.error.code === 404);
+        if (_is404) {
           return { metadata: { lastSync: 0, items: {} }, etag: null };
         }
         throw error;
