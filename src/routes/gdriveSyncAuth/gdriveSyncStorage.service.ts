@@ -13,6 +13,30 @@ function escapeDriveQueryValue(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
+
+// Retry helper for transient Google Drive API errors (ECONNRESET, socket hang ups).
+// googleapis does not retry ECONNRESET by default; we wrap with exponential backoff.
+async function retryDriveCall<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  let lastErr: any;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message || err?.code || '');
+      const isTransient = msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') ||
+        msg.includes('ENOTFOUND') || msg.includes('socket hang up') ||
+        err?.code === 'ECONNRESET' || err?.response?.status === 429 ||
+        err?.response?.status === 503 || err?.response?.status === 500;
+      if (!isTransient || attempt === maxRetries) throw err;
+      const delay = Math.min(1000 * Math.pow(2, attempt) + Math.random() * 500, 16000);
+      console.warn(`[Drive retry ${attempt + 1}/${maxRetries}] ${msg.substring(0, 80)} waiting ${Math.round(delay)}ms`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
 export class GoogleDriveSyncStorageService {
   private readonly drive: drive_v3.Drive;
   private readonly appFolderName = 'TypingMind-Cloud-Sync';
@@ -205,18 +229,20 @@ export class GoogleDriveSyncStorageService {
       body: Readable.from(Buffer.from(params.body)),
     };
 
-    const response = existingFile?.id
-      ? await this.drive.files.update({
-          fileId: existingFile.id,
-          requestBody,
-          media,
-          fields: 'id, modifiedTime',
-        })
-      : await this.drive.files.create({
-          requestBody,
-          media,
-          fields: 'id, modifiedTime',
-        });
+    const response = await retryDriveCall(() =>
+      existingFile?.id
+        ? this.drive.files.update({
+            fileId: existingFile.id,
+            requestBody,
+            media,
+            fields: 'id, modifiedTime',
+          })
+        : this.drive.files.create({
+            requestBody,
+            media,
+            fields: 'id, modifiedTime',
+          })
+    );
 
     const fileId = response.data.id;
     const modifiedTime = response.data.modifiedTime;
@@ -239,9 +265,11 @@ export class GoogleDriveSyncStorageService {
     if (!file?.id) {
       throw new Error(`Google Drive object not found: ${normalized}`);
     }
-    const response = await this.drive.files.get(
-      { fileId: file.id, alt: 'media' },
-      { responseType: 'arraybuffer' }
+    const response = await retryDriveCall(() =>
+      this.drive.files.get(
+        { fileId: file.id!, alt: 'media' },
+        { responseType: 'arraybuffer' }
+      )
     );
     return {
       buffer: Buffer.from(response.data as ArrayBuffer),

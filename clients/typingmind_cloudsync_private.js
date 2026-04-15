@@ -1981,7 +1981,7 @@ async download(key, isMetadata = false) {
         cache: "no-store",
       });
       // Exponential backoff for Drive rate limits (max 4 retries, cap 32s)
-      if ((response.status === 429 || response.status === 503) && _retryCount < 4) {
+      if ((response.status === 429 || response.status === 503 || response.status === 500) && _retryCount < 4) {
         const retryAfter = parseInt(response.headers.get('Retry-After') || '0', 10);
         const backoffMs = retryAfter > 0
           ? retryAfter * 1000
@@ -2414,7 +2414,7 @@ async download(key, isMetadata = false) {
         // (pathIdCache + fileMetaCache shared — per-file Drive calls are minimal).
         // Google allows 200 req/s; at CONCURRENCY=8 we use ~5% of quota.
         const _syncIsPrivate = (typeof PrivateServerGoogleDriveService !== "undefined" && this.storageService instanceof PrivateServerGoogleDriveService);
-        const UPLOAD_CONCURRENCY = _syncIsPrivate ? 8 : (this.storageService instanceof GoogleDriveService ? 2 : 5);
+        const UPLOAD_CONCURRENCY = _syncIsPrivate ? 5 : (this.storageService instanceof GoogleDriveService ? 2 : 5);
         const _syncInterBatchDelay = _syncIsPrivate ? 0 : 500;
         const processOneUpload = async (item) => {
           const cloudItem = cloudMetadata.items[item.id];
@@ -2816,7 +2816,7 @@ async download(key, isMetadata = false) {
 
         for await (const batch of allItemsIterator) {
           const _initIsPrivate = (typeof PrivateServerGoogleDriveService !== "undefined" && this.storageService instanceof PrivateServerGoogleDriveService);
-          const CHUNK = _initIsPrivate ? 5 : 2;
+          const CHUNK = _initIsPrivate ? 3 : 2;
           const _initChunkDelay = _initIsPrivate ? 0 : 300;
           const allResults = [];
           for (let ci = 0; ci < batch.length; ci += CHUNK) {
@@ -3452,7 +3452,7 @@ async download(key, isMetadata = false) {
         let skippedTombstones = 0;
         for await (const batch of this.dataService.streamAllItemsInternal()) {
           const _expIsPrivate = (typeof PrivateServerGoogleDriveService !== "undefined" && this.storageService instanceof PrivateServerGoogleDriveService);
-          const CHUNK = _expIsPrivate ? 5 : 2;
+          const CHUNK = _expIsPrivate ? 3 : 2;
           const _expChunkDelay = _expIsPrivate ? 0 : 300;
           for (let ci = 0; ci < batch.length; ci += CHUNK) {
             const chunk = batch.slice(ci, ci + CHUNK);
@@ -3630,7 +3630,7 @@ async download(key, isMetadata = false) {
           `[Force Import] Applying ${cloudKeys.size} cloud items locally...`
         );
         const allCloudItems = Object.entries(cloudMetadata.items);
-        const concurrency = 25;
+        const concurrency = 20;
         let importSuccessCount = 0;
         let importFailCount = 0;
         for (let i = 0; i < allCloudItems.length; i += concurrency) {
