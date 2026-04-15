@@ -125,7 +125,7 @@ app.use('/workspace', googleWorkspaceRouter);
 app.use('/gdrive-sync', gdriveSyncAuthRouter);
 app.use('/health-check', healthCheckRouter);
 app.use('/images', express.static('public/images'));
-app.use('/clients', express.static('clients'));
+app.use('/clients', express.static('clients', { etag: false, lastModified: false, setHeaders: (res) => { res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate'); res.setHeader('Pragma', 'no-cache'); res.setHeader('Expires', '0'); } }));
 app.use('/youtube-transcript', youtubeTranscriptRouter);
 app.use('/web-page-reader', webPageReaderRouter);
 app.use('/powerpoint-generator', powerpointGeneratorRouter);
