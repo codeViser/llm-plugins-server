@@ -1966,7 +1966,7 @@ async download(key, isMetadata = false) {
       });
     }
 
-    async _request(path, options = {}) {
+    async _request(path, options = {}, _retryCount = 0) {
       if (!this.serverUrl) {
         throw new Error("Google private server URL is not configured");
       }
@@ -1980,6 +1980,16 @@ async download(key, isMetadata = false) {
         headers,
         cache: "no-store",
       });
+      // Exponential backoff for Drive rate limits (max 4 retries, cap 32s)
+      if ((response.status === 429 || response.status === 503) && _retryCount < 4) {
+        const retryAfter = parseInt(response.headers.get('Retry-After') || '0', 10);
+        const backoffMs = retryAfter > 0
+          ? retryAfter * 1000
+          : Math.min(Math.pow(2, _retryCount) * 1000 + Math.random() * 500, 32000);
+        console.warn(`[TCS] Rate limited (${response.status}), retrying in ${Math.round(backoffMs/1000)}s (attempt ${_retryCount+1}/4)`);
+        await new Promise(r => setTimeout(r, backoffMs));
+        return this._request(path, options, _retryCount + 1);
+      }
       if (!response.ok) {
         let details = `status ${response.status}`;
         try {
@@ -2385,6 +2395,12 @@ async download(key, isMetadata = false) {
           return;
         }
 
+        // Priority: CHAT_ (user-visible) → settings/agents → CLIENT_CACHE_ (large blobs, last)
+        changedItems.sort((a, b) => {
+          const aChat = a.id.startsWith('CHAT_') ? 0 : a.id.startsWith('CLIENT_CACHE') ? 2 : 1;
+          const bChat = b.id.startsWith('CHAT_') ? 0 : b.id.startsWith('CLIENT_CACHE') ? 2 : 1;
+          return aChat - bChat;
+        });
         console.log("[TCS Sync] \U0001f504 Starting upload: " + changedItems.length + " changed items...");
         this.logger.log(
           "start",
@@ -2394,7 +2410,12 @@ async download(key, isMetadata = false) {
         const cloudMetadata = await this.getCloudMetadata();
         let itemsSynced = 0;
 
-        const UPLOAD_CONCURRENCY = this.storageService instanceof GoogleDriveService ? 2 : 5;
+        // Provider-aware concurrency: private server proxy allows high parallelism
+        // (pathIdCache + fileMetaCache shared — per-file Drive calls are minimal).
+        // Google allows 200 req/s; at CONCURRENCY=8 we use ~5% of quota.
+        const _syncIsPrivate = (typeof PrivateServerGoogleDriveService !== "undefined" && this.storageService instanceof PrivateServerGoogleDriveService);
+        const UPLOAD_CONCURRENCY = _syncIsPrivate ? 8 : (this.storageService instanceof GoogleDriveService ? 2 : 5);
+        const _syncInterBatchDelay = _syncIsPrivate ? 0 : 500;
         const processOneUpload = async (item) => {
           const cloudItem = cloudMetadata.items[item.id];
           if (cloudItem && !item.deleted) {
@@ -2489,7 +2510,7 @@ async download(key, isMetadata = false) {
             const _up = Math.min(ui + UPLOAD_CONCURRENCY, changedItems.length);
             console.log("[TCS Sync] \u2b06\ufe0f  " + _up + "/" + changedItems.length + " (" + Math.round(_up/changedItems.length*100) + "%)");
             this.logger.log("info", `Cloud upload progress: ${Math.min(ui + UPLOAD_CONCURRENCY, changedItems.length)}/${changedItems.length} done`);
-            await new Promise(r => setTimeout(r, 500));
+            if (_syncInterBatchDelay > 0) await new Promise(r => setTimeout(r, _syncInterBatchDelay));
           }
         }
 
@@ -2674,7 +2695,7 @@ async download(key, isMetadata = false) {
             `Processing ${itemsToDownload.length} items from cloud`
           );
         }
-        const DOWNLOAD_CONCURRENCY = 15;
+        const DOWNLOAD_CONCURRENCY = 20;
         let downloadedCount = 0;
         let downloadFailCount = 0;
         const failedKeys = new Set();
@@ -2794,7 +2815,9 @@ async download(key, isMetadata = false) {
         const now = Date.now();
 
         for await (const batch of allItemsIterator) {
-          const CHUNK = 2;
+          const _initIsPrivate = (typeof PrivateServerGoogleDriveService !== "undefined" && this.storageService instanceof PrivateServerGoogleDriveService);
+          const CHUNK = _initIsPrivate ? 5 : 2;
+          const _initChunkDelay = _initIsPrivate ? 0 : 300;
           const allResults = [];
           for (let ci = 0; ci < batch.length; ci += CHUNK) {
             const chunk = batch.slice(ci, ci + CHUNK);
@@ -2843,8 +2866,8 @@ async download(key, isMetadata = false) {
             });
             const chunkResults = await Promise.allSettled(uploadPromises);
             allResults.push(...chunkResults);
-            if (ci + CHUNK < batch.length) {
-              await new Promise(r => setTimeout(r, 300));
+            if (ci + CHUNK < batch.length && _initChunkDelay > 0) {
+              await new Promise(r => setTimeout(r, _initChunkDelay));
             }
           }
 
@@ -3428,7 +3451,9 @@ async download(key, isMetadata = false) {
         let exportFailCount = 0;
         let skippedTombstones = 0;
         for await (const batch of this.dataService.streamAllItemsInternal()) {
-          const CHUNK = 2;
+          const _expIsPrivate = (typeof PrivateServerGoogleDriveService !== "undefined" && this.storageService instanceof PrivateServerGoogleDriveService);
+          const CHUNK = _expIsPrivate ? 5 : 2;
+          const _expChunkDelay = _expIsPrivate ? 0 : 300;
           for (let ci = 0; ci < batch.length; ci += CHUNK) {
             const chunk = batch.slice(ci, ci + CHUNK);
             const uploadPromises = chunk.map(async (item) => {
@@ -3462,8 +3487,8 @@ async download(key, isMetadata = false) {
             if (uploadedCount % 10 === 0 || uploadedCount >= localKeys.size) {
               console.log("[TCS Export] \u2b06\ufe0f  " + uploadedCount + "/" + localKeys.size + " (" + (localKeys.size>0?Math.round(uploadedCount/localKeys.size*100):100) + "%)" + (exportFailCount>0?" -- "+exportFailCount+" failed":"") + (skippedTombstones>0?" -- "+skippedTombstones+" tombstones skipped":""));
             }
-            if (ci + CHUNK < batch.length) {
-              await new Promise(r => setTimeout(r, 300));
+            if (ci + CHUNK < batch.length && _expChunkDelay > 0) {
+              await new Promise(r => setTimeout(r, _expChunkDelay));
             }
           }
           this.logger.log(
@@ -3605,7 +3630,7 @@ async download(key, isMetadata = false) {
           `[Force Import] Applying ${cloudKeys.size} cloud items locally...`
         );
         const allCloudItems = Object.entries(cloudMetadata.items);
-        const concurrency = 20;
+        const concurrency = 25;
         let importSuccessCount = 0;
         let importFailCount = 0;
         for (let i = 0; i < allCloudItems.length; i += concurrency) {

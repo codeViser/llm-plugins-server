@@ -19,11 +19,12 @@ export class GoogleDriveSyncStorageService {
   // pathIdCache is optionally shared across requests for the same device token,
   // eliminating redundant Drive folder-lookup API calls on every upload.
   private readonly pathIdCache: Map<string, string>;
-  private readonly fileMetaCache = new Map<string, drive_v3.Schema$File | null>();
+  private readonly fileMetaCache: Map<string, drive_v3.Schema$File | null>;
 
-  public constructor(auth: any, sharedPathCache?: Map<string, string>) {
+  public constructor(auth: any, sharedPathCache?: Map<string, string>, sharedFileMetaCache?: Map<string, any>) {
     this.drive = google.drive({ version: 'v3', auth });
     this.pathIdCache = sharedPathCache ?? new Map<string, string>();
+    this.fileMetaCache = sharedFileMetaCache ?? new Map<string, drive_v3.Schema$File | null>();
   }
 
   private async getAppFolderId(): Promise<string> {
@@ -222,7 +223,9 @@ export class GoogleDriveSyncStorageService {
     if (!fileId || !modifiedTime) {
       throw new Error(`Google Drive did not return upload metadata for ${normalized}`);
     }
-    this.fileMetaCache.delete(normalized);
+    // Update cache with new file info so incremental re-uploads skip the existence check
+    this.fileMetaCache.set(normalized, { id: fileId, name: filename, modifiedTime,
+      size: String(params.body.length || 0), mimeType: requestBody.mimeType } as any);
     return {
       ETag: modifiedTime,
       id: fileId,
