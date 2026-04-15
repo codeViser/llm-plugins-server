@@ -2487,7 +2487,7 @@ async download(key, isMetadata = false) {
           await Promise.allSettled(uploadBatch.map(processOneUpload));
           if (ui + UPLOAD_CONCURRENCY < changedItems.length) {
             const _up = Math.min(ui + UPLOAD_CONCURRENCY, changedItems.length);
-            console.log("[TCS Sync] \u2b06\ufe0f  Upload: " + _up + "/" + changedItems.length + " (" + Math.round(_up/changedItems.length*100) + "%)");
+            console.log("[TCS Sync] \u2b06\ufe0f  " + _up + "/" + changedItems.length + " (" + Math.round(_up/changedItems.length*100) + "%)");
             this.logger.log("info", `Cloud upload progress: ${Math.min(ui + UPLOAD_CONCURRENCY, changedItems.length)}/${changedItems.length} done`);
             await new Promise(r => setTimeout(r, 500));
           }
@@ -3453,12 +3453,14 @@ async download(key, isMetadata = false) {
                 this.logger.log("error", `[Force Export] Item upload failed: ${r.reason?.message || r.reason}`);
               }
             }
+            uploadedCount += chunk.length;
+            if (uploadedCount % 10 === 0 || uploadedCount >= localKeys.size) {
+              console.log("[TCS Export] \u2b06\ufe0f  " + uploadedCount + "/" + localKeys.size + " (" + (localKeys.size>0?Math.round(uploadedCount/localKeys.size*100):100) + "%)" + (exportFailCount>0?" -- "+exportFailCount+" failed":"") + (skippedTombstones>0?" -- "+skippedTombstones+" tombstones skipped":""));
+            }
             if (ci + CHUNK < batch.length) {
               await new Promise(r => setTimeout(r, 300));
             }
           }
-          uploadedCount += batch.length;
-          console.log("[TCS Export] \u2b06\ufe0f  " + uploadedCount + "/" + localKeys.size + " (" + (localKeys.size>0?Math.round(uploadedCount/localKeys.size*100):100) + "%)" + (exportFailCount>0?" -- "+exportFailCount+" failed":"") + (skippedTombstones>0?" -- "+skippedTombstones+" tombstones skipped":""));
           this.logger.log(
             "info",
             `[Force Export] Uploaded batch. Total: ${uploadedCount}/${localKeys.size}` +
