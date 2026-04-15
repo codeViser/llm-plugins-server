@@ -2393,7 +2393,7 @@ async download(key, isMetadata = false) {
         const cloudMetadata = await this.getCloudMetadata();
         let itemsSynced = 0;
 
-        const UPLOAD_CONCURRENCY = 5;
+        const UPLOAD_CONCURRENCY = this.storageService instanceof GoogleDriveService ? 2 : 5;
         const processOneUpload = async (item) => {
           const cloudItem = cloudMetadata.items[item.id];
           if (cloudItem && !item.deleted) {
@@ -2788,7 +2788,7 @@ async download(key, isMetadata = false) {
         const now = Date.now();
 
         for await (const batch of allItemsIterator) {
-          const CHUNK = 5;
+          const CHUNK = 2;
           const allResults = [];
           for (let ci = 0; ci < batch.length; ci += CHUNK) {
             const chunk = batch.slice(ci, ci + CHUNK);
@@ -3416,7 +3416,7 @@ async download(key, isMetadata = false) {
         let exportFailCount = 0;
         let skippedTombstones = 0;
         for await (const batch of this.dataService.streamAllItemsInternal()) {
-          const CHUNK = 5;
+          const CHUNK = 2;
           for (let ci = 0; ci < batch.length; ci += CHUNK) {
             const chunk = batch.slice(ci, ci + CHUNK);
             const uploadPromises = chunk.map(async (item) => {
@@ -3847,7 +3847,7 @@ async download(key, isMetadata = false) {
         for await (const batch of this.dataService.streamAllItemsInternal()) {
           totalItems += batch.length;
 
-          const CHUNK = 5;
+          const CHUNK = 2;
           const allResults = [];
           for (let ci = 0; ci < batch.length; ci += CHUNK) {
             const chunk = batch.slice(ci, ci + CHUNK);

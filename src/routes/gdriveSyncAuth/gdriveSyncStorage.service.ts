@@ -1,4 +1,5 @@
 import { drive_v3, google } from 'googleapis';
+import { Readable } from 'stream';
 
 type ListResultItem = {
   Key: string;
@@ -15,11 +16,14 @@ function escapeDriveQueryValue(value: string): string {
 export class GoogleDriveSyncStorageService {
   private readonly drive: drive_v3.Drive;
   private readonly appFolderName = 'TypingMind-Cloud-Sync';
-  private readonly pathIdCache = new Map<string, string>();
+  // pathIdCache is optionally shared across requests for the same device token,
+  // eliminating redundant Drive folder-lookup API calls on every upload.
+  private readonly pathIdCache: Map<string, string>;
   private readonly fileMetaCache = new Map<string, drive_v3.Schema$File | null>();
 
-  public constructor(auth: any) {
+  public constructor(auth: any, sharedPathCache?: Map<string, string>) {
     this.drive = google.drive({ version: 'v3', auth });
+    this.pathIdCache = sharedPathCache ?? new Map<string, string>();
   }
 
   private async getAppFolderId(): Promise<string> {
@@ -197,7 +201,7 @@ export class GoogleDriveSyncStorageService {
 
     const media = {
       mimeType: params.isMetadata ? 'application/json' : params.contentType || 'application/octet-stream',
-      body: Buffer.from(params.body),
+      body: Readable.from(Buffer.from(params.body)),
     };
 
     const response = existingFile?.id

@@ -15,6 +15,10 @@ import {
 } from '@/common/utils/googleConnectionVault';
 import { GoogleDriveSyncStorageService } from '@/routes/gdriveSyncAuth/gdriveSyncStorage.service';
 
+// Module-level path-ID cache per authenticated device token.
+// Shared across requests so each upload doesn't re-fetch Drive folder IDs.
+const sharedPathCaches = new Map<string, Map<string, string>>();
+
 export const gdriveSyncAuthRouter: Router = express.Router();
 
 const authStartSchema = z.object({
@@ -104,8 +108,12 @@ async function syncConnectionMiddleware(req: Request, res: Response, next: NextF
       reqHost: getRequestHost(req),
       expectedAppType: 'sync',
     });
+    if (!sharedPathCaches.has(deviceToken)) {
+      sharedPathCaches.set(deviceToken, new Map<string, string>());
+    }
     (req as any).syncOauth2Client = oauth2Client;
     (req as any).syncDeviceToken = deviceToken;
+    (req as any).syncPathCache = sharedPathCaches.get(deviceToken)!;
     next();
   } catch (error: any) {
     return res.status(StatusCodes.UNAUTHORIZED).json({ error: error.message || 'Invalid sync connection token.' });
@@ -323,6 +331,7 @@ gdriveSyncAuthRouter.delete('/auth/revoke', async (req: Request, res: Response) 
       reqHost: getRequestHost(req),
     });
     return res.status(StatusCodes.OK).json({ ok: true, revoked });
+    sharedPathCaches.delete(deviceToken);
   } catch (error: any) {
     return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: error.message || 'Failed to revoke connection.' });
   }
@@ -331,7 +340,7 @@ gdriveSyncAuthRouter.delete('/auth/revoke', async (req: Request, res: Response) 
 gdriveSyncAuthRouter.get('/storage/list', syncConnectionMiddleware, async (req: Request, res: Response) => {
   try {
     const parsed = listSchema.parse(req);
-    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client);
+    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client, (req as any).syncPathCache);
     const results = await storage.list(parsed.query.prefix || '');
     res.status(StatusCodes.OK).json({ items: results });
   } catch (error: any) {
@@ -342,7 +351,7 @@ gdriveSyncAuthRouter.get('/storage/list', syncConnectionMiddleware, async (req: 
 gdriveSyncAuthRouter.get('/storage/object', syncConnectionMiddleware, async (req: Request, res: Response) => {
   try {
     const parsed = objectKeySchema.parse(req);
-    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client);
+    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client, (req as any).syncPathCache);
     if (parsed.query.metadata) {
       const { text, file } = await storage.downloadObjectText(parsed.query.key);
       res.setHeader('ETag', file.modifiedTime || '');
@@ -371,8 +380,9 @@ gdriveSyncAuthRouter.put(
   async (req: Request, res: Response) => {
     try {
       const parsed = objectKeySchema.parse(req);
-      const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client);
+      const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client, (req as any).syncPathCache);
       const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from([]);
+      console.log('[UPLOAD] key=' + String(parsed.query.key) + ' rawBodyLen=' + rawBody.length + ' isBuffer=' + Buffer.isBuffer(req.body));
       const result = await storage.uploadObject({
         key: parsed.query.key,
         body: rawBody,
@@ -381,7 +391,10 @@ gdriveSyncAuthRouter.put(
       });
       return res.status(StatusCodes.OK).json(result);
     } catch (error: any) {
-      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: error.message || 'Failed to upload object.' });
+      const apiErr = (error as any)?.response?.data ?? (error as any)?.errors ?? null;
+      const detail = apiErr ? JSON.stringify(apiErr) : (error.message || 'Failed to upload object.');
+      console.error('[UPLOAD ERROR] key=' + String(req.query?.key ?? '?'), detail);
+      return res.status(StatusCodes.INTERNAL_SERVER_ERROR).json({ error: detail });
     }
   }
 );
@@ -389,7 +402,7 @@ gdriveSyncAuthRouter.put(
 gdriveSyncAuthRouter.delete('/storage/object', syncConnectionMiddleware, async (req: Request, res: Response) => {
   try {
     const parsed = objectKeySchema.parse(req);
-    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client);
+    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client, (req as any).syncPathCache);
     await storage.deleteObject(parsed.query.key);
     return res.status(StatusCodes.OK).json({ ok: true });
   } catch (error: any) {
@@ -400,7 +413,7 @@ gdriveSyncAuthRouter.delete('/storage/object', syncConnectionMiddleware, async (
 gdriveSyncAuthRouter.delete('/storage/folder', syncConnectionMiddleware, async (req: Request, res: Response) => {
   try {
     const parsed = folderSchema.parse(req);
-    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client);
+    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client, (req as any).syncPathCache);
     await storage.deleteFolder(parsed.query.path);
     return res.status(StatusCodes.OK).json({ ok: true });
   } catch (error: any) {
@@ -411,7 +424,7 @@ gdriveSyncAuthRouter.delete('/storage/folder', syncConnectionMiddleware, async (
 gdriveSyncAuthRouter.post('/storage/copy', express.json(), syncConnectionMiddleware, async (req: Request, res: Response) => {
   try {
     const parsed = copySchema.parse(req);
-    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client);
+    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client, (req as any).syncPathCache);
     await storage.copyObject(parsed.body.sourceKey, parsed.body.destinationKey);
     return res.status(StatusCodes.OK).json({ ok: true });
   } catch (error: any) {
@@ -422,7 +435,7 @@ gdriveSyncAuthRouter.post('/storage/copy', express.json(), syncConnectionMiddlew
 gdriveSyncAuthRouter.post('/storage/ensure-path', express.json(), syncConnectionMiddleware, async (req: Request, res: Response) => {
   try {
     const parsed = ensurePathSchema.parse(req);
-    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client);
+    const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client, (req as any).syncPathCache);
     await storage.ensurePathExists(parsed.body.path);
     return res.status(StatusCodes.OK).json({ ok: true });
   } catch (error: any) {
