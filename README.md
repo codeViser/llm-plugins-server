@@ -68,3 +68,24 @@ export NVM_DIR="$HOME/.nvm"
 nvm use 22
 pm2 restart SECRET.js --only typingmind-proxy --update-env
 ```
+
+
+## ⚠️ PM2 + NVM — operational rules
+
+### SAFE: Restart after config changes
+Always source NVM first when using `--update-env`. If run from a bare non-interactive SSH session without sourcing NVM, `--update-env` will store a broken PATH (no node) in the process config, causing a crash loop on the next auto-restart.
+
+### UNSAFE: Never do this
+```bash
+# This captures a PATH with no node binary — causes crash loop:
+pm2 restart typingmind-proxy --update-env   # from a non-interactive shell without sourcing NVM
+```
+
+### Recovery if crash loop occurs
+1. Create system-level node symlinks (already done — this is for reference)
+2. Then restart without --update-env
+
+The node symlinks at `/usr/local/bin/` are already in place on this server. They make `/usr/bin/env node` work regardless of whether NVM is loaded in the env, which means PM2 auto-restarts and reboot recovery are safe permanently.
+
+### Why this works
+The PM2 systemd startup service already has the NVM node path in its `Environment=` block. The `/usr/local/bin/node` symlink is a second layer of defence. Both together ensure node is always findable.

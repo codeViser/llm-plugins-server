@@ -2385,6 +2385,7 @@ async download(key, isMetadata = false) {
           return;
         }
 
+        console.log("[TCS Sync] \U0001f504 Starting upload: " + changedItems.length + " changed items...");
         this.logger.log(
           "start",
           `Syncing ${changedItems.length} changed items to cloud...`
@@ -2485,6 +2486,8 @@ async download(key, isMetadata = false) {
           const uploadBatch = changedItems.slice(ui, ui + UPLOAD_CONCURRENCY);
           await Promise.allSettled(uploadBatch.map(processOneUpload));
           if (ui + UPLOAD_CONCURRENCY < changedItems.length) {
+            const _up = Math.min(ui + UPLOAD_CONCURRENCY, changedItems.length);
+            console.log("[TCS Sync] \u2b06\ufe0f  Upload: " + _up + "/" + changedItems.length + " (" + Math.round(_up/changedItems.length*100) + "%)");
             this.logger.log("info", `Cloud upload progress: ${Math.min(ui + UPLOAD_CONCURRENCY, changedItems.length)}/${changedItems.length} done`);
             await new Promise(r => setTimeout(r, 500));
           }
@@ -2501,6 +2504,7 @@ async download(key, isMetadata = false) {
           this.setLastCloudSync(cloudMetadata.lastSync);
           this.saveMetadata();
           await this.updateSyncDiagnosticsCache();
+          console.log("[TCS Sync] \u2705 Upload complete: " + itemsSynced + " items synced.");
           this.logger.log(
             "success",
             `Sync to cloud completed - ${itemsSynced} items processed.`
@@ -2722,6 +2726,8 @@ async download(key, isMetadata = false) {
           );
           await Promise.allSettled(batchPromises);
           if (downloadedCount % 150 === 0 || i + DOWNLOAD_CONCURRENCY >= itemsToDownload.length) {
+            const _dlN = itemsToDownload.length;
+            console.log("[TCS Sync] \u2b07\ufe0f  Download: " + downloadedCount + "/" + _dlN + " (" + (_dlN>0?Math.round(downloadedCount/_dlN*100):100) + "%)" + (downloadFailCount>0?" -- "+downloadFailCount+" failed":""));
             this.logger.log(
               "info",
               `Cloud download progress: ${downloadedCount}/${itemsToDownload.length} done` +
@@ -2852,6 +2858,7 @@ async download(key, isMetadata = false) {
               }
             }
           });
+          console.log("[TCS InitSync] \u2b06\ufe0f  " + uploadedCount + "/" + itemCount + " (" + (itemCount>0?Math.round(uploadedCount/itemCount*100):100) + "%)");
           this.logger.log(
             "info",
             `[Initial Sync] Processed batch. Total uploaded: ${uploadedCount}/${itemCount}`
@@ -3451,6 +3458,7 @@ async download(key, isMetadata = false) {
             }
           }
           uploadedCount += batch.length;
+          console.log("[TCS Export] \u2b06\ufe0f  " + uploadedCount + "/" + localKeys.size + " (" + (localKeys.size>0?Math.round(uploadedCount/localKeys.size*100):100) + "%)" + (exportFailCount>0?" -- "+exportFailCount+" failed":"") + (skippedTombstones>0?" -- "+skippedTombstones+" tombstones skipped":""));
           this.logger.log(
             "info",
             `[Force Export] Uploaded batch. Total: ${uploadedCount}/${localKeys.size}` +
@@ -3619,6 +3627,7 @@ async download(key, isMetadata = false) {
               this.logger.log("error", `[Force Import] Item failed: ${r.reason?.message || r.reason}`);
             }
           }
+          console.log("[TCS Import] \u2b07\ufe0f  " + (i+batch.length) + "/" + allCloudItems.length + " (" + (allCloudItems.length>0?Math.round((i+batch.length)/allCloudItems.length*100):100) + "%)" + (importFailCount>0?" -- "+importFailCount+" failed":""));
           this.logger.log(
             "info",
             `[Force Import] Processed batch. Total: ${i + batch.length}/${

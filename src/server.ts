@@ -110,7 +110,7 @@ app.use(
   })
 );
 app.use(helmet());
-app.use(bodyParser.json());
+app.use(bodyParser.json({ limit: "50mb" }));
 
 app.use((req, res, next) => {
   res.removeHeader('X-Frame-Options');
