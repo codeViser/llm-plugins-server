@@ -381,7 +381,21 @@ gdriveSyncAuthRouter.put(
     try {
       const parsed = objectKeySchema.parse(req);
       const storage = new GoogleDriveSyncStorageService((req as any).syncOauth2Client, (req as any).syncPathCache);
-      const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from([]);
+      // Normalize req.body to Buffer regardless of how Express parsed it.
+      // If Content-Type is application/json, bodyParser.json() runs first and 
+      // sets req.body to a parsed JS object, consuming the stream. express.raw() 
+      // then skips (req._body=true), leaving req.body as a plain object not a Buffer.
+      // We must re-serialize it to recover the original bytes.
+      let rawBody: Buffer;
+      if (Buffer.isBuffer(req.body)) {
+        rawBody = req.body;
+      } else if (typeof req.body === 'string') {
+        rawBody = Buffer.from(req.body, 'utf8');
+      } else if (req.body !== null && req.body !== undefined && typeof req.body === 'object') {
+        rawBody = Buffer.from(JSON.stringify(req.body), 'utf8');
+      } else {
+        rawBody = Buffer.from([]);
+      }
       console.log('[UPLOAD] key=' + String(parsed.query.key) + ' rawBodyLen=' + rawBody.length + ' isBuffer=' + Buffer.isBuffer(req.body));
       const result = await storage.uploadObject({
         key: parsed.query.key,
