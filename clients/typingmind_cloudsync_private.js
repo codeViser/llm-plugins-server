@@ -2602,16 +2602,31 @@ async download(key, isMetadata = false) {
         const lastMetadataETag = localStorage.getItem("tcs_metadata_etag");
         const hasCloudChanges = cloudMetadataETag !== lastMetadataETag;
         const cloudLastSync = cloudMetadata.lastSync || 0;
-        if (!hasCloudChanges && !metadataWasPurged) {
+        // Count active (non-deleted) items in cloud vs local metadata.
+        // Used as a safety net: even if the ETag matches, if the item counts
+        // differ it means local is out of sync and we must proceed with a
+        // download pass. This prevents the skip-on-ETag-match from silently
+        // ignoring items that failed to download in a previous cycle.
+        const cloudActiveCount = Object.values(cloudMetadata.items || {}).filter(function(i) { return !i.deleted; }).length;
+        const localActiveCount = Object.values(this.metadata.items || {}).filter(function(i) { return !i.deleted; }).length;
+        const countsMatch = (cloudActiveCount === localActiveCount);
+        if (!hasCloudChanges && countsMatch && !metadataWasPurged) {
           this.logger.log(
             "info",
-            "No cloud metadata changes detected (ETag unchanged) - skipping downloads"
+            "No cloud changes detected and item count is consistent - skipping downloads"
           );
           this.metadata.lastSync = cloudLastSync;
           this.setLastCloudSync(cloudLastSync);
           this.saveMetadata();
-          this.logger.log("success", "Sync from cloud completed (no metadata changes)");
+          this.logger.log("success", "Sync from cloud completed (no changes)");
           return;
+        }
+        if (!hasCloudChanges && !countsMatch) {
+          this.logger.log(
+            "warning",
+            `Count mismatch detected despite ETag match — cloud active: ${cloudActiveCount}, local: ${localActiveCount}. Forcing download pass.`
+          );
+          console.log("[TCS Sync] ⚠️  ETag match but count mismatch (" + cloudActiveCount + " cloud vs " + localActiveCount + " local) — forcing download.");
         }
 
         if (hasCloudChanges) {
