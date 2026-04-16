@@ -160,9 +160,12 @@ export class GoogleDriveSyncStorageService {
     await this.getPathId(path, true);
   }
 
-  public async getFileMetadata(path: string): Promise<drive_v3.Schema$File | null> {
+  public async getFileMetadata(path: string, skipCache = false): Promise<drive_v3.Schema$File | null> {
     const normalized = path.replace(/^\/+|\/+$/g, '');
-    if (this.fileMetaCache.has(normalized)) {
+    // skipCache=true disables the cache read so downloads always get
+    // current Drive modifiedTime (used as ETag). Upload path still
+    // benefits from cache to skip the existence-check Drive call.
+    if (!skipCache && this.fileMetaCache.has(normalized)) {
       return this.fileMetaCache.get(normalized)!;
     }
 
@@ -261,7 +264,7 @@ export class GoogleDriveSyncStorageService {
 
   public async downloadObjectBuffer(key: string): Promise<{ buffer: Buffer; file: drive_v3.Schema$File }> {
     const normalized = key.replace(/^\/+/, '');
-    const file = await this.getFileMetadata(normalized);
+    const file = await this.getFileMetadata(normalized, true); // skipCache: always get fresh modifiedTime for ETag
     if (!file?.id) {
       throw new Error(`Google Drive object not found: ${normalized}`);
     }
@@ -284,7 +287,7 @@ export class GoogleDriveSyncStorageService {
 
   public async deleteObject(key: string): Promise<void> {
     const normalized = key.replace(/^\/+/, '');
-    const file = await this.getFileMetadata(normalized);
+    const file = await this.getFileMetadata(normalized, true); // fresh lookup for delete
     if (!file?.id) {
       return;
     }
