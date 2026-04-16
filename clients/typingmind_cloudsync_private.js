@@ -7008,8 +7008,40 @@ async loadTombstoneList(modal) {
       console.warn("Cleanup error:", error);
     }
   };
+  // ── Foreground-return trigger ────────────────────────────────────────────
+  // Different platforms fire different events when the user brings the app
+  // back to the foreground:
+  //   • Desktop browsers         → document.visibilitychange (visible)
+  //   • Android WebView wrappers → window.focus (most reliable on Android)
+  //   • iOS Safari / WKWebView   → window.pageshow
+  // We listen to all three and debounce to one sync per 2-second window so
+  // rapid simultaneous fires don't cause concurrent performFullSync calls.
+  let _foregroundSyncDebounce = null;
+  const _triggerForegroundSync = (reason) => {
+    if (_foregroundSyncDebounce) return; // already queued
+    _foregroundSyncDebounce = setTimeout(() => {
+      _foregroundSyncDebounce = null;
+      try {
+        const orch = app?.syncOrchestrator;
+        const svc  = app?.storageService;
+        if (orch && svc && svc.isConfigured() && !orch.syncInProgress && app.autoSyncEnabled && !app.noSyncMode) {
+          console.log("[TCS] Foreground detected (" + reason + ") — triggering sync");
+          orch.performFullSync().catch((e) => {
+            console.warn("[TCS] Foreground sync error:", e.message);
+          });
+        }
+      } catch(e) {
+        console.warn("[TCS] Foreground sync dispatch error:", e.message);
+      }
+    }, 800); // 800 ms debounce — gives page time to stabilise
+  };
+
   const visibilityChangeHandler = () => {
-    if (document.hidden) {
+    if (!document.hidden) {
+      // Became visible — trigger upload of any locally-pending changes
+      _triggerForegroundSync("visibilitychange");
+    } else {
+      // Became hidden — release caches to free memory
       try {
         if (app?.operationQueue) {
           app.operationQueue.cleanupStaleOperations(Date.now());
@@ -7028,6 +7060,10 @@ async loadTombstoneList(modal) {
   document.addEventListener("visibilitychange", visibilityChangeHandler, {
     passive: true,
   });
+  // Android WebView: focus fires when native app comes to foreground
+  window.addEventListener("focus", function() { _triggerForegroundSync("focus"); }, { passive: true });
+  // iOS / some Android WebViews: pageshow fires on back-navigation or resume
+  window.addEventListener("pageshow", function(e) { if (!e.persisted) return; _triggerForegroundSync("pageshow"); }, { passive: true });
   window.addEventListener(
     "error",
     (event) => {
