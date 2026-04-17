@@ -2269,66 +2269,51 @@ async download(key, isMetadata = false) {
 
           const value = item.data;
           const existingItem = this.metadata.items[key];
-          const currentSize = value instanceof Uint8Array || value instanceof Blob
-            ? (value.size || value.length || 0)
-            : this.getItemSize(value);
-          const currentHash = await this.computeContentHash(value);
-          const rawUpdatedAt = value?.updatedAt || value?.updated_at || value?.lastUpdated || value?.modifiedAt;
-          const currentTimestamp = key.startsWith("CHAT_") && item.type === "idb"
-            ? this.getComparableTimestamp(rawUpdatedAt) || (existingItem?.lastModified || now)
-            : (existingItem?.lastModified || now);
-          const currentFingerprint = key.startsWith("CHAT_") && item.type === "idb"
-            ? this.getChatFingerprint(value)
-            : undefined;
 
-          const lastKnownTimestamp = this.getComparableTimestamp(existingItem?.lastModified || 0);
-          const lastKnownHash = existingItem?.contentHash || "";
-          const lastKnownFingerprint = existingItem?.chatFingerprint || "";
+          if (existingItem?.deleted) continue;
 
           let hasChanged = false;
           let changeReason = "unchanged";
+          let itemLastModified;
+          let currentSize = 0;
 
-          if (!existingItem) {
-            hasChanged = true;
-            changeReason = "new";
-          } else if (existingItem.deleted) {
-            hasChanged = true;
-            changeReason = "revive-after-delete";
-          } else if (!existingItem.synced || existingItem.synced === 0) {
-            hasChanged = true;
-            changeReason = "never-synced";
-          } else if (key.startsWith("CHAT_") && item.type === "idb") {
-            if (currentTimestamp > lastKnownTimestamp) {
-              hasChanged = true;
-              changeReason = "timestamp";
-            } else if (currentFingerprint && currentFingerprint !== lastKnownFingerprint) {
-              hasChanged = true;
-              changeReason = "fingerprint";
+          if (key.startsWith("CHAT_") && item.type === "idb") {
+            // CHAT items: use lightweight fingerprint + timestamp only.
+            // NO JSON.stringify, NO SHA-256 — pure O(1) property reads.
+            const rawUpdatedAt = value?.updatedAt || value?.updated_at || value?.lastUpdated || value?.modifiedAt;
+            const getTs = (v) => { if (typeof v === "number") return v; if (!v) return 0; const t = new Date(v).getTime(); return isNaN(t) ? 0 : t; };
+            const currentTimestamp = getTs(rawUpdatedAt);
+            const lastKnownTimestamp = getTs(existingItem?.lastModified);
+            const currentFingerprint = this.getChatFingerprint(value);
+            const lastKnownFingerprint = existingItem?.chatFingerprint || "";
+            itemLastModified = currentTimestamp || existingItem?.lastModified || 0;
+
+            if (!existingItem) { hasChanged = true; changeReason = "new-chat"; }
+            else if (currentTimestamp && currentTimestamp > lastKnownTimestamp) { hasChanged = true; changeReason = "timestamp"; }
+            else if (currentFingerprint && currentFingerprint !== lastKnownFingerprint) { hasChanged = true; changeReason = "fingerprint"; }
+            else if (!existingItem.synced || existingItem.synced === 0) { hasChanged = true; changeReason = "never-synced-chat"; itemLastModified = now; }
+
+            if (hasChanged) {
+              changedItems.push({ id: key, type: item.type, lastModified: itemLastModified, reason: changeReason, chatFingerprint: currentFingerprint });
             }
-          } else if (currentHash !== lastKnownHash) {
-            hasChanged = true;
-            changeReason = "content-hash";
-          }
+          } else {
+            // Non-CHAT items: size comparison (fast — avoids SHA-256 hashing entirely).
+            // getItemSize uses JSON.stringify which is faster than crypto.subtle + stableStringify.
+            currentSize = value instanceof Uint8Array || value instanceof Blob
+              ? (value.size || value.length || 0)
+              : this.getItemSize(value);
+            itemLastModified = existingItem?.lastModified || 0;
 
-          if (!existingItem?.seenLocal) {
-            hasChanged = true;
-            changeReason = hasChanged && changeReason !== "unchanged" ? changeReason : "local-seen";
-          }
+            if (!existingItem) { hasChanged = true; changeReason = "new"; }
+            else if (currentSize !== (existingItem.size || 0)) { hasChanged = true; changeReason = "size"; itemLastModified = now; }
+            else if (!existingItem.synced || existingItem.synced === 0) { hasChanged = true; changeReason = "never-synced"; }
 
-          if (hasChanged) {
-            const change = {
-              id: key,
-              type: item.type,
-              lastModified: currentTimestamp || now,
-              reason: changeReason,
-              size: currentSize,
-              contentHash: currentHash,
-              seenLocal: true,
-              lastSeenLocalAt: now,
-            };
-            if (currentFingerprint) change.chatFingerprint = currentFingerprint;
-            if (item.type === "blob" && value instanceof Blob) change.blobType = value.type || '';
-            changedItems.push(change);
+            if (hasChanged) {
+              const change = { id: key, type: item.type, lastModified: itemLastModified, reason: changeReason };
+              if (currentSize > 0) change.size = currentSize;
+              if (item.type === "blob" && value instanceof Blob) change.blobType = value.type || "";
+              changedItems.push(change);
+            }
           }
         }
       }
@@ -2351,10 +2336,13 @@ async download(key, isMetadata = false) {
       let newlyDeletedCount = 0;
       for (const itemId in this.metadata.items) {
         const metadataItem = this.metadata.items[itemId];
+        // Only infer deletion for items that were previously synced to this device
+        // (synced > 0 means we confirmed it was here at some point).
+        // This prevents false tombstones for items in cloud metadata that were
+        // never downloaded to this device.
         const eligibleForLocalDeleteInference =
           !!metadataItem &&
           !metadataItem.deleted &&
-          !!metadataItem.seenLocal &&
           (metadataItem.synced || 0) > 0;
 
         if (eligibleForLocalDeleteInference && !localItemKeys.has(itemId)) {
@@ -6844,26 +6832,33 @@ async download(key, isMetadata = false) {
       
       const interval = Math.max(this.config.get("syncInterval") * 1000, 15000);
 
-      this.autoSyncInterval = setInterval(async () => {
-        if (
-          this.storageService &&
-          this.storageService.isConfigured() &&
-          !this.syncOrchestrator.syncInProgress
-        ) {
-          this.updateSyncStatus("syncing");
-          try {
-            await this.syncOrchestrator.performFullSync();
-            await this.backupService.checkAndPerformDailyBackup();
-
-            this.updateSyncStatus("success");
-          } catch (error) {
-            this.logger.log(
-              "error",
-              "Auto-sync/backup cycle failed",
-              error.message
-            );
-            this.updateSyncStatus("error");
+      this.autoSyncInterval = setInterval(() => {
+        // Schedule sync work in a browser idle window so it does not compete
+        // with active user typing or scroll rendering. Falls back gracefully
+        // on browsers that do not support requestIdleCallback (e.g. iOS Safari).
+        const _doSync = async () => {
+          if (
+            this.storageService &&
+            this.storageService.isConfigured() &&
+            !this.syncOrchestrator.syncInProgress
+          ) {
+            this.updateSyncStatus("syncing");
+            try {
+              await this.syncOrchestrator.performFullSync();
+              await this.backupService.checkAndPerformDailyBackup();
+              this.updateSyncStatus("success");
+            } catch (error) {
+              this.logger.log("error", "Auto-sync/backup cycle failed", error.message);
+              this.updateSyncStatus("error");
+            }
           }
+        };
+        if (typeof window.requestIdleCallback === "function") {
+          // Run when browser is idle; timeout ensures it runs within 2× the interval
+          window.requestIdleCallback(_doSync, { timeout: interval * 2 });
+        } else {
+          // Fallback: next macro-task (yields to UI before starting)
+          setTimeout(_doSync, 0);
         }
       }, interval);
 
