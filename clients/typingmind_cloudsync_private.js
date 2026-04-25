@@ -2071,9 +2071,13 @@ async download(key, isMetadata = false) {
     async downloadWithResponse(key) {
       const response = await this._request(`/gdrive-sync/storage/object?key=${encodeURIComponent(key)}&metadata=true`, { method: "GET" });
       const body = await response.text();
+      // Primary: ETag header (now exposed via Access-Control-Expose-Headers on server)
+      // Fallback: X-Object-Modified-Time (also exposed, same value)
+      const _etagVal = response.headers.get("ETag") ||
+                       response.headers.get("X-Object-Modified-Time") || "";
       return {
         Body: body,
-        ETag: response.headers.get("ETag") || "",
+        ETag: _etagVal,
       };
     }
 
@@ -2589,6 +2593,9 @@ async download(key, isMetadata = false) {
 
         const lastMetadataETag = localStorage.getItem("tcs_metadata_etag");
         const hasCloudChanges = cloudMetadataETag !== lastMetadataETag;
+        if (!cloudMetadataETag) {
+          console.warn("[TCS Sync] ⚠️  metadata.json ETag is empty — CORS expose headers may be missing from server.");
+        }
         const cloudLastSync = cloudMetadata.lastSync || 0;
         // Count active (non-deleted) items in cloud vs local metadata.
         // Used as a safety net: even if the ETag matches, if the item counts
@@ -3376,7 +3383,7 @@ async download(key, isMetadata = false) {
     async updateSyncDiagnosticsCache() {
       const _now = Date.now();
       const _last = Number(localStorage.getItem("tcs_sync_diag_last_update") || "0");
-      const _minInterval = 5 * 60 * 1000;
+      const _minInterval = 60 * 1000; // 60s — was 5min, reduced to keep diagnostics fresh
       if (_last && _now - _last < _minInterval) {
         return;
       }

@@ -107,6 +107,7 @@ app.use(
       return callback(new Error(`Origin ${requestOrigin} not allowed by CORS`));
     },
     credentials: true,
+    exposedHeaders: ["ETag", "X-Object-Modified-Time"],
   })
 );
 app.use(helmet());
