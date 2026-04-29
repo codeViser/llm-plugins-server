@@ -666,7 +666,11 @@ if (window.typingMindCloudSync) {
       });
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
-        if (key && !this.config.shouldExclude(key)) {
+        // Only count keys whose value is non-null.
+        // streamAllItemsInternal() skips null-value localStorage entries (TypingMind
+        // sets values to null to signal removal). Counting them here would inflate
+        // Local Items vs actual syncable items, causing a persistent phantom mismatch.
+        if (key && !this.config.shouldExclude(key) && localStorage.getItem(key) !== null) {
           itemKeys.add(key);
         }
       }
