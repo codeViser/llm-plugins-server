@@ -2298,7 +2298,24 @@ async download(key, isMetadata = false) {
 
             if (!existingItem) { hasChanged = true; changeReason = "new-chat"; }
             else if (currentTimestamp && currentTimestamp > lastKnownTimestamp) { hasChanged = true; changeReason = "timestamp"; }
-            else if (currentFingerprint && currentFingerprint !== lastKnownFingerprint) { hasChanged = true; changeReason = "fingerprint"; }
+            else if (
+              currentFingerprint &&
+              currentFingerprint !== lastKnownFingerprint &&
+              // CRITICAL SAFETY GUARD: only upload if local is not older than last-synced state.
+              // If local timestamp is older than what we last synced, the local data is STALE
+              // (e.g. stale data left behind by a failed download, or an old local version).
+              // Uploading it would OVERWRITE newer cloud data — catastrophic data loss.
+              (!lastKnownTimestamp || !currentTimestamp || currentTimestamp >= lastKnownTimestamp)
+            ) { hasChanged = true; changeReason = "fingerprint"; }
+            else if (
+              currentFingerprint &&
+              currentFingerprint !== lastKnownFingerprint &&
+              currentTimestamp && lastKnownTimestamp &&
+              currentTimestamp < lastKnownTimestamp
+            ) {
+              // Stale local chat detected. Log for debugging but DO NOT upload.
+              console.warn("[TCS Sync] ⚠️  Stale local chat suppressed: " + key + " (local ts " + new Date(currentTimestamp).toISOString() + " < last-known ts " + new Date(lastKnownTimestamp).toISOString() + "). Will re-download on next syncFromCloud.");
+            }
             else if (!existingItem.synced || existingItem.synced === 0) { hasChanged = true; changeReason = "never-synced-chat"; itemLastModified = now; }
 
             if (hasChanged) {
@@ -2423,7 +2440,13 @@ async download(key, isMetadata = false) {
                 "skip",
                 `Skipping upload for ${item.id}, cloud version is newer.`
               );
-              this.metadata.items[item.id] = { ...this.metadata.items[item.id], ...cloudItem };
+              // CRITICAL: do NOT overwrite local metadata with cloud's version here.
+              // Doing so would tell future sync cycles "we have cloud's version" when
+              // our local DATA is still the old version. detectChanges would then find
+              // matching fingerprints (metadata vs data) → skip download forever →
+              // UI shows stale data indefinitely. Leaving local metadata UNCHANGED means
+              // next syncFromCloud sees metadata-vs-cloud fingerprint mismatch → downloads.
+              console.log("[TCS Sync] ⏭  Cloud version is newer for " + item.id + " — will download on next syncFromCloud.");
               return;
             }
           }
@@ -2683,7 +2706,17 @@ async download(key, isMetadata = false) {
               const cloudFp = cloudItem.chatFingerprint || "";
               const localFp = localItem?.chatFingerprint || "";
               if (cloudFp && cloudFp !== localFp) {
-                return true;
+                // SAFETY: fingerprint mismatch doesn't say WHICH side is newer. Compare
+                // timestamps. Only pull cloud if it's newer — otherwise local has unsynced
+                // changes and syncToCloud should upload them (not have them overwritten).
+                const cloudTs = new Date(cloudItem.lastModified || 0).getTime();
+                const localTs = new Date(localItem?.lastModified || 0).getTime();
+                if (cloudTs > localTs) {
+                  return true;
+                }
+                // Local is as-new-or-newer. Don't download (would lose local edits).
+                // Will be resolved by syncToCloud uploading local's newer version.
+                return false;
               }
             }
             const cloudTimestamp = new Date(
@@ -2776,7 +2809,21 @@ async download(key, isMetadata = false) {
             `⚠️ ${failedKeys.size} items failed to download and will be retried on next sync`
           );
           for (const fk of failedKeys) {
-            delete cloudMetadata.items[fk];
+            // CRITICAL: do NOT delete cloudMetadata.items[fk] or let it contain cloud's
+            // new fingerprint without our local data being updated. If we did, detectChanges
+            // next cycle would either see "new item" (and upload stale local) or "fingerprint
+            // mismatch" (with local older than metadata — still bad).
+            // Instead: preserve the PREVIOUS local metadata entry (which matches the
+            // stale local data). Then detectChanges sees local data == metadata → no change,
+            // no spurious upload. Next syncFromCloud retries the download; success updates both.
+            const prevLocalEntry = this.metadata.items?.[fk];
+            if (prevLocalEntry) {
+              cloudMetadata.items[fk] = { ...prevLocalEntry };
+            } else {
+              // This device never had the item. Delete from cloudMetadata so
+              // it's not persisted locally (but syncFromCloud next cycle will retry).
+              delete cloudMetadata.items[fk];
+            }
           }
         }
         for (const [key, item] of Object.entries(this.metadata.items || {})) {
@@ -3647,22 +3694,28 @@ async download(key, isMetadata = false) {
         const concurrency = 20;
         let importSuccessCount = 0;
         let importFailCount = 0;
+        const importFailedKeys = new Set();
         for (let i = 0; i < allCloudItems.length; i += concurrency) {
           const batch = allCloudItems.slice(i, i + concurrency);
           const downloadPromises = batch.map(async ([key, cloudItem]) => {
-            if (cloudItem.deleted) {
-              await this.dataService.performDelete(key, cloudItem.type);
-            } else {
-              const downloadPath = cloudItem.type === "blob"
-                ? `attachments/${key}.bin`
-                : `items/${key}.json`;
-              const data = await this.storageService.download(downloadPath);
-              if (cloudItem.type === "blob" && data) {
-                data.blobType = cloudItem.blobType || '';
-                await this.dataService.saveItem(data, "blob", key);
+            try {
+              if (cloudItem.deleted) {
+                await this.dataService.performDelete(key, cloudItem.type);
               } else {
-                await this.dataService.saveItem(data, cloudItem.type, key);
+                const downloadPath = cloudItem.type === "blob"
+                  ? `attachments/${key}.bin`
+                  : `items/${key}.json`;
+                const data = await this.storageService.download(downloadPath);
+                if (cloudItem.type === "blob" && data) {
+                  data.blobType = cloudItem.blobType || '';
+                  await this.dataService.saveItem(data, "blob", key);
+                } else {
+                  await this.dataService.saveItem(data, cloudItem.type, key);
+                }
               }
+            } catch (err) {
+              importFailedKeys.add(key);
+              throw err; // re-throw so Promise.allSettled captures it
             }
           });
           const results = await Promise.allSettled(downloadPromises);
@@ -3694,6 +3747,29 @@ async download(key, isMetadata = false) {
           "success",
           `[Force Import] ${importSuccessCount} cloud items applied locally.`
         );
+
+        // CRITICAL: handle failed imports. Stale local data must be removed so it
+        // doesn't later trigger spurious uploads (overwriting newer cloud versions).
+        // Failed items should also be absent from local metadata so detectChanges
+        // won't find a local-data-vs-metadata mismatch.
+        if (importFailedKeys.size > 0) {
+          this.logger.log(
+            "warning",
+            `[Force Import] Cleaning ${importFailedKeys.size} failed-import items to prevent stale-data uploads.`
+          );
+          for (const fk of importFailedKeys) {
+            // Remove from cloudMetadata so local metadata won't track it.
+            delete cloudMetadata.items[fk];
+            // Delete any stale local data for this key.
+            try {
+              const existingItem = this.metadata.items?.[fk];
+              const itemType = existingItem?.type || "idb";
+              await this.dataService.performDelete(fk, itemType);
+            } catch (e) {
+              // Non-fatal — item may not exist locally at all.
+            }
+          }
+        }
 
         this.metadata = cloudMetadata;
         this.saveMetadata();
