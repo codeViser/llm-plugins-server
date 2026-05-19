@@ -6181,21 +6181,66 @@ async download(key, isMetadata = false) {
         undoButton.textContent = "Restoring...";
 
         try {
+          const restoreFromCloudOrBackup = async (itemId, item) => {
+            const livePath = item.type === "blob"
+              ? `attachments/${itemId}.bin`
+              : `items/${itemId}.json`;
+
+            // 1) Preferred path: restore the live object. This works when the item
+            //    was tombstoned only in metadata and the encrypted payload still exists.
+            try {
+              return await this.storageService.download(livePath);
+            } catch (liveErr) {
+              this.logger.log(
+                "warning",
+                `Live object missing for ${itemId}; searching backups... (${liveErr.message || liveErr})`
+              );
+            }
+
+            // 2) Fallback: search latest backups/snapshots. This is critical because
+            //    some destructive/cleanup paths can leave a tombstone in metadata while
+            //    the live item object has already been deleted from Drive. The UI can
+            //    still show a recoverable tombstone, but restore must pull data from a
+            //    snapshot/daily backup in that case.
+            const backups = await this.backupService.loadBackupList();
+            const sortedBackups = (backups || [])
+              .filter((b) => b && b.backupFolder)
+              .sort((a, b) => new Date(b.modified || 0) - new Date(a.modified || 0));
+
+            for (const backup of sortedBackups) {
+              const backupPath = item.type === "blob"
+                ? `${backup.backupFolder}/attachments/${itemId}.bin`
+                : `${backup.backupFolder}/items/${itemId}.json`;
+              try {
+                this.logger.log("info", `Trying backup restore for ${itemId} from ${backup.backupFolder}`);
+                return await this.storageService.download(backupPath);
+              } catch (_) {
+                // Keep searching older backups.
+              }
+            }
+
+            throw new Error(`Could not restore ${itemId}: encrypted object was not found in live Drive storage or available backups.`);
+          };
+
           const restorePromises = itemIdsToRestore.map(async (itemId) => {
             const item = this.syncOrchestrator.metadata.items[itemId];
             if (item && item.deleted) {
-              this.logger.log(
-                "info",
-                `Downloading data for restored item: ${itemId}`
-              );
-              const data = await this.storageService.download(
-                `items/${itemId}.json`
-              );
-              await this.dataService.saveItem(data, item.type, itemId);
+              this.logger.log("info", `Restoring data for deleted item: ${itemId}`);
+              const data = await restoreFromCloudOrBackup(itemId, item);
+              if (item.type === "blob" && data) {
+                data.blobType = item.blobType || data.blobType || "";
+                await this.dataService.saveItem(data, "blob", itemId);
+              } else {
+                await this.dataService.saveItem(data, item.type, itemId);
+              }
               delete item.deleted;
               delete item.deletedAt;
               delete item.tombstoneVersion;
               item.synced = 0;
+              item.lastModified = Date.now();
+              // Remove local tombstone marker so the restored item does not get
+              // re-deleted by a stale local tombstone copy.
+              try { localStorage.removeItem(`tcs_tombstone_${itemId}`); } catch (_) {}
             }
           });
 
