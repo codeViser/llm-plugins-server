@@ -1,100 +1,81 @@
 ---
 name: adversarial-synthesis
-description: Structured adversarial review of a thesis or position using critic/actor/judge reasoning. Surfaces blind spots, stress-tests claims, and produces a refined robustly-defended conclusion. Use when the user requests devil's-advocate analysis, adversarial review, debate-style stress-testing, or convergence scoring. Also orchestrates the MARS plugin when MARS is enabled. Triggers on: "adversarial", "stress test", "argue against", "devil's advocate", "debate", "challenge my thesis", "MARS".
+description: Structured internal critic-actor-judge debate to stress-test a thesis before commitment. Use only when the user explicitly requests adversarial review, devil's-advocate analysis, convergence scoring, or when a high-stakes irreversible claim needs deliberate challenge before it stands. Triggers on: "adversarial", "stress test", "argue against", "devil's advocate", "debate", "challenge this", "find flaws", "convergence".
 ---
-
 # Adversarial Synthesis
 
-## Purpose
-Simulate structured intellectual debate to produce a thesis that has survived rigorous challenge. Activates when the task explicitly calls for adversarial pressure or MARS orchestration — not on all queries.
+## Overview
+A thesis that has not been challenged is not a reliable thesis. When the cost of being wrong is high, deliberately generate the strongest objections, defend or concede them honestly, track convergence, and iterate until the position stabilises. This skill runs entirely as an internal reasoning process — no external models or APIs required.
+
+Use this skill sparingly. It is for high-stakes claims under deliberate adversarial pressure, not for routine analysis. Default analytical behaviour is already available; invoke this skill only when structured challenge is the explicit goal.
 
 ## When to Use
-Activate this skill when:
-- The user says 'stress test this', 'argue against', 'devil's advocate', 'adversarial review', 'debate', 'find flaws', or similar.
-- A high-stakes decision needs challenge before commitment.
-- A complex thesis may contain unexamined assumptions or blind spots.
-- The user wants convergence scoring on a multi-perspective question.
-- The MARS plugin is enabled and a research+debate workflow is appropriate.
+- The user explicitly asks for adversarial review, devil's advocate, stress testing, or debate
+- A high-stakes or irreversible decision needs deliberate challenge before commitment
+- A complex position may contain unexamined assumptions or blind spots worth surfacing
+- Convergence scoring across multiple challenge cycles is desired
 
-Do **not** use for routine Q&A, simple lookups, creative tasks, or computation.
+**When NOT to use:**
+- Routine Q&A, explanation, comparison, or analysis where no position is being defended
+- Low-stakes questions where the cost of a wrong answer is trivial
+- The analytical task is about understanding, not defending a thesis
+- The user has not asked for adversarial pressure (do not impose it unsolicited)
 
----
+## The Protocol
 
-## Internal Mode (no MARS plugin)
+Read `debate-cycle.md` in this skill directory for the full cycle format and templates.
 
-Run the adversarial loop as an internal reasoning process.
+### Overview of the loop
+Play three roles sequentially for each cycle:
+- **Critic:** find the strongest objection to each claim. Bias toward disproof, not validation.
+- **Actor:** defend or concede each objection with explicit reasoning. Genuine concessions improve the thesis.
+- **Judge:** score convergence (0–100) and recommend: CONVERGE, CONTINUE, or END.
 
-### Phase 1 — Initial Thesis
-1. State the thesis clearly with numbered claims.
-2. For each claim, note its evidence basis and rate confidence: HIGH / MEDIUM / LOW.
-3. Identify which claims are load-bearing (the conclusion collapses if these fail).
+Iterate until convergence score meets threshold or 3 cycles complete.
+After convergence or cycle limit: synthesise the refined thesis and report the outcome.
 
-### Phase 2 — Critic Pass
-For each major claim, generate the strongest plausible objection:
-- Is the evidence sufficient, or could it support a different conclusion?
-- Are there logical gaps or invalid inferences?
-- What counterexamples exist?
-- What relevant considerations have been omitted?
-- Is the scope of the claim accurately bounded?
+### Convergence threshold
+Default: 75/100. Increase for higher-stakes claims. Convergence is reached when:
+- Major objections have been addressed or explicitly accepted as trade-offs
+- Additional cycles are unlikely to produce substantively new findings
+- The Judge assesses no BLOCKING issues remain unaddressed
 
-Label each objection by severity:
-- **BLOCKING** — invalidates the conclusion if unaddressed.
-- **NOTABLE** — weakens confidence significantly.
-- **MANAGEABLE** — a caveat, not a refutation.
+### Cycle limit
+Stop at 3 cycles. If substantive objections remain after 3 cycles, surface this to the user as information about the thesis — do not silently run more cycles. The user decides whether to continue.
 
-### Phase 3 — Actor Pass
-For each objection:
-- If valid: concede and update the thesis.
-- If not valid: provide a specific rebuttal with reasoning.
-- What additional evidence would most strengthen the current position?
-- What would falsify the thesis, and is that falsification actually possible?
+## Output Structure
+At the end of the final cycle, report:
+1. **Initial Thesis:** the position that was tested (with numbered claims and initial confidence)
+2. **Key Objections Surfaced:** the strongest challenges found, labelled by severity (BLOCKING / NOTABLE / MANAGEABLE)
+3. **Rebuttals and Concessions:** what held, what was updated, and why
+4. **Refined Thesis:** the post-challenge position incorporating valid objections
+5. **Residual Issues:** what remains genuinely unresolved after all cycles
+6. **Convergence Report:** final score, rounds completed, recommendation
 
-### Phase 4 — Synthesis
-1. Update the thesis to incorporate valid objections and new evidence.
-2. Mark positions that survived challenge with a brief explanation of why.
-3. Flag genuine unresolved issues with appropriate hedging language.
-4. State a convergence assessment: what confidence level does the final thesis warrant, and on what basis?
+## Common Rationalizations
+| Rationalization | Reality |
+|---|---|
+| "My thesis is solid, no need for adversarial review" | Uncontested confidence is exactly the condition this skill exists to interrupt. |
+| "The user didn't say adversarial, but I think the claim deserves it" | Do not impose this protocol unsolicited. It is opt-in, not default. |
+| "I'll generate mild objections to avoid conceding anything" | Mild objections produce shallow refinement. The Critic must be adversarial — bias toward disproof. |
+| "After 3 cycles nothing changed, so the thesis must be correct" | No change can mean the objections were weak, not that the thesis is flawless. Flag this distinction. |
+| "Conceding a point weakens my answer" | Conceding valid objections and incorporating them makes the refined thesis stronger, not weaker. |
+| "This is too slow, I'll skip the Judge step" | The Judge tracks convergence and prevents infinite loops. It is not optional. |
 
----
+## Red Flags
+- Generating objections that do not challenge load-bearing claims
+- Treating the Critic and Actor as one role (they must be adversarial to each other)
+- Declaring convergence without a Judge score above threshold
+- Running more than 3 cycles without surfacing to the user that convergence was not reached
+- Using this skill for questions where no thesis is being defended
+- Presenting the initial thesis as the final answer without running the loop
 
-## MARS Plugin Mode (when MARS is enabled)
-
-When the MARS plugin (start_debate_round) is available and the task warrants it:
-
-### Phase 1 — Research + Initial Thesis
-1. Use available retrieval tools to research the topic thoroughly.
-2. Write a detailed initial_thesis: numbered claims, evidence citations, and explicit limitations.
-3. Do NOT present this thesis to the user as a final answer — proceed to Phase 2 immediately.
-
-### Phase 2 — Debate Loop
-4. Call start_debate_round with the current thesis and original query.
-5. Read the Orchestration Instructions at the bottom of the tool result:
-   - PHASE 2.5 or SEARCH REQUIRED: execute all pending search queries, then proceed.
-   - PROCEED TO NEXT ROUND: increment round and call again.
-   - DEBATE COMPLETE or MAX ROUNDS: proceed to Phase 3.
-
-### Phase 2.5 — Orchestrator Active Reasoning (between every round)
-Between each MARS round, you must:
-1. Execute all pending sub-agent search queries using available search tools.
-2. Conduct additional targeted research on BLOCKING issues.
-3. Reason: which objections are supported vs refuted by evidence?
-4. Apply the Judge synthesis_guidance recommendation.
-5. Produce an Orchestrator-Enhanced Thesis that carries your own intellectual authorship.
-6. Pass this enhanced thesis as current_thesis in the next start_debate_round call.
-
-### Phase 3 — Final Synthesis
-After DEBATE COMPLETE, FORCE_CONCLUDED, or MAX ROUNDS:
-1. Write the final response based on the Orchestrator-Enhanced Thesis.
-2. Address all BLOCKING issues explicitly.
-3. Report: convergence score, rounds completed, premise validity, and unresolved disputes.
-4. If score is below threshold or guards failed: hedge conclusions proportionally.
-
----
-
-## Output Format (both modes)
-1. **Initial Thesis:** the position being tested, with confidence ratings per claim.
-2. **Key Objections:** the strongest challenges found, labelled by severity.
-3. **Rebuttals / Concessions:** what held, what was updated, and why.
-4. **Refined Thesis:** the strengthened, post-challenge position.
-5. **Residual Issues:** what remains genuinely uncertain after the full process.
-6. **Convergence Assessment:** what confidence the conclusion warrants and on what basis.
+## Verification
+After applying this skill:
+- [ ] The initial thesis was stated with numbered claims and confidence per claim
+- [ ] The Critic generated objections biased toward disproof, not toward validation
+- [ ] Every BLOCKING objection was explicitly addressed (defended or conceded)
+- [ ] Valid concessions were incorporated into the refined thesis
+- [ ] A Judge score was produced for each cycle with recommendation
+- [ ] The loop stopped at convergence or at 3 cycles (not silently continued)
+- [ ] The final output includes all 6 sections from Output Structure
