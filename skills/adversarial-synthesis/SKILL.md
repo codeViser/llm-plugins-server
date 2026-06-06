@@ -1,6 +1,6 @@
 ---
 name: adversarial-synthesis
-description: Structured internal critic-actor-judge debate to stress-test a thesis before commitment. Use only when the user explicitly requests adversarial review, devil's-advocate analysis, convergence scoring, or when a high-stakes irreversible claim needs deliberate challenge before it stands. Triggers on: "adversarial", "stress test", "argue against", "devil's advocate", "debate", "challenge this", "find flaws", "convergence".
+description: Structured internal critic-actor-judge debate to stress-test a thesis before commitment. Use only when the user explicitly requests adversarial review, devil's advocate analysis, convergence scoring, or when a high-stakes irreversible claim needs deliberate challenge before it stands. Triggers on "adversarial", "stress test", "argue against", "devil's advocate", "debate", "challenge this", "find flaws" or "convergence".
 ---
 # Adversarial Synthesis
 

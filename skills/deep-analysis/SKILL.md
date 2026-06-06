@@ -1,6 +1,6 @@
 ---
 name: deep-analysis
-description: Explicit multi-step reasoning with visible assumptions, alternatives, edge cases, and validation. Use when correctness matters more than speed, when a decision has real tradeoffs to expose, when stakes are high or the reasoning is non-obvious, or when the user needs to understand a derivation — not just its conclusion. Triggers on: "analyse", "tradeoffs", "compare", "design", "should I", "deep analysis", "think through", "why".
+description: Explicit multi-step reasoning with visible assumptions, alternatives, edge cases, and validation. Use when correctness matters more than speed, when a decision has real tradeoffs to expose, when stakes are high or the reasoning is non-obvious, or when the user needs to understand a derivation not just its conclusion. Triggers on "analyse", "tradeoffs", "compare", "design", "should I", "deep analysis", "think through" or "why".
 ---
 # Deep Analysis
 

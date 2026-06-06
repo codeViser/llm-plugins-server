@@ -1,6 +1,6 @@
 ---
 name: deep-research
-description: Multi-source evidence-gathering with mandatory cross-checking and inline citations. Use when a claim requires external verification, when current facts are needed beyond training knowledge, when comparing sources on a contested topic, or when the response depends on evidence the model cannot assert from memory. Triggers on: "research", "verify", "find current", "look up", "sources", "deep research".
+description: Multi-source evidence-gathering with mandatory cross-checking and inline citations. Use when a claim requires external verification, when current facts are needed beyond training knowledge, when comparing sources on a contested topic, or when the response depends on evidence the model cannot assert from memory. Triggers on "research", "verify", "find current", "look up", "sources" or "deep research".
 ---
 # Deep Research
 
