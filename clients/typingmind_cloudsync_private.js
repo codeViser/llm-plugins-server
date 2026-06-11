@@ -22,7 +22,7 @@ Contributors (Docs & Fixes):
 - Jeff G aka Ken Harris (Various fixes and improvements) [2026-03-04]
 */
 
-const TCS_BUILD_VERSION = "2026-04-14-private-server.1";
+const TCS_BUILD_VERSION = "2026-06-11.1";
 
 if (window.typingMindCloudSync) {
   console.log("TypingMind Cloud Sync already loaded");
@@ -111,13 +111,8 @@ if (window.typingMindCloudSync) {
     }
     loadConfig() {
       const defaults = {
-        storageType: "s3",
+        storageType: "googleDrive",
         syncInterval: 15,
-        bucketName: "",
-        region: "",
-        accessKey: "",
-        secretKey: "",
-        endpoint: "",
         encryptionKey: "",
         googleServerUrl: "",
         googleConnectionToken: "",
@@ -129,11 +124,6 @@ if (window.typingMindCloudSync) {
       const keyMap = {
         storageType: "tcs_storagetype",
         syncInterval: "tcs_aws_syncinterval",
-        bucketName: "tcs_aws_bucketname",
-        region: "tcs_aws_region",
-        accessKey: "tcs_aws_accesskey",
-        secretKey: "tcs_aws_secretkey",
-        endpoint: "tcs_aws_endpoint",
         encryptionKey: "tcs_encryptionkey",
         googleServerUrl: "tcs_google_serverurl",
         googleConnectionToken: "tcs_google_connectiontoken",
@@ -168,6 +158,8 @@ if (window.typingMindCloudSync) {
           stored[key] = key === "syncInterval" ? parseInt(value) || 15 : value;
         }
       });
+      // Migration: S3 support removed - coerce any legacy selection.
+      if (stored.storageType === "s3") stored.storageType = "googleDrive";
       return { ...defaults, ...stored };
     }
     loadExclusions() {
@@ -221,11 +213,6 @@ if (window.typingMindCloudSync) {
       const keyMap = {
         storageType: "tcs_storagetype",
         syncInterval: "tcs_aws_syncinterval",
-        bucketName: "tcs_aws_bucketname",
-        region: "tcs_aws_region",
-        accessKey: "tcs_aws_accesskey",
-        secretKey: "tcs_aws_secretkey",
-        endpoint: "tcs_aws_endpoint",
         encryptionKey: "tcs_encryptionkey",
         googleServerUrl: "tcs_google_serverurl",
         googleConnectionToken: "tcs_google_connectiontoken",
@@ -249,12 +236,14 @@ if (window.typingMindCloudSync) {
       });
     }
     shouldExclude(key) {
-      const always = key.startsWith("tcs_");
-      return (
-        this.exclusions.includes(key) ||
-        always ||
-        key.startsWith("gsi_") ||
-        key.includes("eruda")
+      if (key.startsWith("tcs_") || key.startsWith("gsi_") || key.includes("eruda")) {
+        return true;
+      }
+      // User exclusions: exact key match, or prefix wildcard ("CLIENT_CACHE_*").
+      return this.exclusions.some(
+        (ex) =>
+          ex === key ||
+          (ex.endsWith("*") && ex.length > 1 && key.startsWith(ex.slice(0, -1)))
       );
     }
     reloadExclusions() {
@@ -648,7 +637,7 @@ if (window.typingMindCloudSync) {
       const db = await this.getDB();
       const transaction = db.transaction(["keyval"], "readonly");
       const store = transaction.objectStore("keyval");
-      await new Promise((resolve) => {
+      await new Promise((resolve, reject) => {
         const request = store.openKeyCursor();
         request.onsuccess = (event) => {
           const cursor = event.target.result;
@@ -662,7 +651,10 @@ if (window.typingMindCloudSync) {
             resolve();
           }
         };
-        request.onerror = () => resolve();
+        // CRITICAL: a silent resolve() here returned PARTIAL key sets on read
+        // errors, which downstream deletion-inference interpreted as "user
+        // deleted these items" - mass data loss. Fail loudly instead.
+        request.onerror = () => reject(new Error("IndexedDB key enumeration failed - aborting to protect against partial reads"));
       });
       for (let i = 0; i < localStorage.length; i++) {
         const key = localStorage.key(i);
@@ -1160,7 +1152,7 @@ if (window.typingMindCloudSync) {
   // ─────────────────────────────────────────────────────────────────────────
   // CLASS: IStorageProvider  (abstract base)
   // Defines the interface that all cloud storage backends must implement.
-  // Concrete subclasses (S3Service, GoogleDriveService) override every method.
+  // Concrete subclasses (GoogleDriveService) override every method.
   // The constructor throws if instantiated directly, enforcing the contract.
   // Interface: isConfigured(), initialize(), handleAuthentication(),
   //   upload(), download(), delete(), list(), downloadWithResponse(),
@@ -1249,479 +1241,6 @@ if (window.typingMindCloudSync) {
 
     async ensurePathExists(path) {
       throw new Error("Method 'ensurePathExists()' must be implemented.");
-    }
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // CLASS: S3Service  (extends IStorageProvider)
-  // Storage backend for AWS S3 and any S3-compatible provider (Cloudflare R2,
-  // Wasabi, iDrive E2, GCS S3 API, etc.). Dynamically loads the AWS SDK v3
-  // from CDN on first use. Uses multipart upload for large files and server-
-  // side copy (CopyObject) for fast snapshot creation without re-uploading.
-  // Encrypts all data via CryptoService before uploading; decrypts on download.
-  // Key methods: upload(), download(), downloadRaw(), delete(), list(),
-  //   copyObject(), uploadRaw(), loadSDK()
-  // ─────────────────────────────────────────────────────────────────────────
-  class S3Service extends IStorageProvider {
-    constructor(configManager, cryptoService, logger) {
-      super(configManager, cryptoService, logger);
-      this.client = null;
-      this.sdkLoaded = false;
-    }
-
-    static get displayName() {
-      return "Amazon S3 (or S3-Compatible)";
-    }
-
-    static getConfigurationUI() {
-      const html = `
-        <div class="space-y-2">
-          <div class="flex space-x-4">
-            <div class="w-2/3">
-              <label for="aws-bucket" class="block text-sm font-medium text-zinc-300">Bucket Name <span class="text-red-400">*</span></label>
-              <input id="aws-bucket" name="aws-bucket" type="text" class="w-full px-2 py-1.5 border border-zinc-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700 text-white" autocomplete="off" required>
-            </div>
-            <div class="w-1/3">
-              <label for="aws-region" class="block text-sm font-medium text-zinc-300">Region <span class="text-red-400">*</span></label>
-              <input id="aws-region" name="aws-region" type="text" class="w-full px-2 py-1.5 border border-zinc-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700 text-white" autocomplete="off" required>
-            </div>
-          </div>
-          <div>
-            <label for="aws-access-key" class="block text-sm font-medium text-zinc-300">Access Key <span class="text-red-400">*</span></label>
-            <input id="aws-access-key" name="aws-access-key" type="password" class="w-full px-2 py-1.5 border border-zinc-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700 text-white" autocomplete="off" required>
-          </div>
-          <div>
-            <label for="aws-secret-key" class="block text-sm font-medium text-zinc-300">Secret Key <span class="text-red-400">*</span></label>
-            <input id="aws-secret-key" name="aws-secret-key" type="password" class="w-full px-2 py-1.5 border border-zinc-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700 text-white" autocomplete="off" required>
-          </div>
-          <div>
-            <label for="aws-endpoint" class="block text-sm font-medium text-zinc-300">S3 Compatible Storage Endpoint</label>
-            <input id="aws-endpoint" name="aws-endpoint" type="text" class="w-full px-2 py-1.5 border border-zinc-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700 text-white" autocomplete="off">
-          </div>
-        </div>
-      `;
-
-      const setupEventListeners = (container, providerInstance, config) => {
-        container.querySelector("#aws-bucket").value =
-          config.get("bucketName") || "";
-        container.querySelector("#aws-region").value =
-          config.get("region") || "";
-        container.querySelector("#aws-access-key").value =
-          config.get("accessKey") || "";
-        container.querySelector("#aws-secret-key").value =
-          config.get("secretKey") || "";
-        container.querySelector("#aws-endpoint").value =
-          config.get("endpoint") || "";
-      };
-
-      return { html, setupEventListeners };
-    }
-
-    isConfigured() {
-      return !!(
-        this.config.get("accessKey") &&
-        this.config.get("secretKey") &&
-        this.config.get("region") &&
-        this.config.get("bucketName")
-      );
-    }
-
-    async initialize() {
-      if (!this.isConfigured()) throw new Error("AWS configuration incomplete");
-      await this.loadSDK();
-      const config = this.config.config;
-      const s3Config = {
-        accessKeyId: config.accessKey,
-        secretAccessKey: config.secretKey,
-        region: config.region,
-      };
-      if (config.endpoint) {
-        s3Config.endpoint = config.endpoint;
-        s3Config.s3ForcePathStyle = true;
-      }
-      AWS.config.update(s3Config);
-      this.client = new AWS.S3();
-    }
-    async loadSDK() {
-      if (this.sdkLoaded || window.AWS) {
-        this.sdkLoaded = true;
-        return;
-      }
-      return new Promise((resolve, reject) => {
-        const script = document.createElement("script");
-        script.src = "https://sdk.amazonaws.com/js/aws-sdk-2.1692.0.min.js";
-        script.onload = () => {
-          this.sdkLoaded = true;
-          resolve();
-        };
-        script.onerror = () => reject(new Error("Failed to load AWS SDK"));
-        document.head.appendChild(script);
-      });
-    }
-
-    /**
-     * Enhanced error information extraction for AWS SDK errors
-     * @param {Error} error - The AWS SDK error object
-     * @returns {string} - A detailed error description
-     */
-    extractErrorDetails(error) {
-      if (!error) return "Unknown error";
-      const details = [];
-      if (error.message) {
-        details.push(`Message: ${error.message}`);
-      }
-      if (error.code) {
-        details.push(`Code: ${error.code}`);
-      }
-      if (error.statusCode) {
-        details.push(`Status: ${error.statusCode}`);
-      }
-      if (error.requestId) {
-        details.push(`RequestId: ${error.requestId}`);
-      }
-      if (error.extendedRequestId) {
-        details.push(`ExtRequestId: ${error.extendedRequestId}`);
-      }
-      if (error.region) {
-        details.push(`Region: ${error.region}`);
-      }
-      if (error.serviceName) {
-        details.push(`Service: ${error.serviceName}`);
-      }
-      if (error.operationName) {
-        details.push(`Operation: ${error.operationName}`);
-      }
-      if (error.retryable !== undefined) {
-        details.push(`Retryable: ${error.retryable}`);
-      }
-      if (error.time) {
-        details.push(`Time: ${error.time}`);
-      }
-      if (error.headers) {
-        const relevantHeaders = [
-          "x-amz-request-id",
-          "x-amz-id-2",
-          "x-amz-bucket-region",
-        ];
-        relevantHeaders.forEach((header) => {
-          if (error.headers[header]) {
-            details.push(`${header}: ${error.headers[header]}`);
-          }
-        });
-      }
-      if (error.networkError) {
-        details.push(
-          `Network: ${error.networkError.message || error.networkError}`
-        );
-      }
-      if (error.originalError && error.originalError !== error) {
-        details.push(
-          `Original: ${error.originalError.message || error.originalError}`
-        );
-      }
-      if (details.length === 0) {
-        const fallbackProps = ["name", "type", "errorType", "errorMessage"];
-        for (const prop of fallbackProps) {
-          if (error[prop]) {
-            details.push(`${prop}: ${error[prop]}`);
-            break;
-          }
-        }
-      }
-      if (details.length === 0) {
-        try {
-          const errorStr = JSON.stringify(error, null, 2);
-          if (errorStr && errorStr !== "{}") {
-            details.push(`Raw: ${errorStr}`);
-          } else {
-            details.push(
-              `Type: ${typeof error}, Constructor: ${
-                error.constructor?.name || "Unknown"
-              }`
-            );
-          }
-        } catch (stringifyError) {
-          details.push(`Unstringifiable error of type: ${typeof error}`);
-        }
-      }
-      return details.length > 0 ? details.join(" | ") : "Unknown AWS error";
-    }
-
-    async upload(key, data, isMetadata = false, itemKey = null) {
-      return retryAsync(
-        async () => {
-          try {
-            const isAttachment = key.startsWith("attachments/");
-            const body = isMetadata
-              ? JSON.stringify(data)
-              : key.startsWith("attachments/")
-              ? await this.crypto.encryptBytes(data) 
-              : await this.crypto.encrypt(data, itemKey || key); 
-
-            const params = {
-              Bucket: this.config.get("bucketName"),
-              Key: key,
-              Body: body,
-              ContentType: isMetadata
-                ? "application/json"
-                : "application/octet-stream",
-            };
-            if (isMetadata) {
-              params.CacheControl =
-                "no-cache, no-store, max-age=0, must-revalidate";
-            }
-            const result = await this.client.upload(params).promise();
-            this.logger.log("success", `Uploaded ${key}`, {
-              ETag: result.ETag,
-            });
-            return result;
-          } catch (error) {
-            this.logger.log(
-              "error",
-              `Failed to upload ${key}: ${this.extractErrorDetails(error)}`
-            );
-            throw error;
-          }
-        },
-        {
-          isRetryable: (error) =>
-            !(error.code === "NoSuchKey" || error.statusCode === 404),
-          onRetry: (error, attempt) => {
-            this.logger.log(
-              "warning",
-              `[S3 Upload] Retry ${attempt}/${3} - ${this.extractErrorDetails(
-                error
-              )}`
-            );
-          },
-        }
-      );
-    }
-
-    async uploadRaw(key, data) {
-      return retryAsync(
-        async () => {
-          try {
-            const result = await this.client
-              .upload({
-                Bucket: this.config.get("bucketName"),
-                Key: key,
-                Body: data,
-                ContentType: key.endsWith(".zip")
-                  ? "application/zip"
-                  : "application/octet-stream",
-              })
-              .promise();
-            this.logger.log("success", `Uploaded raw ${key}`, {
-              ETag: result.ETag,
-            });
-            return result;
-          } catch (error) {
-            this.logger.log(
-              "error",
-              `Failed to upload raw ${key}: ${this.extractErrorDetails(error)}`
-            );
-            throw error;
-          }
-        },
-        {
-          isRetryable: (error) =>
-            !(error.code === "NoSuchKey" || error.statusCode === 404),
-        }
-      );
-    }
-async download(key, isMetadata = false) {
-  return retryAsync(
-    async () => {
-      const isAttachment = key.startsWith("attachments/"); 
-
-      const result = await this.client
-        .getObject({ Bucket: this.config.get("bucketName"), Key: key })
-        .promise();
-      
-      const bodyBytes = new Uint8Array(result.Body);
-
-      if (isMetadata) {
-        const jsonString = new TextDecoder().decode(bodyBytes).trim();
-        if (!jsonString || jsonString.length === 0) {
-          throw new Error('Empty JSON data received');
-        }
-        try {
-          return JSON.parse(jsonString);
-        } catch (parseError) {
-          console.error(`Failed to parse JSON for key: ${key}`);
-          console.error(`First 100 chars: ${jsonString.substring(0, 100)}`);
-          throw new Error(`Invalid JSON data in ${key}: ${parseError.message}`);
-        }
-      } else if (isAttachment) {
-        return await this.crypto.decryptBytes(bodyBytes);
-      } else {
-        return await this.crypto.decrypt(bodyBytes);
-      }
-    },
-    {
-      isRetryable: (error) =>
-        !(error.code === "NoSuchKey" || error.statusCode === 404),
-    }
-  );
-}
-    async downloadRaw(key) {
-      return retryAsync(
-        async () => {
-          const result = await this.client
-            .getObject({ Bucket: this.config.get("bucketName"), Key: key })
-            .promise();
-          return new Uint8Array(result.Body);
-        },
-        {
-          isRetryable: (error) =>
-            !(error.code === "NoSuchKey" || error.statusCode === 404),
-        }
-      );
-    }
-    async delete(key) {
-      return retryAsync(
-        async () => {
-          await this.client
-            .deleteObject({ Bucket: this.config.get("bucketName"), Key: key })
-            .promise();
-          this.logger.log("success", `Deleted ${key}`);
-        },
-        {
-          isRetryable: (error) =>
-            !(error.code === "NoSuchKey" || error.statusCode === 404),
-        }
-      );
-    }
-
-    async deleteFolder(folderPath) {
-      return retryAsync(async () => {
-        const prefix = folderPath.endsWith("/") ? folderPath : folderPath + "/";
-        this.logger.log(
-          "info",
-          `[S3] Deleting all objects with prefix: ${prefix}`
-        );
-
-        const objectsToDelete = await this.list(prefix);
-        if (objectsToDelete.length === 0) {
-          this.logger.log(
-            "info",
-            `[S3] No objects found for prefix ${prefix} to delete.`
-          );
-          return;
-        }
-
-        const keysToDelete = objectsToDelete.map((obj) => ({ Key: obj.Key }));
-        const bucketName = this.config.get("bucketName");
-
-        const chunks = [];
-        for (let i = 0; i < keysToDelete.length; i += 1000) {
-          chunks.push(keysToDelete.slice(i, i + 1000));
-        }
-
-        for (const chunk of chunks) {
-          const params = {
-            Bucket: bucketName,
-            Delete: { Objects: chunk },
-          };
-          const result = await this.client.deleteObjects(params).promise();
-          if (result.Errors && result.Errors.length > 0) {
-            this.logger.log(
-              "error",
-              "[S3] Errors during batch deletion",
-              result.Errors
-            );
-            throw new Error(`S3 deletion error: ${result.Errors[0].Message}`);
-          }
-        }
-        this.logger.log(
-          "success",
-          `[S3] Deleted ${keysToDelete.length} objects for folder: ${folderPath}`
-        );
-      });
-    }
-
-    async list(prefix = "") {
-      return retryAsync(
-        async () => {
-          const allContents = [];
-          let continuationToken = undefined;
-          this.logger.log(
-            "info",
-            `[S3Service] Starting paginated list for prefix: "${prefix}"`
-          );
-          do {
-            const params = {
-              Bucket: this.config.get("bucketName"),
-              Prefix: prefix,
-              ContinuationToken: continuationToken,
-            };
-            const result = await this.client.listObjectsV2(params).promise();
-            if (result.Contents) {
-              allContents.push(...result.Contents);
-            }
-            this.logger.log(
-              "info",
-              `[S3Service] Fetched page with ${
-                result.Contents?.length || 0
-              } items. Total so far: ${allContents.length}. IsTruncated: ${
-                result.IsTruncated
-              }`
-            );
-            if (result.IsTruncated) {
-              continuationToken = result.NextContinuationToken;
-            } else {
-              continuationToken = undefined;
-            }
-          } while (continuationToken);
-          this.logger.log(
-            "success",
-            `[S3Service] Paginated list complete. Total objects found: ${allContents.length}`
-          );
-          return allContents;
-        },
-        {
-          isRetryable: (error) =>
-            !(error.code === "NoSuchKey" || error.statusCode === 404),
-        }
-      );
-    }
-    async downloadWithResponse(key) {
-      return retryAsync(
-        async () => {
-          const result = await this.client
-            .getObject({ Bucket: this.config.get("bucketName"), Key: key })
-            .promise();
-          return result;
-        },
-        {
-          isRetryable: (error) =>
-            !(error.code === "NoSuchKey" || error.statusCode === 404),
-        }
-      );
-    }
-    async copyObject(sourceKey, destinationKey) {
-      return retryAsync(
-        async () => {
-          const result = await this.client
-            .copyObject({
-              Bucket: this.config.get("bucketName"),
-              CopySource: `${this.config.get("bucketName")}/${sourceKey}`,
-              Key: destinationKey,
-            })
-            .promise();
-          this.logger.log("success", `Copied ${sourceKey} → ${destinationKey}`);
-          return result;
-        },
-        {
-          isRetryable: (error) =>
-            !(error.code === "NoSuchKey" || error.statusCode === 404),
-        }
-      );
-    }
-
-    async ensurePathExists(path) {
-      return Promise.resolve();
     }
   }
 
@@ -2149,7 +1668,18 @@ async download(key, isMetadata = false) {
       return result;
     }
     saveMetadata() {
+      this._stripLegacyMetadataFields(this.metadata);
       localStorage.setItem("tcs_local-metadata", JSON.stringify(this.metadata));
+    }
+    _stripLegacyMetadataFields(md) {
+      if (!md || !md.items) return md;
+      for (const entry of Object.values(md.items)) {
+        if (!entry || typeof entry !== "object") continue;
+        delete entry.seenLocal;
+        delete entry.lastSeenLocalAt;
+        delete entry.contentHash;
+      }
+      return md;
     }
     getLastCloudSync() {
       const stored = localStorage.getItem("tcs_last-cloud-sync");
@@ -2162,37 +1692,6 @@ async download(key, isMetadata = false) {
       if (data instanceof Uint8Array) return data.length;
       if (data instanceof Blob) return data.size;
       return JSON.stringify(data).length;
-    }
-    stableStringify(value) {
-      const seen = new WeakSet();
-      const helper = (input) => {
-        if (input === null || typeof input !== "object") return input;
-        if (seen.has(input)) return "[Circular]";
-        seen.add(input);
-        if (Array.isArray(input)) return input.map(helper);
-        const out = {};
-        Object.keys(input).sort().forEach((k) => {
-          out[k] = helper(input[k]);
-        });
-        return out;
-      };
-      return JSON.stringify(helper(value));
-    }
-    async computeContentHash(data) {
-      let bytes;
-      if (data instanceof Uint8Array) {
-        bytes = data;
-      } else if (data instanceof Blob) {
-        bytes = new Uint8Array(await data.arrayBuffer());
-      } else if (data instanceof ArrayBuffer) {
-        bytes = new Uint8Array(data);
-      } else if (typeof data === "string") {
-        bytes = new TextEncoder().encode(data);
-      } else {
-        bytes = new TextEncoder().encode(this.stableStringify(data));
-      }
-      const digest = await crypto.subtle.digest("SHA-256", bytes);
-      return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
     }
     getComparableTimestamp(value) {
       if (typeof value === "number") return value;
@@ -2209,8 +1708,6 @@ async download(key, isMetadata = false) {
     getChatFingerprint(chat) {
       try {
         if (!chat || typeof chat !== "object") return "0";
-        const updatedAt =
-          chat.updatedAt || chat.updated_at || chat.lastUpdated || chat.modifiedAt || "";
         const messages =
           (Array.isArray(chat.messages) && chat.messages) ||
           (Array.isArray(chat.chat?.messages) && chat.chat.messages) ||
@@ -2221,32 +1718,49 @@ async download(key, isMetadata = false) {
         let msgCount = 0;
         let lastMsgId = "";
         let lastMsgTs = "";
+        let contentLen = 0;
         if (messages) {
           msgCount = messages.length;
+          for (let i = 0; i < messages.length; i++) {
+            const c = messages[i]?.content;
+            if (typeof c === "string") contentLen += c.length;
+            else if (Array.isArray(c)) contentLen += c.length;
+          }
           const last = messages[msgCount - 1];
           if (last && typeof last === "object") {
             lastMsgId = last.id || last.messageId || last.uuid || "";
             lastMsgTs =
-              last.updatedAt ||
-              last.updated_at ||
-              last.createdAt ||
-              last.created_at ||
-              last.timestamp ||
-              "";
+              last.updatedAt || last.updated_at || last.createdAt ||
+              last.created_at || last.timestamp || "";
           }
         } else {
           msgCount = chat.messageCount || chat.messagesCount || chat.turns || 0;
-          lastMsgId =
-            chat.lastMessageId || chat.lastMsgId || chat.last_message_id || "";
-          lastMsgTs =
-            chat.lastMessageAt || chat.lastMsgAt || chat.last_message_at || "";
+          lastMsgId = chat.lastMessageId || chat.lastMsgId || chat.last_message_id || "";
+          lastMsgTs = chat.lastMessageAt || chat.lastMsgAt || chat.last_message_at || "";
         }
 
+        // Attributes that must sync across devices even when no message changed.
+        const title = chat.chatTitle || chat.title || chat.name || "";
+        const starred = chat.starred ?? chat.isStarred ?? chat.star ?? "";
+        const pinned = chat.pinned ?? chat.isPinned ?? "";
+        const folder = chat.folderID ?? chat.folderId ?? chat.folder ?? "";
+        const tags = Array.isArray(chat.tags) ? chat.tags.join(",") : String(chat.tags ?? "");
+        const model = chat.model || chat.modelID || chat.modelId || "";
+
+        // v2 format: updatedAt is deliberately EXCLUDED so a view-only
+        // timestamp refresh ("touch") never registers as a content change.
         return [
-          String(updatedAt),
+          "v2",
           String(msgCount),
           String(lastMsgId),
           String(lastMsgTs),
+          String(contentLen),
+          String(title),
+          String(starred),
+          String(pinned),
+          String(folder),
+          String(tags),
+          String(model),
         ].join("|");
       } catch {
         return "0";
@@ -2264,6 +1778,17 @@ async download(key, isMetadata = false) {
       const changedItems = [];
       const now = Date.now();
       const localItemKeys = await this.dataService.getAllItemKeys();
+      let metadataDirty = false;
+
+      // ── Read-integrity guard ──
+      // If key enumeration returns nothing while metadata says we have synced
+      // items, the read was almost certainly partial/failed. Abort instead of
+      // inferring that everything was deleted.
+      const _syncedMetaCount = Object.values(this.metadata.items || {}).filter((i) => !i.deleted && (i.synced || 0) > 0).length;
+      if (localItemKeys.size === 0 && _syncedMetaCount > 0) {
+        console.error("[TCS Sync] \u{1F6D1} Local key enumeration returned 0 keys but metadata has " + _syncedMetaCount + " synced items - aborting change detection.");
+        return { changedItems: [], hasChanges: false };
+      }
 
       this.logger.log("info", "🔍 Gathering all local item keys for change detection.");
       this.logger.log("info", `Found ${localItemKeys.size} local item keys.`);
@@ -2286,50 +1811,50 @@ async download(key, isMetadata = false) {
           let currentSize = 0;
 
           if (key.startsWith("CHAT_") && item.type === "idb") {
-            // CHAT items: use lightweight fingerprint + timestamp only.
-            // NO JSON.stringify, NO SHA-256 — pure O(1) property reads.
-            const rawUpdatedAt = value?.updatedAt || value?.updated_at || value?.lastUpdated || value?.modifiedAt;
-            const getTs = (v) => { if (typeof v === "number") return v; if (!v) return 0; const t = new Date(v).getTime(); return isNaN(t) ? 0 : t; };
-            const currentTimestamp = getTs(rawUpdatedAt);
-            const lastKnownTimestamp = getTs(existingItem?.lastModified);
+            // CHAT items: content-fingerprint driven change detection (v2).
+            //  - Fingerprint covers messages AND attributes (title, star,
+            //    folder, tags, model) but deliberately EXCLUDES updatedAt.
+            //  - A view-only "touch" that merely refreshes updatedAt therefore
+            //    produces NO change, no upload, and cannot overwrite newer
+            //    data on other devices with a stale copy (touch-attack guard).
             const currentFingerprint = this.getChatFingerprint(value);
             const lastKnownFingerprint = existingItem?.chatFingerprint || "";
-            itemLastModified = currentTimestamp || existingItem?.lastModified || 0;
 
-            if (!existingItem) { hasChanged = true; changeReason = "new-chat"; }
-            else if (currentTimestamp && currentTimestamp > lastKnownTimestamp) { hasChanged = true; changeReason = "timestamp"; }
-            else if (
-              currentFingerprint &&
-              currentFingerprint !== lastKnownFingerprint &&
-              // CRITICAL SAFETY GUARD: only upload if local is not older than last-synced state.
-              // If local timestamp is older than what we last synced, the local data is STALE
-              // (e.g. stale data left behind by a failed download, or an old local version).
-              // Uploading it would OVERWRITE newer cloud data — catastrophic data loss.
-              (!lastKnownTimestamp || !currentTimestamp || currentTimestamp >= lastKnownTimestamp)
-            ) { hasChanged = true; changeReason = "fingerprint"; }
-            else if (
-              currentFingerprint &&
-              currentFingerprint !== lastKnownFingerprint &&
-              currentTimestamp && lastKnownTimestamp &&
-              currentTimestamp < lastKnownTimestamp
-            ) {
-              // Stale local chat detected. Log for debugging but DO NOT upload.
-              console.warn("[TCS Sync] ⚠️  Stale local chat suppressed: " + key + " (local ts " + new Date(currentTimestamp).toISOString() + " < last-known ts " + new Date(lastKnownTimestamp).toISOString() + "). Will re-download on next syncFromCloud.");
+            if (!existingItem) {
+              hasChanged = true;
+              changeReason = "new-chat";
+              const _ts = this.getComparableTimestamp(value?.updatedAt || value?.updated_at || value?.lastUpdated || value?.modifiedAt || 0);
+              itemLastModified = _ts || now;
+            } else if (lastKnownFingerprint && !lastKnownFingerprint.startsWith("v2|")) {
+              // One-time fingerprint format migration (v1 -> v2): refresh the
+              // stored fingerprint WITHOUT uploading. The data is already in
+              // the cloud; only the fingerprint format changed.
+              existingItem.chatFingerprint = currentFingerprint;
+              metadataDirty = true;
+            } else if (currentFingerprint && currentFingerprint !== lastKnownFingerprint) {
+              // Real content or attribute change (message, star, folder, title...).
+              // lastModified = physical detection time, guaranteeing LWW
+              // propagation even when TypingMind does not bump updatedAt.
+              hasChanged = true;
+              changeReason = "content";
+              itemLastModified = now;
+            } else if (!existingItem.synced || existingItem.synced === 0) {
+              hasChanged = true;
+              changeReason = "never-synced-chat";
+              itemLastModified = now;
             }
-            else if (!existingItem.synced || existingItem.synced === 0) { hasChanged = true; changeReason = "never-synced-chat"; itemLastModified = now; }
 
             if (hasChanged) {
               changedItems.push({ id: key, type: item.type, lastModified: itemLastModified, reason: changeReason, chatFingerprint: currentFingerprint });
             }
           } else {
             // Non-CHAT items: size comparison (fast — avoids SHA-256 hashing entirely).
-            // getItemSize uses JSON.stringify which is faster than crypto.subtle + stableStringify.
             currentSize = value instanceof Uint8Array || value instanceof Blob
               ? (value.size || value.length || 0)
               : this.getItemSize(value);
             itemLastModified = existingItem?.lastModified || 0;
 
-            if (!existingItem) { hasChanged = true; changeReason = "new"; }
+            if (!existingItem) { hasChanged = true; changeReason = "new"; itemLastModified = now; }
             else if (currentSize !== (existingItem.size || 0)) { hasChanged = true; changeReason = "size"; itemLastModified = now; }
             else if (!existingItem.synced || existingItem.synced === 0) { hasChanged = true; changeReason = "never-synced"; }
 
@@ -2357,32 +1882,52 @@ async download(key, isMetadata = false) {
         }
       }
 
-      this.logger.log("info", "🔍 Checking for items deleted locally by comparing trusted local-presence metadata...");
-      let newlyDeletedCount = 0;
+      this.logger.log("info", "\u{1F50D} Checking for items deleted locally by comparing trusted local-presence metadata...");
+      const deletionCandidates = [];
       for (const itemId in this.metadata.items) {
         const metadataItem = this.metadata.items[itemId];
-        // Only infer deletion for items that were previously synced to this device
-        // (synced > 0 means we confirmed it was here at some point).
-        // This prevents false tombstones for items in cloud metadata that were
-        // never downloaded to this device.
-        const eligibleForLocalDeleteInference =
+        // Only infer deletion for items previously confirmed synced on THIS
+        // device (synced > 0). Never tombstone items we never had.
+        const eligible =
           !!metadataItem &&
           !metadataItem.deleted &&
           (metadataItem.synced || 0) > 0;
-
-        if (eligibleForLocalDeleteInference && !localItemKeys.has(itemId)) {
-          changedItems.push({
+        if (eligible && !localItemKeys.has(itemId)) {
+          deletionCandidates.push({
             id: itemId,
             type: metadataItem.type || "idb",
             deleted: Date.now(),
             tombstoneVersion: (metadataItem.tombstoneVersion || 0) + 1,
             reason: "detected-deletion",
           });
-          newlyDeletedCount++;
         }
       }
-      if (newlyDeletedCount > 0) {
-        this.logger.log("success", `✅ Found ${newlyDeletedCount} newly deleted item(s) to be synced to the cloud.`);
+      // ── Mass-deletion circuit breaker (upload side) ──
+      // A partial IndexedDB read could make many items look deleted at once.
+      // Propagating that would wipe data on every device. Refuse implausible
+      // bulk deletions; user can Force Export if it is intentional.
+      const _activeMetaCount = Object.values(this.metadata.items || {}).filter((i) => !i.deleted).length;
+      const _massDeleteSuspicious =
+        deletionCandidates.length > 20 &&
+        _activeMetaCount > 0 &&
+        deletionCandidates.length > _activeMetaCount * 0.15;
+      if (_massDeleteSuspicious) {
+        console.error(
+          "[TCS Sync] \u{1F6D1} Mass-deletion guard: " + deletionCandidates.length +
+          " of " + _activeMetaCount + " items appear locally deleted at once. " +
+          "Refusing to propagate deletions this cycle (likely a partial read). " +
+          "If this is intentional bulk cleanup, use Force Export to push your local state."
+        );
+        this.logger.log("error", `Mass-deletion guard: blocked ${deletionCandidates.length} inferred deletions.`);
+      } else {
+        for (const c of deletionCandidates) changedItems.push(c);
+        if (deletionCandidates.length > 0) {
+          this.logger.log("success", `Found ${deletionCandidates.length} newly deleted item(s) to be synced to the cloud.`);
+        }
+      }
+
+      if (metadataDirty) {
+        this.saveMetadata();
       }
 
       return { changedItems, hasChanges: changedItems.length > 0 };
@@ -2422,11 +1967,12 @@ async download(key, isMetadata = false) {
 
         const cloudMetadata = await this.getCloudMetadata();
         let itemsSynced = 0;
+        const sessionUpdates = new Map();
 
         // Provider-aware concurrency: private server proxy allows high parallelism
         // (pathIdCache + fileMetaCache shared — per-file Drive calls are minimal).
         // Google allows 200 req/s; at CONCURRENCY=8 we use ~5% of quota.
-        const _syncIsPrivate = (typeof PrivateServerGoogleDriveService !== "undefined" && this.storageService instanceof PrivateServerGoogleDriveService);
+        const _syncIsPrivate = (this.storageService instanceof GoogleDriveService);
         const UPLOAD_CONCURRENCY = _syncIsPrivate ? 5 : (this.storageService instanceof GoogleDriveService ? 2 : 5);
         const _syncInterBatchDelay = _syncIsPrivate ? 0 : 500;
         const processOneUpload = async (item) => {
@@ -2462,6 +2008,7 @@ async download(key, isMetadata = false) {
               };
               this.metadata.items[item.id] = tombstoneData;
               cloudMetadata.items[item.id] = { ...tombstoneData };
+              sessionUpdates.set(item.id, { ...tombstoneData });
               itemsSynced++;
               this.logger.log(
                 "info",
@@ -2487,9 +2034,6 @@ async download(key, isMetadata = false) {
                   synced: Date.now(),
                   type: item.type,
                   lastModified: item.lastModified,
-                  seenLocal: true,
-                  lastSeenLocalAt: Date.now(),
-                  contentHash: item.contentHash || await this.computeContentHash(data),
                 };
 
                 if (item.id.startsWith("CHAT_") && item.type === "idb") {
@@ -2506,6 +2050,7 @@ async download(key, isMetadata = false) {
 
                 this.metadata.items[item.id] = newMetadataEntry;
                 cloudMetadata.items[item.id] = { ...newMetadataEntry };
+                sessionUpdates.set(item.id, { ...newMetadataEntry });
 
                 itemsSynced++;
                 this.logger.log(
@@ -2534,14 +2079,31 @@ async download(key, isMetadata = false) {
         }
 
         if (itemsSynced > 0) {
-          cloudMetadata.lastSync = Date.now();
+          // ── Read-merge-write metadata commit ──
+          // Re-fetch the freshest cloud metadata and overlay only THIS
+          // session's changes. Prevents wiping out entries another device
+          // wrote to metadata.json while our cycle was running (lost update).
+          let mergedCloud = cloudMetadata;
+          try {
+            const fresh = await this.getCloudMetadata();
+            if (fresh && fresh.items && Object.keys(fresh.items).length > 0) {
+              for (const [id, entry] of sessionUpdates) {
+                fresh.items[id] = entry;
+              }
+              mergedCloud = fresh;
+            }
+          } catch (_) {
+            // Fall back to session copy if the re-fetch fails.
+          }
+          this._stripLegacyMetadataFields(mergedCloud);
+          mergedCloud.lastSync = Date.now();
           await this.storageService.upload(
             "metadata.json",
-            cloudMetadata,
+            mergedCloud,
             true
           );
-          this.metadata.lastSync = cloudMetadata.lastSync;
-          this.setLastCloudSync(cloudMetadata.lastSync);
+          this.metadata.lastSync = mergedCloud.lastSync;
+          this.setLastCloudSync(mergedCloud.lastSync);
           this.saveMetadata();
           await this.updateSyncDiagnosticsCache();
           console.log("[TCS Sync] \u2705 Upload complete: " + itemsSynced + " items synced.");
@@ -2676,7 +2238,8 @@ async download(key, isMetadata = false) {
           );
         }
 
-        const itemsToDownload = Object.entries(cloudMetadata.items).filter(
+        const localNewerKeys = new Set();
+        let itemsToDownload = Object.entries(cloudMetadata.items).filter(
           ([key, cloudItem]) => {
             if (this.config.shouldExclude(key)) {
               return false;
@@ -2705,17 +2268,23 @@ async download(key, isMetadata = false) {
             if (key.startsWith("CHAT_")) {
               const cloudFp = cloudItem.chatFingerprint || "";
               const localFp = localItem?.chatFingerprint || "";
-              if (cloudFp && cloudFp !== localFp) {
-                // SAFETY: fingerprint mismatch doesn't say WHICH side is newer. Compare
-                // timestamps. Only pull cloud if it's newer — otherwise local has unsynced
-                // changes and syncToCloud should upload them (not have them overwritten).
+              const bothV2 = cloudFp.startsWith("v2|") && localFp.startsWith("v2|");
+              if (bothV2 && cloudFp === localFp) {
+                // Identical content AND attributes - nothing to pull, regardless
+                // of timestamps. A view-only "touch" on another device must not
+                // trigger re-downloads or overwrites.
+                return false;
+              }
+              if (cloudFp && localFp && cloudFp !== localFp) {
+                // Content differs: last-writer-wins, gated on lastModified.
                 const cloudTs = new Date(cloudItem.lastModified || 0).getTime();
                 const localTs = new Date(localItem?.lastModified || 0).getTime();
                 if (cloudTs > localTs) {
                   return true;
                 }
-                // Local is as-new-or-newer. Don't download (would lose local edits).
-                // Will be resolved by syncToCloud uploading local's newer version.
+                // Local is as-new-or-newer with different content: local wins.
+                // Preserve our entry so syncToCloud uploads it.
+                localNewerKeys.add(key);
                 return false;
               }
             }
@@ -2728,13 +2297,32 @@ async download(key, isMetadata = false) {
             if (cloudTimestamp > localTimestamp) {
               return true;
             }
-            if ((cloudItem.contentHash || "") && (localItem?.contentHash || "") && cloudItem.contentHash !== localItem.contentHash) {
-              return true;
-            }
             return false;
 
           }
         );
+
+        // ── Mass-deletion circuit breaker (download side) ──
+        // If the cloud suddenly demands deletion of a large share of local
+        // items, treat it as suspect (corrupt metadata, buggy device) and skip
+        // applying deletions this cycle instead of wiping local data.
+        const _blockedTombstoneKeys = new Set();
+        {
+          const _tombs = itemsToDownload.filter(([, ci]) => ci && ci.deleted).length;
+          const _act = Object.values(this.metadata.items || {}).filter((i) => !i.deleted).length;
+          if (_tombs > 20 && _act > 0 && _tombs > _act * 0.15) {
+            console.error(
+              "[TCS Sync] \u{1F6D1} Mass-deletion guard: refusing to apply " + _tombs +
+              " cloud deletions (" + Math.round((_tombs / _act) * 100) +
+              "% of local items) this cycle. If intentional, use Force Import to accept cloud state."
+            );
+            this.logger.log("error", `Mass-deletion guard: skipped ${_tombs} cloud tombstones.`);
+            itemsToDownload = itemsToDownload.filter(([k, ci]) => {
+              if (ci && ci.deleted) { _blockedTombstoneKeys.add(k); return false; }
+              return true;
+            });
+          }
+        }
 
         if (itemsToDownload.length > 0) {
           this.logger.log(
@@ -2780,8 +2368,6 @@ async download(key, isMetadata = false) {
                     } else {
                       await this.dataService.saveItem(data, cloudItem.type, key);
                     }
-                    cloudMetadata.items[key].seenLocal = true;
-                    cloudMetadata.items[key].lastSeenLocalAt = Date.now();
                   }
                 }
                 downloadedCount++;
@@ -2826,12 +2412,28 @@ async download(key, isMetadata = false) {
             }
           }
         }
-        for (const [key, item] of Object.entries(this.metadata.items || {})) {
-          if (cloudMetadata.items[key] && item.seenLocal) {
-            cloudMetadata.items[key].seenLocal = true;
-            cloudMetadata.items[key].lastSeenLocalAt = item.lastSeenLocalAt || Date.now();
+        // ── Merge (not replace) local metadata with cloud state ──
+        // 1) Preserve local-only entries: items this device tracks that cloud
+        //    metadata lost (e.g. a concurrent metadata.json write race).
+        //    Reset synced=0 on active ones so syncToCloud re-uploads them.
+        for (const [k, v] of Object.entries(this.metadata.items || {})) {
+          if (!cloudMetadata.items[k] && !this.config.shouldExclude(k)) {
+            cloudMetadata.items[k] = v.deleted ? v : { ...v, synced: 0 };
           }
         }
+        // 2) Preserve entries where LOCAL is newer than cloud (pending upload).
+        for (const k of localNewerKeys) {
+          if (this.metadata.items?.[k]) {
+            cloudMetadata.items[k] = { ...this.metadata.items[k] };
+          }
+        }
+        // 3) Keep circuit-breaker-blocked tombstone keys alive locally.
+        for (const k of _blockedTombstoneKeys) {
+          if (this.metadata.items?.[k] && !this.metadata.items[k].deleted) {
+            cloudMetadata.items[k] = { ...this.metadata.items[k] };
+          }
+        }
+        this._stripLegacyMetadataFields(cloudMetadata);
         this.metadata = cloudMetadata;
         this.metadata.lastSync = cloudLastSync;
         this.setLastCloudSync(cloudLastSync);
@@ -2876,7 +2478,7 @@ async download(key, isMetadata = false) {
         const now = Date.now();
 
         for await (const batch of allItemsIterator) {
-          const _initIsPrivate = (typeof PrivateServerGoogleDriveService !== "undefined" && this.storageService instanceof PrivateServerGoogleDriveService);
+          const _initIsPrivate = (this.storageService instanceof GoogleDriveService);
           const CHUNK = _initIsPrivate ? 3 : 2;
           const _initChunkDelay = _initIsPrivate ? 0 : 300;
           const allResults = [];
@@ -2906,9 +2508,6 @@ async download(key, isMetadata = false) {
                 const newMetadataEntry = {
                   synced: now,
                   type: item.type,
-                  seenLocal: true,
-                  lastSeenLocalAt: now,
-                  contentHash: await this.computeContentHash(item.data),
                 };
 
                 if (
@@ -3073,9 +2672,6 @@ async download(key, isMetadata = false) {
               type: item.type,
               size: this.getItemSize(item.data),
               lastModified: 0,
-              seenLocal: true,
-              lastSeenLocalAt: Date.now(),
-              contentHash: await this.computeContentHash(item.data),
             };
             if (key.startsWith("CHAT_") && item.type === "idb") {
               baseEntry.lastModified = item.data?.updatedAt || 0;
@@ -3149,9 +2745,6 @@ async download(key, isMetadata = false) {
                     type: cloudItem.type,
                     size: cloudItem.size || this.getItemSize(data),
                     lastModified: cloudItem.lastModified || syncTime,
-                    seenLocal: true,
-                    lastSeenLocalAt: syncTime,
-                    contentHash: cloudItem.contentHash || await this.computeContentHash(data),
                   };
                   if (cloudItem.type === "blob" && cloudItem.blobType) {
                     this.metadata.items[cloudItemId].blobType = cloudItem.blobType;
@@ -3460,6 +3053,17 @@ async download(key, isMetadata = false) {
         const cloudChatItems = Object.keys(cloudMetadata.items || {}).filter(
           (id) => id.startsWith("CHAT_") && !cloudMetadata.items[id].deleted
         ).length;
+        if (localCount !== cloudActive || chatItems !== cloudChatItems) {
+          try {
+            const cloudActiveKeys = new Set(Object.keys(cloudMetadata.items || {}).filter((k) => !cloudMetadata.items[k].deleted));
+            const localOnly = [...localItemKeys].filter((k) => !cloudActiveKeys.has(k)).slice(0, 25);
+            const cloudOnly = [...cloudActiveKeys].filter((k) => !localItemKeys.has(k)).slice(0, 25);
+            if (localOnly.length || cloudOnly.length) {
+              console.log("[TCS Diag] Local-only keys (pending upload):", localOnly);
+              console.log("[TCS Diag] Cloud-only keys (pending download):", cloudOnly);
+            }
+          } catch (_) {}
+        }
         const diagnosticsData = {
           timestamp: Date.now(),
           localItems: localCount,
@@ -3512,7 +3116,7 @@ async download(key, isMetadata = false) {
         let exportFailCount = 0;
         let skippedTombstones = 0;
         for await (const batch of this.dataService.streamAllItemsInternal()) {
-          const _expIsPrivate = (typeof PrivateServerGoogleDriveService !== "undefined" && this.storageService instanceof PrivateServerGoogleDriveService);
+          const _expIsPrivate = (this.storageService instanceof GoogleDriveService);
           const CHUNK = _expIsPrivate ? 3 : 2;
           const _expChunkDelay = _expIsPrivate ? 0 : 300;
           for (let ci = 0; ci < batch.length; ci += CHUNK) {
@@ -5353,7 +4957,7 @@ async download(key, isMetadata = false) {
         this.removeConfigFromUrl();
       }
 
-      const storageType = this.config.get("storageType") || "s3";
+      const storageType = this.config.get("storageType") || "googleDrive";
       this.logger.log("info", `Selected storage provider: ${storageType}`);
 
       try {
@@ -5480,15 +5084,6 @@ async download(key, isMetadata = false) {
 
     checkMandatoryConfig() {
       const storageType = this.config.get("storageType");
-      if (storageType === "s3") {
-        return !!(
-          this.config.get("bucketName") &&
-          this.config.get("region") &&
-          this.config.get("accessKey") &&
-          this.config.get("secretKey") &&
-          this.config.get("encryptionKey")
-        );
-      }
       if (storageType === "googleDrive") {
         return !!(
           this.config.get("googleServerUrl") &&
@@ -5509,12 +5104,6 @@ async download(key, isMetadata = false) {
       const autoOpen = urlParams.has("config") || urlParams.has("autoconfig");
       const paramMap = {
         storagetype: "storageType",
-        bucket: "bucketName",
-        bucketname: "bucketName",
-        region: "region",
-        accesskey: "accessKey",
-        secretkey: "secretKey",
-        endpoint: "endpoint",
         encryptionkey: "encryptionKey",
         syncinterval: "syncInterval",
         exclusions: "exclusions",
@@ -5530,8 +5119,6 @@ async download(key, isMetadata = false) {
         }
       }
       const sensitiveKeys = {
-        accesskey: "accessKey",
-        secretkey: "secretKey",
         encryptionkey: "encryptionKey",
       };
       const rawQuery = window.location.search.substring(1);
@@ -5907,7 +5494,8 @@ async download(key, isMetadata = false) {
                 <label for="sync-exclusions" class="block text-sm font-medium text-zinc-300">Exclusions (Comma separated)</label>
                 <input id="sync-exclusions" name="sync-exclusions" type="text" value="${
                   localStorage.getItem("tcs_sync-exclusions") || ""
-                }" class="w-full px-2 py-1.5 border border-zinc-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700 text-white" placeholder="e.g., my-setting, another-setting" autocomplete="off">
+                }" class="w-full px-2 py-1.5 border border-zinc-600 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm dark:bg-zinc-700 text-white" placeholder="e.g., CLIENT_CACHE_*, TM_useDraftContent" autocomplete="off">
+                <p class="text-xs text-zinc-400 mt-1" style="line-height:1.5">Exact keys or prefix wildcards ending in <code>*</code>. Patterns: <code>CHAT_*</code>=chats, <code>CLIENT_CACHE_*</code>=cached attachments, <code>TM_*</code>=app settings. System keys (<code>tcs_*</code>, <code>gsi_*</code>, eruda) are always auto-excluded. Run <code>tcsListSyncKeys()</code> in the browser console to list this device's actual syncable keys by group.</p>
               </div>
             </div>
           </div>
@@ -6036,7 +5624,7 @@ async download(key, isMetadata = false) {
         option.textContent = providerClass.displayName;
         storageSelect.appendChild(option);
       });
-      storageSelect.value = this.config.get("storageType") || "s3";
+      storageSelect.value = this.config.get("storageType") || "googleDrive";
 
       const updateProviderUI = () => {
         const selectedType = storageSelect.value;
@@ -6394,11 +5982,6 @@ async download(key, isMetadata = false) {
       );
       const fieldMap = {
         storageType: "storage-type-select",
-        bucketName: "aws-bucket",
-        region: "aws-region",
-        accessKey: "aws-access-key",
-        secretKey: "aws-secret-key",
-        endpoint: "aws-endpoint",
         encryptionKey: "encryption-key",
         syncInterval: "sync-interval",
         exclusions: "sync-exclusions",
@@ -6792,23 +6375,7 @@ async download(key, isMetadata = false) {
       const providerContainer = modal.querySelector(
         "#provider-settings-container"
       );
-      if (storageType === "s3") {
-        newConfig.bucketName = providerContainer
-          .querySelector("#aws-bucket")
-          .value.trim();
-        newConfig.region = providerContainer
-          .querySelector("#aws-region")
-          .value.trim();
-        newConfig.accessKey = providerContainer
-          .querySelector("#aws-access-key")
-          .value.trim();
-        newConfig.secretKey = providerContainer
-          .querySelector("#aws-secret-key")
-          .value.trim();
-        newConfig.endpoint = providerContainer
-          .querySelector("#aws-endpoint")
-          .value.trim();
-      } else if (storageType === "googleDrive") {
+      if (storageType === "googleDrive") {
         newConfig.googleServerUrl = providerContainer
           .querySelector("#google-server-url")
           .value.trim();
@@ -7125,7 +6692,6 @@ async loadTombstoneList(modal) {
     '.modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background-color: rgba(0, 0, 0, 0.6); backdrop-filter: blur(4px); z-index: 99999; display: flex; align-items: center; justify-content: center; padding: 1rem; overflow-y: auto; } #sync-status-dot { position: absolute; top: -0.15rem; right: -0.6rem; width: 0.625rem; height: 0.625rem; border-radius: 9999px; } .cloud-sync-modal { width: 100%; max-width: 32rem; max-height: 90vh; background-color: rgb(39, 39, 42); color: white; border-radius: 0.5rem; padding: 0; border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.3); display: flex; flex-direction: column; } .cloud-sync-modal > div { display: flex; flex-direction: column; height: 100%; } .cloud-sync-modal-header { padding: 1rem; padding-bottom: 0.75rem; flex-shrink: 0; } .cloud-sync-modal-content { padding: 0 1rem; flex: 1; overflow-y: auto; } .cloud-sync-modal-footer { padding: 1rem; padding-top: 0.75rem; flex-shrink: 0; } .cloud-sync-modal input, .cloud-sync-modal select { background-color: rgb(63, 63, 70); border: 1px solid rgb(82, 82, 91); color: white; } .cloud-sync-modal input:focus, .cloud-sync-modal select:focus { border-color: rgb(59, 130, 246); outline: none; box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2); } .cloud-sync-modal button:disabled { background-color: rgb(82, 82, 91); cursor: not-allowed; opacity: 0.5; } .cloud-sync-modal .bg-zinc-800 { border: 1px solid rgb(82, 82, 91); } .cloud-sync-modal input[type="checkbox"] { accent-color: rgb(59, 130, 246); } .cloud-sync-modal input[type="checkbox"]:checked { background-color: rgb(59, 130, 246); border-color: rgb(59, 130, 246); } #sync-diagnostics-table { font-size: 0.75rem; } #sync-diagnostics-table th { background-color: rgb(82, 82, 91); font-weight: 600; } #sync-diagnostics-table tr:hover { background-color: rgba(63, 63, 70, 0.5); } #sync-diagnostics-header { padding: 0.5rem; margin: -0.5rem; border-radius: 0.375rem; transition: background-color 0.2s ease; -webkit-tap-highlight-color: transparent; min-height: 44px; display: flex; align-items: center; } #sync-diagnostics-header:hover { background-color: rgba(63, 63, 70, 0.5); } #sync-diagnostics-header:active { background-color: rgba(63, 63, 70, 0.8); } #sync-diagnostics-chevron, #sync-diagnostics-refresh { transition: transform 0.3s ease; } #sync-diagnostics-content { animation: slideDown 0.2s ease-out; } @keyframes slideDown { from { opacity: 0; max-height: 0; } to { opacity: 1; max-height: 300px; } } @media (max-width: 640px) { #sync-diagnostics-table { font-size: 0.7rem; } #sync-diagnostics-table th, #sync-diagnostics-table td { padding: 0.5rem 0.25rem; } .cloud-sync-modal { margin: 0.5rem; } } .modal-footer a { color: #60a5fa; text-decoration: none; transition: color 0.2s ease-in-out; line-height: 3em;} .modal-footer a:hover { color: #93c5fd; text-decoration: underline; } #sync-diagnostics-refresh.is-refreshing { background-color: #16a34a; } #refresh-tombstones-btn.is-refreshing { background-color: #16a34a; } #undo-selected-btn:disabled.is-success { background-color: #16a34a; }';
   document.head.appendChild(styleSheet);
   const app = new CloudSyncApp();
-  app.registerProvider("s3", S3Service);
   app.registerProvider("googleDrive", GoogleDriveService);
   app.initialize();
 
@@ -7227,6 +6793,26 @@ async loadTombstoneList(modal) {
       return app.dataService.createTombstone(itemId, type, source);
     }
     return null;
+  };
+  window.tcsListSyncKeys = async () => {
+    if (!app?.dataService) return {};
+    const keys = await app.dataService.getAllItemKeys();
+    const groups = {};
+    for (const k of keys) {
+      const g = k.startsWith("CHAT_")
+        ? "CHAT_* (chats)"
+        : k.startsWith("CLIENT_CACHE_")
+        ? "CLIENT_CACHE_* (cached attachments/files)"
+        : k.startsWith("TM_")
+        ? "TM_* (TypingMind settings)"
+        : "other";
+      (groups[g] = groups[g] || []).push(k);
+    }
+    console.log("=== Syncable keys by group - any key or prefix* can be excluded ===");
+    for (const [g, list] of Object.entries(groups)) {
+      console.log(g + " - " + list.length + " keys", list.slice(0, 60));
+    }
+    return groups;
   };
   window.getTombstones = () => {
     if (app?.dataService) {
