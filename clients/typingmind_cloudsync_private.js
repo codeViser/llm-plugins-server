@@ -22,7 +22,7 @@ Contributors (Docs & Fixes):
 - Jeff G aka Ken Harris (Various fixes and improvements) [2026-03-04]
 */
 
-const TCS_BUILD_VERSION = "2026-06-11.1";
+const TCS_BUILD_VERSION = "2026-06-16.1";
 
 if (window.typingMindCloudSync) {
   console.log("TypingMind Cloud Sync already loaded");
@@ -1715,16 +1715,42 @@ if (window.typingMindCloudSync) {
           (Array.isArray(chat.data?.messages) && chat.data.messages) ||
           null;
 
+        // Recursively sum the length of every string anywhere inside a value.
+        // This captures message text, tool_use inputs, tool_result outputs and
+        // any nested multi-part content blocks - so ANY growth (a new tool call,
+        // a tool result, or the streamed final response) changes the total.
+        // Depth-capped and allocation-free (no JSON.stringify) for speed.
+        const measure = (v, depth) => {
+          if (v == null || depth > 5) return 0;
+          const t = typeof v;
+          if (t === "string") return v.length;
+          if (t === "number" || t === "boolean") return 2;
+          if (Array.isArray(v)) {
+            let s = v.length;
+            for (let i = 0; i < v.length; i++) s += measure(v[i], depth + 1);
+            return s;
+          }
+          if (t === "object") {
+            let s = 0;
+            for (const k in v) s += measure(v[k], depth + 1);
+            return s;
+          }
+          return 0;
+        };
+
         let msgCount = 0;
         let lastMsgId = "";
         let lastMsgTs = "";
         let contentLen = 0;
+        let lastMsgLen = 0;
         if (messages) {
           msgCount = messages.length;
           for (let i = 0; i < messages.length; i++) {
-            const c = messages[i]?.content;
-            if (typeof c === "string") contentLen += c.length;
-            else if (Array.isArray(c)) contentLen += c.length;
+            const m = messages[i];
+            if (!m) continue;
+            // role + accurate content size per message
+            if (m.role) contentLen += String(m.role).length;
+            contentLen += measure(m.content, 0);
           }
           const last = messages[msgCount - 1];
           if (last && typeof last === "object") {
@@ -1732,6 +1758,7 @@ if (window.typingMindCloudSync) {
             lastMsgTs =
               last.updatedAt || last.updated_at || last.createdAt ||
               last.created_at || last.timestamp || "";
+            lastMsgLen = measure(last.content, 0);
           }
         } else {
           msgCount = chat.messageCount || chat.messagesCount || chat.turns || 0;
@@ -1750,11 +1777,12 @@ if (window.typingMindCloudSync) {
         // v2 format: updatedAt is deliberately EXCLUDED so a view-only
         // timestamp refresh ("touch") never registers as a content change.
         return [
-          "v2",
+          "v3",
           String(msgCount),
           String(lastMsgId),
           String(lastMsgTs),
           String(contentLen),
+          String(lastMsgLen),
           String(title),
           String(starred),
           String(pinned),
@@ -1825,8 +1853,8 @@ if (window.typingMindCloudSync) {
               changeReason = "new-chat";
               const _ts = this.getComparableTimestamp(value?.updatedAt || value?.updated_at || value?.lastUpdated || value?.modifiedAt || 0);
               itemLastModified = _ts || now;
-            } else if (lastKnownFingerprint && !lastKnownFingerprint.startsWith("v2|")) {
-              // One-time fingerprint format migration (v1 -> v2): refresh the
+            } else if (lastKnownFingerprint && !lastKnownFingerprint.startsWith("v3|")) {
+              // One-time fingerprint format migration (older -> v3): refresh the
               // stored fingerprint WITHOUT uploading. The data is already in
               // the cloud; only the fingerprint format changed.
               existingItem.chatFingerprint = currentFingerprint;
@@ -2037,7 +2065,7 @@ if (window.typingMindCloudSync) {
                 };
 
                 if (item.id.startsWith("CHAT_") && item.type === "idb") {
-                  newMetadataEntry.chatFingerprint = item.chatFingerprint || this.getChatFingerprint(data);
+                  newMetadataEntry.chatFingerprint = this.getChatFingerprint(data);
                 }
 
                 if (item.type === "blob") {         
@@ -2268,8 +2296,9 @@ if (window.typingMindCloudSync) {
             if (key.startsWith("CHAT_")) {
               const cloudFp = cloudItem.chatFingerprint || "";
               const localFp = localItem?.chatFingerprint || "";
-              const bothV2 = cloudFp.startsWith("v2|") && localFp.startsWith("v2|");
-              if (bothV2 && cloudFp === localFp) {
+              const fmt = (fp) => (fp.split("|")[0] || "");
+              const sameFormat = cloudFp && localFp && fmt(cloudFp) === fmt(localFp);
+              if (sameFormat && cloudFp === localFp) {
                 // Identical content AND attributes - nothing to pull, regardless
                 // of timestamps. A view-only "touch" on another device must not
                 // trigger re-downloads or overwrites.
@@ -2593,7 +2622,15 @@ if (window.typingMindCloudSync) {
           `📊 Local Metadata Stats: Total=${localItems.length}, Active=${localActive}, Deleted=${localDeleted}`
         );
       }
-      const metadataWasPurged =await this.syncFromCloud();
+      let metadataWasPurged = false;
+      try {
+        metadataWasPurged = await this.syncFromCloud();
+      } catch (e) {
+        // Download phase failed (e.g. tab suspended mid-sync on mobile, flaky
+        // network). Do NOT abort: continue to the upload phase so locally
+        // authored changes are still pushed to the cloud this cycle.
+        this.logger.log("warning", "syncFromCloud failed; continuing to push local changes: " + (e?.message || e));
+      }
 
       if (metadataWasPurged) {
           this.logger.log('info', 'Metadata was purged. Forcing an upload to make the fix permanent in the cloud.');
@@ -6771,7 +6808,7 @@ async loadTombstoneList(modal) {
   // Android WebView: focus fires when native app comes to foreground
   window.addEventListener("focus", function() { _triggerForegroundSync("focus"); }, { passive: true });
   // iOS / some Android WebViews: pageshow fires on back-navigation or resume
-  window.addEventListener("pageshow", function(e) { if (!e.persisted) return; _triggerForegroundSync("pageshow"); }, { passive: true });
+  window.addEventListener("pageshow", function() { _triggerForegroundSync("pageshow"); }, { passive: true });
   window.addEventListener(
     "error",
     (event) => {
