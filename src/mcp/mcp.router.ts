@@ -114,6 +114,79 @@ mcpRouter.post('/restart/:id', auth, async (req: Request, res: Response) => {
   }
 });
 
+// Restart ALL connected MCP clients in place, each re-created from its
+// stored original configuration. This is the server-side "hard refresh"
+// signal: it tears down every connector (closing transports/subprocesses)
+// and brings them back fresh, so stale tools are re-listed correctly.
+//
+// Unlike POST /start (which SKIPS clients whose config is unchanged),
+// /restart-all forces a full reconnect regardless of config equality.
+//
+// Non-breaking: purely additive. Failures for individual clients are
+// collected and reported; one client's failure does not abort the rest.
+mcpRouter.post('/restart-all', auth, async (req: Request, res: Response) => {
+  try {
+    // Snapshot the IDs + configs first; the Map mutates as we restart.
+    const snapshot = Array.from(clients.entries()).map(([id, entry]) => ({
+      id,
+      config: entry.config || {
+        command: entry.command,
+        args: entry.args,
+        env: entry.env,
+      },
+    }));
+
+    if (snapshot.length === 0) {
+      return res.status(200).json({
+        message: 'No MCP clients to restart',
+        restarted: [],
+        errors: [],
+      });
+    }
+
+    const restarted: { id: string }[] = [];
+    const errors: { id: string; error: string }[] = [];
+
+    // Restart sequentially to avoid spawning/closing storms and to keep
+    // the `clients` Map mutations predictable.
+    for (const { id, config } of snapshot) {
+      try {
+        const existing = clients.get(id);
+        if (existing) {
+          await existing.client.close();
+          clients.delete(id);
+        }
+        await startClient(id, config);
+        restarted.push({ id });
+      } catch (error: any) {
+        logger.error(`Error restarting client ${id} during /restart-all:`, error);
+        errors.push({ id, error: error.message });
+        // Ensure no half-closed entry lingers in the Map.
+        clients.delete(id);
+      }
+    }
+
+    if (errors.length === 0) {
+      return res.status(200).json({
+        message: `All ${restarted.length} MCP client(s) restarted successfully`,
+        restarted,
+        errors,
+      });
+    }
+    return res.status(207).json({
+      message: `${restarted.length} restarted, ${errors.length} failed`,
+      restarted,
+      errors,
+    });
+  } catch (error: any) {
+    logger.error('Error in /restart-all:', error);
+    return res.status(500).json({
+      error: 'Failed to restart all clients',
+      details: error.message,
+    });
+  }
+});
+
 mcpRouter.get('/clients', auth, async (req: Request, res: Response) => {
   try {
     // Create an array of promises that will fetch tools for each client
