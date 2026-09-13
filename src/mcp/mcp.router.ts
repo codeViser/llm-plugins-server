@@ -187,7 +187,7 @@ mcpRouter.post('/restart-all', auth, async (req: Request, res: Response) => {
   }
 });
 
-mcpRouter.get('/clients', auth, async (req: Request, res: Response) => {
+const listClients = async (req: Request, res: Response) => {
   try {
     // Create an array of promises that will fetch tools for each client
     const clientDetailsPromises = Array.from(clients.values()).map(async (clientEntry) => {
@@ -232,7 +232,10 @@ mcpRouter.get('/clients', auth, async (req: Request, res: Response) => {
       details: error.message,
     });
   }
-});
+};
+
+mcpRouter.get('/clients', auth, listClients);
+mcpRouter.get('/clients/', auth, listClients);
 
 mcpRouter.get('/clients/:id', auth, (req: Request, res: Response) => {
   const clientId = req.params.id;

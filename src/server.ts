@@ -11,6 +11,7 @@ import { pino } from 'pino';
 // Import the function to create the OpenAPI router
 import { createOpenAPIRouter } from '@/api-docs/openAPIRouter';
 import errorHandler from '@/common/middleware/errorHandler';
+import { normalizeRequestPath } from '@/common/middleware/normalizeRequestPath';
 import requestLogger from '@/common/middleware/requestLogger';
 import { env } from '@/common/utils/envConfig';
 import { mcpRouter } from '@/mcp/mcp.router';
@@ -38,6 +39,9 @@ const app: Express = express();
 
 // Set the application to trust the reverse proxy
 app.set('trust proxy', true);
+
+// iOS WebKit does not collapse `//start` when a connector URL has a trailing slash.
+app.use(normalizeRequestPath);
 
 app.use(
   '/paper-discovery',
@@ -126,7 +130,22 @@ app.use('/workspace', googleWorkspaceRouter);
 app.use('/gdrive-sync', gdriveSyncAuthRouter);
 app.use('/health-check', healthCheckRouter);
 app.use('/images', express.static('public/images'));
-app.use('/clients', express.static('clients', { etag: false, lastModified: false, setHeaders: (res) => { res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate'); res.setHeader('Pragma', 'no-cache'); res.setHeader('Expires', '0'); } }));
+app.use(
+  '/clients',
+  express.static('clients', {
+    etag: false,
+    lastModified: false,
+    // Default express.static redirects GET /clients -> /clients/. Fetch on iOS
+    // WebKit drops Authorization on that redirect, so MCP listing then 401s.
+    redirect: false,
+    index: false,
+    setHeaders: (res) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    },
+  })
+);
 app.use('/youtube-transcript', youtubeTranscriptRouter);
 app.use('/web-page-reader', webPageReaderRouter);
 app.use('/powerpoint-generator', powerpointGeneratorRouter);
