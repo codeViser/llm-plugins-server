@@ -1,6 +1,5 @@
 import { OpenAPIRegistry } from '@asteasolutions/zod-to-openapi';
 import express, { Request, Response, Router } from 'express';
-import got from 'got';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -10,6 +9,7 @@ import { ResponseStatus, ServiceResponse } from '@/common/models/serviceResponse
 import { handleServiceResponse, validateRequest } from '@/common/utils/httpHandlers';
 
 import { GooglePlacesApiRequestBodySchema, GooglePlacesApiResponseSchema } from './googlePlacesModel';
+import { fetchFromGooglePlacesApi } from './googlePlaces.service';
 
 export const googlePlacesRegistry = new OpenAPIRegistry();
 googlePlacesRegistry.register('GooglePlacesApi', GooglePlacesApiResponseSchema);
@@ -18,65 +18,13 @@ googlePlacesRegistry.registerPath({
   method: 'post',
   path: '/google-places/query',
   tags: ['Google Places API'],
-  summary: 'Proxies requests to the Google Places API using client-provided API key',
+  summary:
+    'Proxies requests to Google Places API (New) using a client-provided API key; legacy-shaped JSON for TypingMind plugins',
   request: {
     body: createApiRequestBody(GooglePlacesApiRequestBodySchema, 'application/json'),
   },
   responses: createApiResponse(GooglePlacesApiResponseSchema, 'Success'),
 });
-
-async function fetchFromGooglePlacesApi(params: z.infer<typeof GooglePlacesApiRequestBodySchema>) {
-  let endpoint = '';
-  const queryParams = new URLSearchParams({ key: params.apiKey });
-
-  if (params.fields) {
-    queryParams.append('fields', params.fields);
-  }
-
-  switch (params.searchType) {
-    case 'textsearch':
-      endpoint = 'https://maps.googleapis.com/maps/api/place/textsearch/json';
-      if (params.query) queryParams.append('query', params.query);
-      else throw new Error("'query' is required for textsearch.");
-      break;
-    case 'nearbysearch':
-      endpoint = 'https://maps.googleapis.com/maps/api/place/nearbysearch/json';
-      if (!params.location) {
-        throw new Error("The 'location' parameter (latitude,longitude) is required for 'nearbysearch'.");
-      }
-      queryParams.append('location', params.location);
-      queryParams.append('radius', (params.radius || 1500).toString());
-      if (params.query) queryParams.append('keyword', params.query);
-      break;
-    case 'details':
-      endpoint = 'https://maps.googleapis.com/maps/api/place/details/json';
-      if (!params.placeId) {
-        throw new Error("The 'placeId' parameter is required for 'details' searchType.");
-      }
-      queryParams.append('placeid', params.placeId);
-      break;
-    default:
-      throw new Error(`Invalid searchType: ${params.searchType}.`);
-  }
-
-  const url = `${endpoint}?${queryParams.toString()}`;
-
-  try {
-    const response = await got(url);
-    return JSON.parse(response.body);
-  } catch (error: any) {
-    let errorMessage = `Google Places API error: ${error.message}`;
-    if (error.response && error.response.body) {
-      try {
-        const errorBody = JSON.parse(error.response.body);
-        errorMessage += ` - ${errorBody.error_message || JSON.stringify(errorBody)}`;
-      } catch (e) {
-        errorMessage += ` - ${error.response.body}`;
-      }
-    }
-    throw new Error(errorMessage);
-  }
-}
 
 export const googlePlacesRouter: Router = (() => {
   const router = express.Router();
@@ -88,6 +36,18 @@ export const googlePlacesRouter: Router = (() => {
       try {
         const requestBody = req.body as z.infer<typeof GooglePlacesApiRequestBodySchema>;
         const result = await fetchFromGooglePlacesApi(requestBody);
+
+        if (result.status && result.status !== 'OK') {
+          const errorServiceResponse = new ServiceResponse(
+            ResponseStatus.Failed,
+            result.error_message || `Google Places status: ${result.status}`,
+            result,
+            StatusCodes.BAD_REQUEST
+          );
+          handleServiceResponse(errorServiceResponse, res);
+          return;
+        }
+
         const serviceResponse = new ServiceResponse(
           ResponseStatus.Success,
           'Data fetched successfully',
@@ -95,15 +55,17 @@ export const googlePlacesRouter: Router = (() => {
           StatusCodes.OK
         );
         handleServiceResponse(serviceResponse, res);
-      } catch (error: any) {
-        const errorMessage = error.message || 'An unknown error occurred while fetching from Google Places API.';
+      } catch (error: unknown) {
+        const err = error as Error & { legacy?: Record<string, unknown> };
+        const errorMessage = err.message || 'An unknown error occurred while fetching from Google Places API.';
+        const legacyBody = err.legacy ?? null;
         const errorServiceResponse = new ServiceResponse(
           ResponseStatus.Failed,
           errorMessage,
-          null,
-          error.message.includes('parameter') ||
-          error.message.includes('Invalid searchType') ||
-          error.message.includes('API Key')
+          legacyBody,
+          errorMessage.includes('parameter') ||
+          errorMessage.includes('Invalid searchType') ||
+          errorMessage.includes('API Key')
             ? StatusCodes.BAD_REQUEST
             : StatusCodes.INTERNAL_SERVER_ERROR
         );

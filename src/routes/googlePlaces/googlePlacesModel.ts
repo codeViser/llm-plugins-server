@@ -6,6 +6,7 @@ extendZodWithOpenApi(z);
 // Schema for the response from the Google Places API proxy
 export const GooglePlacesApiResponseSchema = z.object({
   results: z.array(z.any()).optional(),
+  result: z.record(z.any()).optional(),
   status: z.string(),
   error_message: z.string().optional(),
   html_attributions: z.array(z.any()).optional(),
@@ -37,7 +38,7 @@ export const GooglePlacesApiRequestBodySchema = z.object({
   }),
   fields: z.string().optional().openapi({
     description:
-      "Optional. Comma-separated list of fields to return (e.g., 'name,formatted_address,opening_hours/open_now,rating,types'). Helps control data size and API costs. Refer to Google Places API documentation for available fields.",
+      "Optional. Comma-separated legacy field names (e.g., 'name,formatted_address,opening_hours/open_now,rating,types') mapped to Places API (New) field masks. Enable **Places API (New)** on your GCP project.",
   }),
 });
 export type GooglePlacesApiRequestBody = z.infer<typeof GooglePlacesApiRequestBodySchema>;
