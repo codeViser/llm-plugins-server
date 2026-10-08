@@ -1,44 +1,5 @@
-import dns from 'node:dns';
-import { Resolver } from 'node:dns/promises';
 import got from 'got';
 import { z } from 'zod';
-
-const PUBLIC_DNS = ['1.1.1.1', '8.8.8.8', '8.8.4.4'];
-
-/** ExpressVPN on Pi points resolv.conf at 212.115.* which often fails. */
-function googlePlacesDnsLookup(
-  hostname: string,
-  options: dns.LookupOneOptions,
-  callback: (
-    err: NodeJS.ErrnoException | null,
-    address: string | dns.LookupAddress[],
-    family?: number
-  ) => void
-) {
-  const resolver = new Resolver();
-  resolver.setServers(PUBLIC_DNS);
-  resolver
-    .resolve4(hostname)
-    .then((addresses) => {
-      if (!addresses.length) {
-        callback(new Error(`No A record for ${hostname}`), '', 4);
-        return;
-      }
-      if (options?.all) {
-        callback(
-          null,
-          addresses.map((address) => ({ address, family: 4 }))
-        );
-        return;
-      }
-      callback(null, addresses[0], 4);
-    })
-    .catch((err: NodeJS.ErrnoException) => callback(err, '', 4));
-}
-
-const gotGooglePlaces = got.extend({
-  dnsLookup: googlePlacesDnsLookup,
-});
 
 import { GooglePlacesApiRequestBodySchema } from './googlePlacesModel';
 
@@ -205,7 +166,7 @@ async function placesPost(
   json: Record<string, unknown>
 ) {
   try {
-    const response = await gotGooglePlaces.post(`${PLACES_BASE}${path}`, {
+    const response = await got.post(`${PLACES_BASE}${path}`, {
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey,
@@ -232,7 +193,7 @@ async function placesPost(
 async function placesGet(apiKey: string, placeId: string, fieldMask: string) {
   const id = encodeURIComponent(stripPlaceId(placeId));
   try {
-    const response = await gotGooglePlaces.get(`${PLACES_BASE}/places/${id}`, {
+    const response = await got.get(`${PLACES_BASE}/places/${id}`, {
       headers: {
         'X-Goog-Api-Key': apiKey,
         'X-Goog-FieldMask': fieldMask,

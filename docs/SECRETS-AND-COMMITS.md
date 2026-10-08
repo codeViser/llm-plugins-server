@@ -38,11 +38,9 @@ Application code must **not** log request bodies containing `apiKey` / `Authoriz
 
 ---
 
-## Scoped DNS note (not a global privacy exception)
+## DNS on Pi
 
-`src/routes/googlePlaces/googlePlaces.service.ts` resolves **`places.googleapis.com`** via public DNS inside that HTTP client only, because ExpressVPN DNS on the Pi often breaks Google APIs. This does **not** change system DNS for git, SSH, or other routes.
-
-For **git push** when Pi cannot resolve `github.com`, push from Mac or fix VPN DNS on the Pi — see TPM-dev `docs/COMMIT-AND-SECRETS-POLICY.md`.
+Google Places uses **system DNS** (ExpressVPN `resolv.conf`). If VPN DNS is mis-routed again, see TPM-dev `docs/PI-DNS-EXPRESSVPN.md` — fix `expressvpn_pi` routing; do not add per-plugin public DNS overrides unless necessary.
 
 ---
 
