@@ -1,7 +1,13 @@
+import { Resolver } from 'dns/promises';
 import got from 'got';
+import { pino } from 'pino';
 import { z } from 'zod';
 
+import { env } from '@/common/utils/envConfig';
+
 import { GooglePlacesApiRequestBodySchema } from './googlePlacesModel';
+
+const logger = pino({ name: 'google-places' });
 
 type PlacesRequest = z.infer<typeof GooglePlacesApiRequestBodySchema>;
 
@@ -19,6 +25,9 @@ const LEGACY_LIST_FIELD_MAP: Record<string, string> = {
   business_status: 'places.businessStatus',
   opening_hours: 'places.regularOpeningHours,places.currentOpeningHours',
   'opening_hours/open_now': 'places.currentOpeningHours',
+  'geometry/location': 'places.location',
+  review: 'places.reviews',
+  type: 'places.types',
   photos: 'places.photos',
   user_ratings_total: 'places.userRatingCount',
   price_level: 'places.priceLevel',
@@ -39,6 +48,9 @@ const LEGACY_DETAIL_FIELD_MAP: Record<string, string> = {
   business_status: 'businessStatus',
   opening_hours: 'regularOpeningHours,currentOpeningHours',
   'opening_hours/open_now': 'currentOpeningHours',
+  'geometry/location': 'location',
+  review: 'reviews',
+  type: 'types',
   formatted_phone_number: 'nationalPhoneNumber',
   international_phone_number: 'internationalPhoneNumber',
   website: 'websiteUri',
@@ -55,6 +67,54 @@ const DEFAULT_LIST_FIELD_MASK =
 const DEFAULT_DETAIL_FIELD_MASK =
   'id,displayName,formattedAddress,location,rating,types,googleMapsUri,nationalPhoneNumber,websiteUri,regularOpeningHours,currentOpeningHours';
 
+/** TypingMind plugin default field strings (fetch_google_place_data_via_proxy). */
+export const PLUGIN_DEFAULT_FIELDS_SEARCH =
+  'name,formatted_address,types,business_status,rating,geometry/location,opening_hours/open_now';
+export const PLUGIN_DEFAULT_FIELDS_DETAILS =
+  'name,formatted_address,international_phone_number,opening_hours,website,rating,review,user_ratings_total,price_level,type,geometry,business_status,photos';
+
+/**
+ * Normalize legacy Places field tokens before mask lookup (slash paths, singular aliases).
+ */
+export function normalizeLegacyFieldKey(raw: string): string {
+  const key = raw.trim();
+  if (!key) return key;
+  if (key in LEGACY_LIST_FIELD_MAP || key in LEGACY_DETAIL_FIELD_MAP) {
+    return key;
+  }
+  if (key.startsWith('geometry/')) {
+    return 'geometry';
+  }
+  if (key === 'reviews') {
+    return 'review';
+  }
+  if (key === 'types') {
+    return 'type';
+  }
+  const slashIdx = key.indexOf('/');
+  if (slashIdx > 0) {
+    const head = key.slice(0, slashIdx);
+    if (head in LEGACY_LIST_FIELD_MAP || head in LEGACY_DETAIL_FIELD_MAP) {
+      return head;
+    }
+  }
+  return key;
+}
+
+function resolveLegacyFieldMapping(
+  raw: string,
+  mode: 'list' | 'details'
+): string | null {
+  const map = mode === 'details' ? LEGACY_DETAIL_FIELD_MAP : LEGACY_LIST_FIELD_MAP;
+  const key = normalizeLegacyFieldKey(raw);
+  if (!key) return null;
+  if (map[key]) {
+    return map[key];
+  }
+  logger.warn({ mode, field: raw }, 'Skipping unmapped legacy Places field for field mask');
+  return null;
+}
+
 export function buildFieldMask(
   fields: string | undefined,
   mode: 'list' | 'details'
@@ -63,13 +123,11 @@ export function buildFieldMask(
     return mode === 'details' ? DEFAULT_DETAIL_FIELD_MASK : DEFAULT_LIST_FIELD_MASK;
   }
 
-  const map = mode === 'details' ? LEGACY_DETAIL_FIELD_MAP : LEGACY_LIST_FIELD_MAP;
   const out = new Set<string>();
 
   for (const raw of fields.split(',')) {
-    const key = raw.trim();
-    if (!key) continue;
-    const mapped = map[key] ?? (mode === 'details' ? key : `places.${key}`);
+    const mapped = resolveLegacyFieldMapping(raw, mode);
+    if (!mapped) continue;
     for (const part of mapped.split(',')) {
       out.add(part.trim());
     }
@@ -79,6 +137,39 @@ export function buildFieldMask(
     return mode === 'details' ? DEFAULT_DETAIL_FIELD_MASK : DEFAULT_LIST_FIELD_MASK;
   }
   return [...out].join(',');
+}
+
+function googlePlacesGotOptions(): { dnsLookup?: typeof import('dns').lookup } {
+  const servers = env.GOOGLE_HTTP_DNS_SERVERS
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (servers.length === 0) {
+    return {};
+  }
+  const resolver = new Resolver();
+  resolver.setServers(servers);
+  return {
+    dnsLookup: (hostname, options, callback) => {
+      void resolver
+        .resolve4(hostname)
+        .then((addresses) => {
+          if (!addresses.length) {
+            callback(new Error(`No A records for ${hostname}`));
+            return;
+          }
+          if (typeof options === 'object' && options?.all) {
+            callback(
+              null,
+              addresses.map((address) => ({ address, family: 4 }))
+            );
+            return;
+          }
+          callback(null, addresses[0], 4);
+        })
+        .catch((err: Error) => callback(err));
+    },
+  };
 }
 
 function parseLocation(location: string): { latitude: number; longitude: number } {
@@ -167,6 +258,7 @@ async function placesPost(
 ) {
   try {
     const response = await got.post(`${PLACES_BASE}${path}`, {
+      ...googlePlacesGotOptions(),
       headers: {
         'Content-Type': 'application/json',
         'X-Goog-Api-Key': apiKey,
@@ -181,6 +273,10 @@ async function placesPost(
     const body = err.response?.body;
     if (body && typeof body === 'object' && 'error' in body) {
       const e = (body as { error: { message?: string; status?: string } }).error;
+      logger.warn(
+        { path, fieldMask, googleStatus: e.status, googleMessage: e.message },
+        'Google Places POST error'
+      );
       const status = e.status === 'PERMISSION_DENIED' ? 'REQUEST_DENIED' : 'UNKNOWN_ERROR';
       throw Object.assign(new Error(e.message || 'Google Places API error'), {
         legacy: legacyError(status, e.message || 'Google Places API error'),
@@ -194,6 +290,7 @@ async function placesGet(apiKey: string, placeId: string, fieldMask: string) {
   const id = encodeURIComponent(stripPlaceId(placeId));
   try {
     const response = await got.get(`${PLACES_BASE}/places/${id}`, {
+      ...googlePlacesGotOptions(),
       headers: {
         'X-Goog-Api-Key': apiKey,
         'X-Goog-FieldMask': fieldMask,
@@ -206,6 +303,10 @@ async function placesGet(apiKey: string, placeId: string, fieldMask: string) {
     const body = err.response?.body;
     if (body && typeof body === 'object' && 'error' in body) {
       const e = (body as { error: { message?: string; status?: string } }).error;
+      logger.warn(
+        { placeId: stripPlaceId(placeId), fieldMask, googleStatus: e.status, googleMessage: e.message },
+        'Google Places GET error'
+      );
       const status = e.status === 'PERMISSION_DENIED' ? 'REQUEST_DENIED' : 'UNKNOWN_ERROR';
       throw Object.assign(new Error(e.message || 'Google Places API error'), {
         legacy: legacyError(status, e.message || 'Google Places API error'),

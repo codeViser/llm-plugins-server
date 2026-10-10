@@ -11,7 +11,8 @@ describe('Health Check API endpoints', () => {
 
     expect(response.statusCode).toEqual(StatusCodes.OK);
     expect(result.success).toBeTruthy();
-    expect(result.responseObject).toBeNull();
+    expect(result.responseObject?.placesGoogleDns?.ok).toBe(true);
+    expect(typeof result.responseObject?.placesGoogleDns?.address).toBe('string');
     expect(result.message).toEqual('Service is healthy');
   });
 });

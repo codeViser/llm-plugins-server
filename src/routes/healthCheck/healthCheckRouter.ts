@@ -1,3 +1,4 @@
+import { lookup } from 'dns/promises';
 import { OpenAPIRegistry } from '@asteasolutions/zod-to-openapi';
 import express, { Request, Response, Router } from 'express';
 import { StatusCodes } from 'http-status-codes';
@@ -19,8 +20,27 @@ export const healthCheckRouter: Router = (() => {
     responses: createApiResponse(z.null(), 'Success'),
   });
 
-  router.get('/', (_req: Request, res: Response) => {
-    const serviceResponse = new ServiceResponse(ResponseStatus.Success, 'Service is healthy', null, StatusCodes.OK);
+  router.get('/', async (_req: Request, res: Response) => {
+    let placesDns: { ok: boolean; address?: string; error?: string } = { ok: false };
+    try {
+      const result = await lookup('places.googleapis.com');
+      const address =
+        typeof result === 'string' ? result : (result as { address: string }).address;
+      placesDns = { ok: true, address };
+    } catch (err) {
+      placesDns = { ok: false, error: (err as Error).message };
+    }
+
+    const payload = {
+      placesGoogleDns: placesDns,
+    };
+
+    const serviceResponse = new ServiceResponse(
+      ResponseStatus.Success,
+      placesDns.ok ? 'Service is healthy' : 'Service is up; Places DNS lookup failed',
+      payload,
+      StatusCodes.OK
+    );
     handleServiceResponse(serviceResponse, res);
   });
 

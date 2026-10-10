@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import { cleanEnv, host, port, str } from 'envalid';
+import { cleanEnv, host, num, port, str } from 'envalid';
 
 dotenv.config();
 
@@ -15,6 +15,13 @@ export const env = cleanEnv(process.env, {
   GOOGLE_CLIENT_SECRET: str({ default: isTest ? 'TEST_GOOGLE_CLIENT_SECRET' : '' }),
   GDRIVE_SYNC_TOKEN_KEY: str({ default: isTest ? '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' : '' }),
   MCP_AUTH_TOKEN: str({ default: '' }),
+  // Optional fallback only. Prefer TypingMind plugin User Settings (request body).
+  OPENAI_API_KEY: str({ default: '' }),
+  MULTI_AGENT_DEFAULT_MAX_AGENTS: num({ default: 4 }),
+  // Official id is gpt-6-astra (Responses API). Plugin User Settings override this.
+  MULTI_AGENT_DEFAULT_MODEL: str({ default: 'gpt-6-astra' }),
+  /** Comma-separated DNS servers for outbound Google Places HTTP only (e.g. 1.1.1.1,8.8.8.8). Empty = system DNS. */
+  GOOGLE_HTTP_DNS_SERVERS: str({ default: '' }),
   // GOOGLE_CALLBACK_URL: str({
   //   default: isTest ? 'http://localhost:3001/auth/google/callback' : 'http://localhost:3000/auth/google/callback'
   // }), // REMOVED - Handled by TypingMind
