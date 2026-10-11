@@ -7,13 +7,15 @@ export function toolsParityReport(args: {
   mcp_missing_on_pi?: string[];
   parity_strict?: boolean;
   relay_required?: boolean;
-  relay_mode?: 'optional' | 'required';
+  relay_mode?: 'none' | 'optional' | 'required';
 }): { ok: boolean; explain: string; warnings: string[] } {
   const warnings: string[] = [];
   if (args.mcp_missing_on_pi && args.mcp_missing_on_pi.length > 0) {
     warnings.push(`TM MCP servers not connected on Pi: ${args.mcp_missing_on_pi.join(', ')}`);
   }
-  if (args.relay_required) {
+  if (args.relay_mode === 'none') {
+    warnings.push('relay_mode=none: Pi runs tools via MCP + connector HTTP only; tab may close after START.');
+  } else if (args.relay_required) {
     warnings.push(
       'Job tool catalog requires client relay for some tools; keep the TypingMind tab open with relay connected.'
     );

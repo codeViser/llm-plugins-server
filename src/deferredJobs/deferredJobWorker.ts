@@ -24,18 +24,13 @@ const logger = pino({ name: 'deferred-job-worker' });
 
 const inFlight = new Set<string>();
 
-/** Ephemeral API keys for in-process runs (not written to SQLite). */
-const runSecrets = new Map<string, { openai?: string; openrouter?: string }>();
+import { clearDeferredRunSecrets, getDeferredRunSecrets, stashDeferredRunSecrets } from './runSecrets';
 
-export function stashDeferredRunSecrets(
-  jobId: string,
-  secrets: { openai?: string; openrouter?: string }
-): void {
-  runSecrets.set(jobId, secrets);
-}
+export { stashDeferredRunSecrets } from './runSecrets';
+import { notifyDeferredJobTerminal } from './deferredNotify';
 
 function resolveKeys(jobId: string, input: DeferredRunInput): { openai?: string; openrouter?: string } {
-  const stashed = runSecrets.get(jobId);
+  const stashed = getDeferredRunSecrets(jobId);
   return {
     openai: input.openai_api_key ?? stashed?.openai ?? (env.OPENAI_API_KEY || undefined),
     openrouter: input.openrouter_api_key ?? stashed?.openrouter ?? (env.OPENROUTER_API_KEY || undefined),
@@ -148,6 +143,10 @@ function inputFromJob(jobId: string, jobs: JobStore, body: DeferredRunInput): De
     progress: (body.progress ?? snap?.progress) as DeferredProgress | undefined,
     tool_catalog_v1: body.tool_catalog_v1 ?? (snap?.tool_catalog_v1 as DeferredRunInput['tool_catalog_v1']),
     relay_mode: body.relay_mode ?? snap?.relay_mode,
+    execution_resolution:
+      body.execution_resolution ??
+      body.session_bundle_v1?.execution_resolution ??
+      (snap?.execution_resolution as DeferredRunInput['execution_resolution']),
   };
 }
 
@@ -222,6 +221,8 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
         maxToolCalls: resolved.max_tool_calls ?? 12,
         toolCatalog: resolved.tool_catalog_v1 ?? null,
         jobId,
+        relayMode: resolved.relay_mode ?? 'none',
+        executionResolution: resolved.execution_resolution,
       });
       gatherResult = {
         packet: gathered.packet,
@@ -248,6 +249,12 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
           config_echo: configEcho,
         });
         progress('done');
+        void notifyDeferredJobTerminal({
+          jobId,
+          status: 'done',
+          goal: resolved.goal,
+          excerpt: gathered.finalAssistantText,
+        });
         return;
       }
 
@@ -409,6 +416,12 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
         },
       });
       progress('done');
+      void notifyDeferredJobTerminal({
+        jobId,
+        status: 'done',
+        goal: resolved.goal,
+        excerpt: parsed.final_answer,
+      });
       break;
     }
   } catch (error) {
@@ -416,9 +429,10 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
     logger.error({ jobId, err: message }, 'deferred job failed');
     jobs.fail(jobId, message);
     jobs.updateProgress(jobId, { phase: 'failed', updated_at: nowIso(), message });
+    void notifyDeferredJobTerminal({ jobId, status: 'failed', goal: resolved.goal, excerpt: message });
   } finally {
     inFlight.delete(jobId);
-    runSecrets.delete(jobId);
+    clearDeferredRunSecrets(jobId);
   }
 }
 

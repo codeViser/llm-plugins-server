@@ -31,6 +31,7 @@ describe('compositeRouter', () => {
     const router = await buildJobToolRouter({
       catalog,
       jobId: 'job-1',
+      relayMode: 'optional',
     });
     const listed = await router.listOpenAIFunctionTools();
     expect(listed.length).toBe(1);

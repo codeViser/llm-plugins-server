@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { parsePositiveInt } from '@/multiAgent/maxAgents';
 
+import { ExecutionResolutionEntrySchema, SessionBundleV1Schema } from '@/executionSurface/sessionBundle.schema';
 import { ToolCatalogV1Schema } from '@/executionSurface/toolCatalog.schema';
 
 import { InferenceProfileV2Schema } from './inferenceProfile';
@@ -48,7 +49,11 @@ export const DeferredRunRequestSchema = z.object({
     .optional(),
   parity_strict: optionalTrueFlag,
   tool_catalog_v1: ToolCatalogV1Schema.optional(),
-  relay_mode: z.enum(['optional', 'required']).optional(),
+  relay_mode: z.enum(['none', 'optional', 'required']).optional(),
+  session_bundle_v1: SessionBundleV1Schema.optional(),
+  execution_resolution: z.array(ExecutionResolutionEntrySchema).optional(),
+  vendor_credential_stash: z.record(z.string()).optional(),
+  handoff_allow_degraded: optionalTrueFlag,
 });
 
 export type DeferredRunRequest = z.infer<typeof DeferredRunRequestSchema>;

@@ -1,6 +1,6 @@
 import type { OpenAIFunctionTool } from '@/multiAgent/toolBridge';
 
-export type ToolRoute = 'pi_mcp' | 'client';
+export type ToolRoute = 'pi_mcp' | 'pi_connector_http' | 'client';
 
 export type ToolCatalogEntryV1 = {
   handle: string;
@@ -23,6 +23,7 @@ export type ResolvedToolDescriptor = {
   encodedName: string;
   function: ToolCatalogEntryV1['function'];
   mcp?: { clientId: string; toolName: string };
+  pi_target?: string;
 };
 
 export type ToolExecuteResult = { ok: true; text: string } | { ok: false; text: string };
@@ -30,7 +31,12 @@ export type ToolExecuteResult = { ok: true; text: string } | { ok: false; text: 
 export type JobToolRouter = {
   listOpenAIFunctionTools: () => Promise<OpenAIFunctionTool[]>;
   execute: (encodedName: string, rawArguments: string | Record<string, unknown> | undefined) => Promise<ToolExecuteResult>;
-  summary: () => { pi_mcp: number; client: number; legacy_mcp_only?: boolean };
+  summary: () => {
+    pi_mcp: number;
+    pi_connector_http: number;
+    client: number;
+    legacy_mcp_only?: boolean;
+  };
 };
 
 export type PiMcpToolIndex = Map<string, Set<string>>;

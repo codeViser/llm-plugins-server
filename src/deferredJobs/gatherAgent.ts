@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import got from 'got';
 
 import { buildJobToolRouter } from '@/executionSurface/compositeRouter';
+import type { ExecutionResolutionEntry, HandoffRelayMode } from '@/executionSurface/handoffResolution';
 import type { JobToolRouter, ToolCatalogV1 } from '@/executionSurface/types';
 import {
   bindToolsForOpenAI,
@@ -36,6 +37,8 @@ export type GatherAgentInput = {
   toolCatalog?: ToolCatalogV1 | null;
   jobId?: string;
   toolRouter?: JobToolRouter;
+  relayMode?: HandoffRelayMode;
+  executionResolution?: ExecutionResolutionEntry[];
 };
 
 export type GatherAgentResult = {
@@ -139,6 +142,8 @@ export async function runGatherAgent(input: GatherAgentInput): Promise<GatherAge
       allowMcpClients: input.allowMcpClients,
       denyMcpClients: input.denyMcpClients,
       jobId: input.jobId,
+      relayMode: input.relayMode,
+      executionResolution: input.executionResolution,
     }));
   const mcpTools = await router.listOpenAIFunctionTools();
   const system = input.profile

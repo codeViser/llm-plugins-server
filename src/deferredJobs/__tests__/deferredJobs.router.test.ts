@@ -66,6 +66,7 @@ describe('deferred-jobs router', () => {
           dry_run: true,
           mcp_auth_token: 'dummy-token',
           gather_profile: OR_GATHER_PROFILE,
+          relay_mode: 'optional',
           tool_catalog_v1: {
             schema_version: 1,
             catalog_hash: computeCatalogHash(tools),

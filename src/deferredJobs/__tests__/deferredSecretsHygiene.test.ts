@@ -15,5 +15,7 @@ describe('deferred job secrets hygiene', () => {
     expect(raw).not.toContain('openai_api_key');
     expect(raw).not.toContain('openrouter_api_key');
     expect(raw).not.toContain('mcp_auth_token');
+    expect(raw).not.toContain('vendor_credential_stash');
+    expect(raw).not.toContain('vendor:tavily');
   });
 });

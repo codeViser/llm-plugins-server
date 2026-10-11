@@ -1,6 +1,7 @@
 import got from 'got';
 
 import { buildJobToolRouter } from '@/executionSurface/compositeRouter';
+import type { ExecutionResolutionEntry, HandoffRelayMode } from '@/executionSurface/handoffResolution';
 import type { ToolCatalogV1 } from '@/executionSurface/types';
 import { bindToolsForOpenAI } from '@/multiAgent/toolBridge';
 import { runBackgroundResponsesTurn } from '@/multiAgent/openaiBackgroundTurn';
@@ -75,12 +76,16 @@ export async function runResponsesProfileGather(args: {
   maxToolCalls: number;
   toolCatalog?: ToolCatalogV1 | null;
   jobId?: string;
+  relayMode?: HandoffRelayMode;
+  executionResolution?: ExecutionResolutionEntry[];
 }): Promise<ProfileGatherResult> {
   const router = await buildJobToolRouter({
     catalog: args.toolCatalog,
     allowMcpClients: args.allowMcpClients,
     denyMcpClients: args.denyMcpClients,
     jobId: args.jobId,
+    relayMode: args.relayMode,
+    executionResolution: args.executionResolution,
   });
   const mcpTools = await router.listOpenAIFunctionTools();
   const { tools: oaiTools, resolve } = bindToolsForOpenAI(mcpTools);

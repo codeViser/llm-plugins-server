@@ -15,7 +15,10 @@ import {
   DeferredRunRequestSchema,
   type DeferredRunInput,
 } from './deferredJobs.model';
-import { runDeferredJob, stashDeferredRunSecrets } from './deferredJobWorker';
+import type { HandoffRelayMode } from '@/executionSurface/handoffResolution';
+
+import { runDeferredJob } from './deferredJobWorker';
+import { stashDeferredRunSecrets } from './runSecrets';
 import { clients } from '@/mcp/mcp';
 import { listMcpFunctionTools } from '@/multiAgent/toolBridge';
 
@@ -80,11 +83,30 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       deny: body.deny_mcp_clients,
     });
 
+    const relayMode: HandoffRelayMode =
+      body.session_bundle_v1?.relay_mode ?? body.relay_mode ?? 'none';
+
     const toolCatalogResolved = body.tool_catalog_v1
-      ? await resolveToolCatalogForDryRun(body.tool_catalog_v1, resolvedAllow, body.deny_mcp_clients)
+      ? await resolveToolCatalogForDryRun(body.tool_catalog_v1, resolvedAllow, body.deny_mcp_clients, relayMode)
       : null;
 
-    const piToolCount = toolCatalogResolved ? toolCatalogResolved.pi_mcp : listed.length;
+    if (
+      relayMode === 'none' &&
+      toolCatalogResolved?.degraded_tools?.length &&
+      body.handoff_allow_degraded !== true
+    ) {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        error: 'handoff_degraded',
+        message:
+          'Some enabled tools cannot run on Pi without client relay; mirror MCP on connector, add vendor keys, or set handoff_allow_degraded',
+        degraded_tools: toolCatalogResolved.degraded_tools,
+        execution_resolution: toolCatalogResolved.execution_resolution,
+      });
+    }
+
+    const piToolCount = toolCatalogResolved
+      ? toolCatalogResolved.pi_mcp + toolCatalogResolved.pi_connector_http
+      : listed.length;
     const parity = toolsParityReport({
       tm_enabled_plugin_count: body.tm_enabled_plugin_count,
       tm_execution_context: body.tm_execution_context,
@@ -92,7 +114,7 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       mcp_missing_on_pi: missingOnPi,
       parity_strict: body.parity_strict === true,
       relay_required: toolCatalogResolved?.relay_required,
-      relay_mode: body.relay_mode,
+      relay_mode: relayMode,
     });
 
     if (!parity.ok) {
@@ -115,6 +137,10 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
         mcp_missing_on_pi: missingOnPi,
         tool_catalog_resolved: toolCatalogResolved,
         relay_required: toolCatalogResolved?.relay_required ?? false,
+        relay_mode: relayMode,
+        execution_resolution: toolCatalogResolved?.execution_resolution ?? null,
+        degraded_tools: toolCatalogResolved?.degraded_tools ?? [],
+        session_bundle_v1: body.session_bundle_v1 ?? null,
       });
     }
 
@@ -149,12 +175,18 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       tm_enabled_plugin_count: body.tm_enabled_plugin_count,
       tools_parity_at_start: parity,
       tool_catalog_v1: body.tool_catalog_v1,
-      relay_mode: body.relay_mode,
+      relay_mode: relayMode,
+      execution_resolution:
+        body.execution_resolution ??
+        body.session_bundle_v1?.execution_resolution ??
+        toolCatalogResolved?.execution_resolution,
+      session_bundle_v1: body.session_bundle_v1,
     });
 
     stashDeferredRunSecrets(job.id, {
       openai: body.openai_api_key,
       openrouter: body.openrouter_api_key,
+      vendor: body.vendor_credential_stash,
     });
 
     const runInput = { ...input };
@@ -175,7 +207,9 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       think_model: thinkProfile ? profileModelId(thinkProfile) : null,
       tools_parity: parity,
       relay_required: toolCatalogResolved?.relay_required ?? false,
+      relay_mode: relayMode,
       catalog_hash: body.tool_catalog_v1?.catalog_hash ?? null,
+      execution_resolution: toolCatalogResolved?.execution_resolution ?? null,
     });
   });
 

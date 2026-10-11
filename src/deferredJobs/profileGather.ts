@@ -1,3 +1,5 @@
+import type { ExecutionResolutionEntry } from '@/executionSurface/handoffResolution';
+import type { HandoffRelayMode } from '@/executionSurface/handoffResolution';
 import type { ToolCatalogV1 } from '@/executionSurface/types';
 
 import type { InferenceProfileV2 } from './inferenceProfile';
@@ -28,6 +30,8 @@ export async function runProfileGather(args: {
   maxToolCalls: number;
   toolCatalog?: ToolCatalogV1 | null;
   jobId?: string;
+  relayMode?: HandoffRelayMode;
+  executionResolution?: ExecutionResolutionEntry[];
 }): Promise<ProfileGatherOutput> {
   const family = args.profile.api_family;
 
@@ -46,6 +50,8 @@ export async function runProfileGather(args: {
       maxToolCalls: args.maxToolCalls,
       toolCatalog: args.toolCatalog,
       jobId: args.jobId,
+      relayMode: args.relayMode,
+      executionResolution: args.executionResolution,
     });
     return {
       packet: r.packet,
@@ -76,6 +82,8 @@ export async function runProfileGather(args: {
       maxToolCalls: args.maxToolCalls,
       toolCatalog: args.toolCatalog,
       jobId: args.jobId,
+      relayMode: args.relayMode,
+      executionResolution: args.executionResolution,
     });
     return {
       packet: r.packet,
