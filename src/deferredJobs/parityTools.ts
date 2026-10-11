@@ -6,14 +6,22 @@ export function toolsParityReport(args: {
   pi_tool_count: number;
   mcp_missing_on_pi?: string[];
   parity_strict?: boolean;
+  relay_required?: boolean;
+  relay_mode?: 'optional' | 'required';
 }): { ok: boolean; explain: string; warnings: string[] } {
   const warnings: string[] = [];
   if (args.mcp_missing_on_pi && args.mcp_missing_on_pi.length > 0) {
     warnings.push(`TM MCP servers not connected on Pi: ${args.mcp_missing_on_pi.join(', ')}`);
   }
-  warnings.push(
-    'Browser-only TM plugins (direct vendor JS) are not replayed on Pi; use MCP on the connector or context_packet.'
-  );
+  if (args.relay_required) {
+    warnings.push(
+      'Job tool catalog requires client relay for some tools; keep the TypingMind tab open with relay connected.'
+    );
+  } else {
+    warnings.push(
+      'Browser-only TM plugins (direct vendor JS) are not replayed on Pi without tool_catalog_v1 + relay; use MCP on the connector or context_packet.'
+    );
+  }
   if (args.tm_enabled_plugin_count != null && args.pi_tool_count === 0) {
     warnings.push('Pi returned zero MCP tools for this allowlist; gather may run without tools.');
   }

@@ -1,11 +1,8 @@
 import got from 'got';
 
-import { clients } from '@/mcp/mcp';
-import {
-  bindToolsForOpenAI,
-  executeMcpFunctionCall,
-  listMcpFunctionTools,
-} from '@/multiAgent/toolBridge';
+import { buildJobToolRouter } from '@/executionSurface/compositeRouter';
+import type { ToolCatalogV1 } from '@/executionSurface/types';
+import { bindToolsForOpenAI } from '@/multiAgent/toolBridge';
 import { runBackgroundResponsesTurn } from '@/multiAgent/openaiBackgroundTurn';
 
 import type { InferenceProfileV2 } from './inferenceProfile';
@@ -76,11 +73,16 @@ export async function runResponsesProfileGather(args: {
   denyMcpClients?: string[];
   maxTurns: number;
   maxToolCalls: number;
+  toolCatalog?: ToolCatalogV1 | null;
+  jobId?: string;
 }): Promise<ProfileGatherResult> {
-  const mcpTools = await listMcpFunctionTools(clients, {
-    allow: args.allowMcpClients,
-    deny: args.denyMcpClients,
+  const router = await buildJobToolRouter({
+    catalog: args.toolCatalog,
+    allowMcpClients: args.allowMcpClients,
+    denyMcpClients: args.denyMcpClients,
+    jobId: args.jobId,
   });
+  const mcpTools = await router.listOpenAIFunctionTools();
   const { tools: oaiTools, resolve } = bindToolsForOpenAI(mcpTools);
 
   const userText = [
@@ -124,7 +126,7 @@ export async function runResponsesProfileGather(args: {
       const bridge = resolve(name) ?? name;
       toolsInvoked.push(bridge);
       toolCallsUsed++;
-      const exec = await executeMcpFunctionCall(clients, bridge, call.arguments);
+      const exec = await router.execute(bridge, call.arguments);
       toolTrace.push({ tool: bridge, ok: exec.ok, chars: exec.text.length });
       if (exec.ok && exec.text.length > 40) {
         sources.push({ snippet: exec.text.slice(0, 2000), tool: bridge });

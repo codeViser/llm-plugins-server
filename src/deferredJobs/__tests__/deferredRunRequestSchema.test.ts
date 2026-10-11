@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { computeCatalogHash } from '@/executionSurface/catalogHash';
+
 import { DeferredRunRequestSchema } from '../deferredJobs.model';
 import { OR_GATHER_PROFILE } from './fixtures';
 
@@ -74,6 +76,29 @@ describe('DeferredRunRequestSchema', () => {
       goal: 'x',
       gather_profile: minimalGather,
       tm_execution_context: { mcp_server_ids: [] },
+    };
+    expect(DeferredRunRequestSchema.safeParse(body).success).toBe(true);
+  });
+
+  it('accepts tool_catalog_v1', () => {
+    const tools = [
+      {
+        handle: 'plugin:tavily_search',
+        function: {
+          name: 'tavily_search',
+          description: 'search',
+          parameters: { type: 'object', properties: {} },
+        },
+      },
+    ];
+    const body = {
+      goal: 'x',
+      gather_profile: minimalGather,
+      tool_catalog_v1: {
+        schema_version: 1,
+        catalog_hash: computeCatalogHash(tools),
+        tools,
+      },
     };
     expect(DeferredRunRequestSchema.safeParse(body).success).toBe(true);
   });

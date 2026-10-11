@@ -16,6 +16,7 @@ import requestLogger from '@/common/middleware/requestLogger';
 import { env } from '@/common/utils/envConfig';
 import { mcpRouter } from '@/mcp/mcp.router';
 import { deferredJobsRouter } from '@/deferredJobs';
+import { createToolRelayRouter } from '@/executionSurface/toolRelay.router';
 import { multiAgentRouter } from '@/multiAgent';
 import { pluginCorp, pluginJsonBody, pluginSandboxCors } from '@/multiAgent/pluginCors';
 import { reasoningCacheRouter } from '@/routes/reasoningCache';
@@ -52,8 +53,12 @@ app.use(normalizeRequestPath);
 // text/plain to keep the request preflight-free).
 app.use('/api/multi-agent', pluginSandboxCors, pluginCorp, pluginJsonBody, multiAgentRouter);
 app.use('/multi-agent', pluginSandboxCors, pluginCorp, pluginJsonBody, multiAgentRouter);
+const toolRelayRouter = createToolRelayRouter({ authToken: env.MCP_AUTH_TOKEN || 'dummy-token' });
+
 app.use('/api/deferred-jobs', pluginSandboxCors, pluginCorp, pluginJsonBody, deferredJobsRouter);
 app.use('/deferred-jobs', pluginSandboxCors, pluginCorp, pluginJsonBody, deferredJobsRouter);
+app.use('/api/deferred-jobs', pluginSandboxCors, pluginCorp, pluginJsonBody, toolRelayRouter);
+app.use('/deferred-jobs', pluginSandboxCors, pluginCorp, pluginJsonBody, toolRelayRouter);
 
 app.use(
   '/paper-discovery',

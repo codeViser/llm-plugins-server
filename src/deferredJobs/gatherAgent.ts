@@ -1,11 +1,10 @@
 import { createHash } from 'crypto';
 import got from 'got';
 
-import { clients } from '@/mcp/mcp';
+import { buildJobToolRouter } from '@/executionSurface/compositeRouter';
+import type { JobToolRouter, ToolCatalogV1 } from '@/executionSurface/types';
 import {
   bindToolsForOpenAI,
-  executeMcpFunctionCall,
-  listMcpFunctionTools,
   OpenAIFunctionTool,
 } from '@/multiAgent/toolBridge';
 
@@ -34,6 +33,9 @@ export type GatherAgentInput = {
   maxTurns: number;
   maxToolCalls: number;
   profile?: InferenceProfileV2;
+  toolCatalog?: ToolCatalogV1 | null;
+  jobId?: string;
+  toolRouter?: JobToolRouter;
 };
 
 export type GatherAgentResult = {
@@ -130,10 +132,15 @@ export async function runGatherAgent(input: GatherAgentInput): Promise<GatherAge
   if (provider === 'openrouter' && !input.openrouterApiKey) {
     throw new Error('gather_provider=openrouter requires openrouter_api_key in plugin settings');
   }
-  const mcpTools = await listMcpFunctionTools(clients, {
-    allow: input.allowMcpClients,
-    deny: input.denyMcpClients,
-  });
+  const router =
+    input.toolRouter ??
+    (await buildJobToolRouter({
+      catalog: input.toolCatalog,
+      allowMcpClients: input.allowMcpClients,
+      denyMcpClients: input.denyMcpClients,
+      jobId: input.jobId,
+    }));
+  const mcpTools = await router.listOpenAIFunctionTools();
   const system = input.profile
     ? gatherSystemContent(input.profile, input.contextPacket)
     : [
@@ -183,7 +190,7 @@ export async function runGatherAgent(input: GatherAgentInput): Promise<GatherAge
       const encoded = resolve(openaiName) ?? openaiName;
       toolsInvoked.push(encoded);
       toolCallsUsed++;
-      const exec = await executeMcpFunctionCall(clients, encoded, tc.function?.arguments);
+      const exec = await router.execute(encoded, tc.function?.arguments);
       toolTrace.push({ tool: encoded, ok: exec.ok, chars: exec.text.length });
       if (exec.ok && exec.text.length > 40) {
         sources.push({ snippet: exec.text.slice(0, 2000), tool: encoded });

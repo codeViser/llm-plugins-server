@@ -56,6 +56,16 @@ export type JobInputSnapshot = {
   refine_rounds?: number;
   gather_profile?: unknown;
   think_profile?: unknown;
+  /** TM handoff at job START (no secrets). */
+  tm_execution_context?: {
+    mcp_server_ids?: string[];
+    enabled_plugin_ids?: string[];
+    chat_wire?: Record<string, unknown>;
+  };
+  tm_enabled_plugin_count?: number;
+  tools_parity_at_start?: Record<string, unknown>;
+  tool_catalog_v1?: unknown;
+  relay_mode?: 'optional' | 'required';
 };
 
 export interface JobSummary {
@@ -270,6 +280,11 @@ function serializeInput(input: JobInputSnapshot | undefined, storedGoal: string)
     refine_rounds: input?.refine_rounds,
     gather_profile: input?.gather_profile,
     think_profile: input?.think_profile,
+    tm_execution_context: input?.tm_execution_context,
+    tm_enabled_plugin_count: input?.tm_enabled_plugin_count,
+    tools_parity_at_start: input?.tools_parity_at_start,
+    tool_catalog_v1: input?.tool_catalog_v1,
+    relay_mode: input?.relay_mode,
   };
   const encoded = JSON.stringify(snapshot);
   if (!encoded || encoded === '{}') {

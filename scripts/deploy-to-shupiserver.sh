@@ -15,7 +15,7 @@ rsync -az \
   "$LOCAL_ROOT/" "$HOST:$REMOTE_ROOT/"
 
 echo "==> remote test + build + restart"
-ssh "$HOST" "cd $REMOTE_ROOT && chmod +x scripts/restart-production.sh && npm test -- --run src/deferredJobs && npm run build && ./scripts/restart-production.sh"
+ssh "$HOST" "cd $REMOTE_ROOT && chmod +x scripts/restart-production.sh && npm test -- --run && npm run build && ./scripts/restart-production.sh"
 
 echo "==> smoke deferred dry_run (loopback)"
 ssh "$HOST" 'PID=$(lsof -ti :3000 | head -1); TOKEN=$(strings /proc/$PID/environ | grep "^MCP_AUTH_TOKEN=" | cut -d= -f2-); \

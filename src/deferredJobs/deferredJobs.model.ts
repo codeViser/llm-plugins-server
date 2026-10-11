@@ -2,6 +2,8 @@ import { z } from 'zod';
 
 import { parsePositiveInt } from '@/multiAgent/maxAgents';
 
+import { ToolCatalogV1Schema } from '@/executionSurface/toolCatalog.schema';
+
 import { InferenceProfileV2Schema } from './inferenceProfile';
 import { DeferredProgressSchema } from './schemas';
 import { optionalRecord } from './zodHelpers';
@@ -45,6 +47,8 @@ export const DeferredRunRequestSchema = z.object({
     })
     .optional(),
   parity_strict: optionalTrueFlag,
+  tool_catalog_v1: ToolCatalogV1Schema.optional(),
+  relay_mode: z.enum(['optional', 'required']).optional(),
 });
 
 export type DeferredRunRequest = z.infer<typeof DeferredRunRequestSchema>;

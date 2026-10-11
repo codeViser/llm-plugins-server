@@ -1,3 +1,5 @@
+import type { ToolCatalogV1 } from '@/executionSurface/types';
+
 import type { InferenceProfileV2 } from './inferenceProfile';
 import { profileModelId } from './inferenceProfile';
 import { runGatherAgent } from './gatherAgent';
@@ -24,6 +26,8 @@ export async function runProfileGather(args: {
   denyMcpClients?: string[];
   maxTurns: number;
   maxToolCalls: number;
+  toolCatalog?: ToolCatalogV1 | null;
+  jobId?: string;
 }): Promise<ProfileGatherOutput> {
   const family = args.profile.api_family;
 
@@ -40,6 +44,8 @@ export async function runProfileGather(args: {
       denyMcpClients: args.denyMcpClients,
       maxTurns: args.maxTurns,
       maxToolCalls: args.maxToolCalls,
+      toolCatalog: args.toolCatalog,
+      jobId: args.jobId,
     });
     return {
       packet: r.packet,
@@ -68,6 +74,8 @@ export async function runProfileGather(args: {
       denyMcpClients: args.denyMcpClients,
       maxTurns: args.maxTurns,
       maxToolCalls: args.maxToolCalls,
+      toolCatalog: args.toolCatalog,
+      jobId: args.jobId,
     });
     return {
       packet: r.packet,

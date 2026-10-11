@@ -2,6 +2,9 @@ import { Request, Response, Router } from 'express';
 import { StatusCodes } from 'http-status-codes';
 import { pino } from 'pino';
 
+import { verifyCatalogHash } from '@/executionSurface/catalogHash';
+import { resolveToolCatalogForDryRun } from '@/executionSurface/compositeRouter';
+import { isRelayActive, listPendingInvocations } from '@/executionSurface/relaySession';
 import { connectorAuthMiddleware } from '@/multiAgent/connectorAuth';
 import { JobStore } from '@/multiAgent/jobStore';
 import { safeErrorMessage } from '@/multiAgent/redact';
@@ -45,6 +48,19 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       });
     }
     const body = parsed.data;
+
+    if (body.tool_catalog_v1 && !verifyCatalogHash(body.tool_catalog_v1)) {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        error: 'tool_catalog_v1 catalog_hash does not match tools[]',
+      });
+    }
+
+    if (body.relay_mode === 'required' && !body.tool_catalog_v1) {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        error: 'relay_mode=required needs tool_catalog_v1 from the TypingMind client',
+      });
+    }
+
     const tierProfiles = normalizeDeferredTierProfiles({
       gather_profile: body.gather_profile,
       think_profile: body.think_profile,
@@ -63,12 +79,20 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       allow: resolvedAllow,
       deny: body.deny_mcp_clients,
     });
+
+    const toolCatalogResolved = body.tool_catalog_v1
+      ? await resolveToolCatalogForDryRun(body.tool_catalog_v1, resolvedAllow, body.deny_mcp_clients)
+      : null;
+
+    const piToolCount = toolCatalogResolved ? toolCatalogResolved.pi_mcp : listed.length;
     const parity = toolsParityReport({
       tm_enabled_plugin_count: body.tm_enabled_plugin_count,
       tm_execution_context: body.tm_execution_context,
-      pi_tool_count: listed.length,
+      pi_tool_count: piToolCount,
       mcp_missing_on_pi: missingOnPi,
       parity_strict: body.parity_strict === true,
+      relay_required: toolCatalogResolved?.relay_required,
+      relay_mode: body.relay_mode,
     });
 
     if (!parity.ok) {
@@ -89,6 +113,8 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
         allow_mcp_clients_resolved: resolvedAllow ?? null,
         tools_parity: parity,
         mcp_missing_on_pi: missingOnPi,
+        tool_catalog_resolved: toolCatalogResolved,
+        relay_required: toolCatalogResolved?.relay_required ?? false,
       });
     }
 
@@ -116,6 +142,14 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       max_refine_rounds: body.max_refine_rounds,
       gather_profile: gatherProfile,
       think_profile: thinkProfile,
+      tm_execution_context: body.tm_execution_context ?? {
+        mcp_server_ids: [],
+        enabled_plugin_ids: [],
+      },
+      tm_enabled_plugin_count: body.tm_enabled_plugin_count,
+      tools_parity_at_start: parity,
+      tool_catalog_v1: body.tool_catalog_v1,
+      relay_mode: body.relay_mode,
     });
 
     stashDeferredRunSecrets(job.id, {
@@ -140,6 +174,8 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       gather_api_family: gatherProfile.api_family,
       think_model: thinkProfile ? profileModelId(thinkProfile) : null,
       tools_parity: parity,
+      relay_required: toolCatalogResolved?.relay_required ?? false,
+      catalog_hash: body.tool_catalog_v1?.catalog_hash ?? null,
     });
   });
 
@@ -165,8 +201,12 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       kind: job.input?.job_kind ?? 'deferred_batch',
       progress: job.input?.progress,
     };
+    const relayMeta = {
+      relay_session_active: isRelayActive(job.id),
+      pending_invocations: listPendingInvocations(job.id),
+    };
     if (job.status === 'running') {
-      return res.status(StatusCodes.OK).json({ status: 'running', ...base });
+      return res.status(StatusCodes.OK).json({ status: 'running', ...base, ...relayMeta });
     }
     if (job.status === 'error') {
       return res.status(StatusCodes.OK).json({ status: 'error', error: job.error ?? 'failed', ...base });

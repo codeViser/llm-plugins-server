@@ -146,6 +146,8 @@ function inputFromJob(jobId: string, jobs: JobStore, body: DeferredRunInput): De
     openai_api_key: keys.openai,
     openrouter_api_key: keys.openrouter,
     progress: (body.progress ?? snap?.progress) as DeferredProgress | undefined,
+    tool_catalog_v1: body.tool_catalog_v1 ?? (snap?.tool_catalog_v1 as DeferredRunInput['tool_catalog_v1']),
+    relay_mode: body.relay_mode ?? snap?.relay_mode,
   };
 }
 
@@ -218,6 +220,8 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
         denyMcpClients: resolved.deny_mcp_clients,
         maxTurns: resolved.max_gather_turns ?? 8,
         maxToolCalls: resolved.max_tool_calls ?? 12,
+        toolCatalog: resolved.tool_catalog_v1 ?? null,
+        jobId,
       });
       gatherResult = {
         packet: gathered.packet,
@@ -370,6 +374,8 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
           denyMcpClients: resolved.deny_mcp_clients,
           maxTurns: Math.min(4, resolved.max_gather_turns ?? 8),
           maxToolCalls: Math.min(6, resolved.max_tool_calls ?? 12),
+          toolCatalog: resolved.tool_catalog_v1 ?? null,
+          jobId,
         });
         const extra = {
           packet: extraOut.packet,
@@ -392,7 +398,7 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
         tools_invoked: allTools,
         think_sync: thinkBatchFallback || !useBatchThink,
         think_batch_fallback: thinkBatchFallback,
-        execution_surface: 'pi_mcp',
+        execution_surface: resolved.tool_catalog_v1 ? 'pi_mcp+client_relay' : 'pi_mcp',
         think_model: resolved.think_profile?.model_slug ?? resolved.think_model,
         refine_rounds: refineRounds,
         raw_think_excerpt: text.slice(0, 2000),
