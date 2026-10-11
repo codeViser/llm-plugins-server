@@ -87,7 +87,7 @@ export function credentialRefsFromResolution(
     if (row.route !== 'pi_connector_http') continue;
     const http = lookupConnectorHttp(row.handle, row.function_name);
     if (http) {
-      refs[row.handle] = `stash:${http.credentialRef}`;
+      refs[row.handle] = `stash:${http.credentialHandle}`;
     }
   }
   return refs;

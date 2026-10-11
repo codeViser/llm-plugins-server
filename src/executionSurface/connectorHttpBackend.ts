@@ -1,5 +1,6 @@
 import got from 'got';
 
+import { pickCredentialForHttpTarget } from './credentialLookup';
 import type { ToolExecuteResult } from './types';
 
 export type VendorCredentialMap = Record<string, string>;
@@ -9,6 +10,7 @@ const TAVILY_EXTRACT_URL = 'https://api.tavily.com/extract';
 
 export async function executeConnectorHttpTool(args: {
   piTarget: string;
+  credentialHandle: string;
   functionName: string;
   rawArguments: string | Record<string, unknown> | undefined;
   credentials: VendorCredentialMap;
@@ -25,9 +27,12 @@ export async function executeConnectorHttpTool(args: {
   }
 
   if (args.piTarget === 'tavily:search') {
-    const apiKey = args.credentials['vendor:tavily'];
+    const apiKey = pickCredentialForHttpTarget(args.credentials, args.credentialHandle, 'vendor:tavily');
     if (!apiKey) {
-      return { ok: false, text: 'vendor:tavily credential missing (send vendor_credential_stash at START)' };
+      return {
+        ok: false,
+        text: `Credential missing for ${args.credentialHandle} (configure vendor plugin User Settings in TypingMind or Pi DEFERRED_TAVILY_API_KEY fallback)`,
+      };
     }
     const query = String(parsed.query ?? parsed.q ?? '');
     if (!query) {
@@ -54,9 +59,12 @@ export async function executeConnectorHttpTool(args: {
   }
 
   if (args.piTarget === 'tavily:extract') {
-    const apiKey = args.credentials['vendor:tavily'];
+    const apiKey = pickCredentialForHttpTarget(args.credentials, args.credentialHandle, 'vendor:tavily');
     if (!apiKey) {
-      return { ok: false, text: 'vendor:tavily credential missing' };
+      return {
+        ok: false,
+        text: `Credential missing for ${args.credentialHandle}`,
+      };
     }
     const urls = parsed.urls ?? parsed.url;
     const urlList = Array.isArray(urls) ? urls : urls ? [urls] : [];

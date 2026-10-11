@@ -157,6 +157,7 @@ export async function buildJobToolRouter(args: BuildJobToolRouterArgs): Promise<
           functionName: descriptor.function.name,
           rawArguments,
           credentials: vendor,
+          credentialHandle: descriptor.handle,
         });
       }
       if (!args.jobId) {
