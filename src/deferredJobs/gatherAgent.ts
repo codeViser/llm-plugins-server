@@ -74,10 +74,9 @@ async function chatCompletionRound(args: {
   if (!args.profile) {
     applyReasoningToChatBody(args.provider, payload, args.reasoningEffort);
   }
-  let res;
-  try {
-    res = await got.post(url, {
-      json: payload,
+  const postOnce = (json: Record<string, unknown>) =>
+    got.post(url, {
+      json,
       headers: {
         Authorization: `Bearer ${apiKey}`,
         'Content-Type': 'application/json',
@@ -86,10 +85,26 @@ async function chatCompletionRound(args: {
       responseType: 'json',
       timeout: { request: 180_000 },
     });
+
+  let res;
+  try {
+    res = await postOnce(payload);
   } catch (error) {
-    throw new Error(
-      formatProviderHttpError(error, useOr ? 'OpenRouter gather chat' : 'OpenAI gather chat')
-    );
+    const status = (error as { response?: { statusCode?: number } })?.response?.statusCode;
+    if (status === 400 && payload.reasoning_effort != null) {
+      const { reasoning_effort: _r, reasoning: _o, ...retryPayload } = payload;
+      try {
+        res = await postOnce(retryPayload);
+      } catch (retryError) {
+        throw new Error(
+          formatProviderHttpError(retryError, useOr ? 'OpenRouter gather chat' : 'OpenAI gather chat')
+        );
+      }
+    } else {
+      throw new Error(
+        formatProviderHttpError(error, useOr ? 'OpenRouter gather chat' : 'OpenAI gather chat')
+      );
+    }
   }
   const raw = res.body as {
     choices?: Array<{ message?: Record<string, unknown> }>;

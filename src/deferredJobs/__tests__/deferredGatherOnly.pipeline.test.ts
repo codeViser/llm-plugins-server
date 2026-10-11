@@ -62,6 +62,7 @@ describe('deferred gather-only pipeline (integration)', () => {
     expect(gotPost).toHaveBeenCalled();
     const options = gotPost.mock.calls[0][1] as { json: Record<string, unknown> };
     expect(options.json.model).toBe('anthropic/claude-haiku-5.5');
+    expect(options.json.reasoning_effort).toBeUndefined();
   });
 
   it('surfaces OpenRouter model errors with provider message', async () => {

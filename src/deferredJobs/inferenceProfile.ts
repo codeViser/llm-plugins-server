@@ -1,10 +1,9 @@
 import { z } from 'zod';
 
-import {
-  mapReasoningEffortForOpenAiResponses,
-  mapReasoningEffortForOpenRouter,
-} from './reasoningParams';
+import { openRouterReasoningWire } from './openRouterWire';
+import { mapReasoningEffortForOpenAiResponses, mapReasoningEffortForOpenRouter } from './reasoningParams';
 import { optionalRecord } from './zodHelpers';
+import { canonicalizeInferenceProfile } from './modelSlugCanonicalize';
 
 export function profileModelId(profile: InferenceProfileV2): string {
   return profile.model_id ?? profile.ref ?? profile.model_slug;
@@ -56,6 +55,7 @@ export function buildOpenRouterChatBody(
     contextLimit: _c,
     streaming: _s,
     streamingEnabled: _se,
+    reasoning_effort: _re,
     ...wireExt
   } = ext;
   const body: Record<string, unknown> = {
@@ -64,12 +64,8 @@ export function buildOpenRouterChatBody(
     stream: false,
     ...wireExt,
   };
-  const effort = mapReasoningEffortForOpenRouter(
-    (ext.reasoning_effort as string) || profile.reasoning?.effort
-  );
-  if (effort) {
-    body.reasoning_effort = effort;
-  }
+  const effortInput = (ext.reasoning_effort as string) || profile.reasoning?.effort;
+  Object.assign(body, openRouterReasoningWire(profile.model_slug, effortInput, tools?.length ?? 0));
   const maxTok = numericMaxTokens(ext);
   if (maxTok) {
     body.max_tokens = maxTok;
@@ -142,6 +138,16 @@ export function mergeProfileReasoningOverride(
       ...(profile.body_extensions ?? {}),
       reasoning_effort: orEffort,
     },
+  };
+}
+
+export function normalizeDeferredTierProfiles(body: {
+  gather_profile: InferenceProfileV2;
+  think_profile?: InferenceProfileV2;
+}): { gather_profile: InferenceProfileV2; think_profile?: InferenceProfileV2 } {
+  return {
+    gather_profile: canonicalizeInferenceProfile(body.gather_profile),
+    think_profile: body.think_profile ? canonicalizeInferenceProfile(body.think_profile) : undefined,
   };
 }
 

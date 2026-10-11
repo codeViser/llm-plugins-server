@@ -17,4 +17,23 @@ describe('formatProviderHttpError', () => {
     expect(msg).toContain('OpenRouter gather chat');
     expect(msg).toContain('not a valid model ID');
   });
+
+  it('includes OpenRouter metadata.raw when present', () => {
+    const msg = formatProviderHttpError(
+      {
+        message: 'Response code 400',
+        response: {
+          statusCode: 400,
+          body: {
+            error: {
+              message: 'Provider returned error',
+              metadata: { raw: 'reasoning is not supported for this model', provider_name: 'Anthropic' },
+            },
+          },
+        },
+      },
+      'OpenRouter gather chat'
+    );
+    expect(msg).toContain('reasoning is not supported');
+  });
 });
