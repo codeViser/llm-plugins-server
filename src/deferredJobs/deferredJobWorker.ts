@@ -5,6 +5,7 @@ import { JobStore } from '@/multiAgent/jobStore';
 
 import type { DeferredRunInput } from './deferredJobs.model';
 import { buildThinkBatchBody, mergeProfileReasoningOverride, profileModelId } from './inferenceProfile';
+import { canonicalizeInferenceProfile } from './modelSlugCanonicalize';
 import { runProfileGather } from './profileGather';
 import {
   batchPollDelayMs,
@@ -134,15 +135,13 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
   inFlight.add(jobId);
   const resolved = inputFromJob(jobId, jobs, input);
   if (resolved.gather_profile) {
-    resolved.gather_profile = mergeProfileReasoningOverride(
-      resolved.gather_profile,
-      resolved.gather_reasoning_effort
+    resolved.gather_profile = canonicalizeInferenceProfile(
+      mergeProfileReasoningOverride(resolved.gather_profile, resolved.gather_reasoning_effort)
     );
   }
   if (resolved.think_profile) {
-    resolved.think_profile = mergeProfileReasoningOverride(
-      resolved.think_profile,
-      resolved.think_reasoning_effort
+    resolved.think_profile = canonicalizeInferenceProfile(
+      mergeProfileReasoningOverride(resolved.think_profile, resolved.think_reasoning_effort)
     );
   }
 

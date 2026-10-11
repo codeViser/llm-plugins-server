@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { applyReasoningToChatBody, resolveGatherProvider } from '../reasoningParams';
+import {
+  applyReasoningToChatBody,
+  mapReasoningEffortForOpenAiResponses,
+  mapReasoningEffortForOpenRouter,
+  resolveGatherProvider,
+} from '../reasoningParams';
 
 describe('reasoningParams', () => {
   it('resolves gather provider from explicit setting', () => {
@@ -28,5 +33,13 @@ describe('reasoningParams', () => {
     const body: Record<string, unknown> = { model: 'x' };
     applyReasoningToChatBody('openrouter', body, 'high');
     expect(body.reasoning_effort).toBe('high');
+  });
+
+  it('maps max to xhigh for OpenRouter wire', () => {
+    expect(mapReasoningEffortForOpenRouter('max')).toBe('xhigh');
+  });
+
+  it('maps max to high for OpenAI Responses wire', () => {
+    expect(mapReasoningEffortForOpenAiResponses('max')).toBe('high');
   });
 });

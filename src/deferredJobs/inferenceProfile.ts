@@ -1,5 +1,9 @@
 import { z } from 'zod';
 
+import {
+  mapReasoningEffortForOpenAiResponses,
+  mapReasoningEffortForOpenRouter,
+} from './reasoningParams';
 import { optionalRecord } from './zodHelpers';
 
 export function profileModelId(profile: InferenceProfileV2): string {
@@ -46,17 +50,23 @@ export function buildOpenRouterChatBody(
   tools?: unknown[]
 ): Record<string, unknown> {
   const ext = { ...(profile.body_extensions ?? {}) };
-  const { thinkingOptions: _t, promptCachingEnabled: _p, contextLimit: _c, ...wireExt } = ext;
+  const {
+    thinkingOptions: _t,
+    promptCachingEnabled: _p,
+    contextLimit: _c,
+    streaming: _s,
+    streamingEnabled: _se,
+    ...wireExt
+  } = ext;
   const body: Record<string, unknown> = {
     model: profile.model_slug,
     messages,
     stream: false,
     ...wireExt,
   };
-  const effort =
-    (ext.reasoning_effort as string) ||
-    profile.reasoning?.effort ||
-    (ext as { reasoning_effort?: string }).reasoning_effort;
+  const effort = mapReasoningEffortForOpenRouter(
+    (ext.reasoning_effort as string) || profile.reasoning?.effort
+  );
   if (effort) {
     body.reasoning_effort = effort;
   }
@@ -82,10 +92,11 @@ export function buildOpenAiResponsesBody(
     store: true,
     tools: tools ?? [],
   };
-  if (profile.reasoning?.effort) {
+  const nativeEffort = mapReasoningEffortForOpenAiResponses(profile.reasoning?.effort);
+  if (nativeEffort) {
     body.reasoning = {
-      effort: profile.reasoning.effort,
-      summary: profile.reasoning.summary ?? 'auto',
+      effort: nativeEffort,
+      summary: profile.reasoning?.summary ?? 'auto',
     };
   }
   const ext = profile.body_extensions ?? {};
@@ -109,19 +120,27 @@ export function mergeProfileReasoningOverride(
     return profile;
   }
   if (profile.api_family === 'openai_responses') {
+    const effort = mapReasoningEffortForOpenAiResponses(trimmed);
+    if (!effort) {
+      return profile;
+    }
     return {
       ...profile,
       reasoning: {
-        effort: trimmed,
+        effort,
         summary: profile.reasoning?.summary ?? 'auto',
       },
     };
+  }
+  const orEffort = mapReasoningEffortForOpenRouter(trimmed);
+  if (!orEffort) {
+    return profile;
   }
   return {
     ...profile,
     body_extensions: {
       ...(profile.body_extensions ?? {}),
-      reasoning_effort: trimmed,
+      reasoning_effort: orEffort,
     },
   };
 }

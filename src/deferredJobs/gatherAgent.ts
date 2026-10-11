@@ -18,6 +18,7 @@ import {
   resolveGatherProvider,
   type GatherProvider,
 } from './reasoningParams';
+import { formatProviderHttpError } from './providerHttpError';
 import { gatherSystemContent } from './tierInstructions';
 
 export type GatherAgentInput = {
@@ -73,16 +74,23 @@ async function chatCompletionRound(args: {
   if (!args.profile) {
     applyReasoningToChatBody(args.provider, payload, args.reasoningEffort);
   }
-  const res = await got.post(url, {
-    json: payload,
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-      ...(useOr ? { 'HTTP-Referer': 'https://typingmind.com', 'X-Title': 'DeferredResearch' } : {}),
-    },
-    responseType: 'json',
-    timeout: { request: 180_000 },
-  });
+  let res;
+  try {
+    res = await got.post(url, {
+      json: payload,
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        ...(useOr ? { 'HTTP-Referer': 'https://typingmind.com', 'X-Title': 'DeferredResearch' } : {}),
+      },
+      responseType: 'json',
+      timeout: { request: 180_000 },
+    });
+  } catch (error) {
+    throw new Error(
+      formatProviderHttpError(error, useOr ? 'OpenRouter gather chat' : 'OpenAI gather chat')
+    );
+  }
   const raw = res.body as {
     choices?: Array<{ message?: Record<string, unknown> }>;
   };

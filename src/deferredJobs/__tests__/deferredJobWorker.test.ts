@@ -48,6 +48,7 @@ describe('deferredJobWorker', () => {
     const done = jobs.get(job.id);
     expect(done?.status).toBe('done');
     expect((done?.result as { tools_invoked?: string[] }).tools_invoked).toEqual(['mcp__test__tool']);
+    expect((done?.result as { gather_only?: boolean }).gather_only).toBe(true);
   });
 
   it('runs sync think when think profile is not batch', async () => {
