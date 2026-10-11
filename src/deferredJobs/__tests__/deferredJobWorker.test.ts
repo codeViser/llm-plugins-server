@@ -6,7 +6,7 @@ import { resumeInterruptedDeferredJobs, runDeferredJob, stashDeferredRunSecrets 
 import * as profileGather from '../profileGather';
 import * as openRouterBatch from '../openRouterBatch';
 import * as thinkSync from '../thinkSync';
-import { BATCH_THINK_PROFILE, OR_GATHER_PROFILE } from './fixtures';
+import { BATCH_THINK_PROFILE, NATIVE_GATHER_PROFILE, OR_GATHER_PROFILE } from './fixtures';
 
 describe('deferredJobWorker', () => {
   beforeEach(() => {
@@ -27,8 +27,7 @@ describe('deferredJobWorker', () => {
       finalAssistantText: 'gathered answer',
       config_echo: {
         gather_api_family: 'openrouter_chat_completions',
-        gather_profile_hash: 'h',
-        gather_ref: OR_GATHER_PROFILE.ref,
+        gather_model: 'openai/gpt-6-luna',
       },
     });
 
@@ -65,8 +64,7 @@ describe('deferredJobWorker', () => {
       finalAssistantText: 'gather preview',
       config_echo: {
         gather_api_family: 'openai_responses',
-        gather_profile_hash: 'h',
-        gather_ref: 'native:gpt-6-luna',
+        gather_model: 'gpt-6-luna',
       },
     });
     vi.spyOn(thinkSync, 'runProfileThinkSync').mockResolvedValue({
@@ -81,18 +79,8 @@ describe('deferredJobWorker', () => {
       job.id,
       {
         goal: 'sync think',
-        gather_profile: {
-          ...OR_GATHER_PROFILE,
-          api_family: 'openai_responses',
-          model_slug: 'gpt-6-luna',
-          ref: 'native:gpt-6-luna',
-        },
-        think_profile: {
-          ...OR_GATHER_PROFILE,
-          api_family: 'openai_responses',
-          model_slug: 'gpt-6-luna',
-          ref: 'native:gpt-6-luna',
-        },
+        gather_profile: NATIVE_GATHER_PROFILE,
+        think_profile: NATIVE_GATHER_PROFILE,
         openai_api_key: 'sk-test',
       },
       jobs
@@ -117,8 +105,7 @@ describe('deferredJobWorker', () => {
       finalAssistantText: 'preview',
       config_echo: {
         gather_api_family: 'openrouter_chat_completions',
-        gather_profile_hash: 'h',
-        gather_ref: OR_GATHER_PROFILE.ref,
+        gather_model: 'openai/gpt-6-luna',
       },
     });
     vi.spyOn(openRouterBatch, 'submitOpenRouterBatch').mockResolvedValue({ id: 'batch-1', status: 'in_progress' });

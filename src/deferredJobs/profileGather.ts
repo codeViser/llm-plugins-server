@@ -1,4 +1,5 @@
 import type { InferenceProfileV2 } from './inferenceProfile';
+import { profileModelId } from './inferenceProfile';
 import { runGatherAgent } from './gatherAgent';
 import { runResponsesProfileGather } from './responsesGatherAgent';
 import type { EvidencePacket } from './schemas';
@@ -9,8 +10,7 @@ export type ProfileGatherOutput = {
   finalAssistantText: string;
   config_echo: {
     gather_api_family: string;
-    gather_profile_hash: string;
-    gather_ref: string;
+    gather_model: string;
   };
 };
 
@@ -47,8 +47,7 @@ export async function runProfileGather(args: {
       finalAssistantText: r.finalAssistantText,
       config_echo: {
         gather_api_family: r.api_family,
-        gather_profile_hash: r.profile_hash,
-        gather_ref: args.profile.ref,
+        gather_model: profileModelId(args.profile),
       },
     };
   }
@@ -76,8 +75,7 @@ export async function runProfileGather(args: {
       finalAssistantText: r.finalAssistantText,
       config_echo: {
         gather_api_family: family,
-        gather_profile_hash: args.profile.profile_hash ?? '',
-        gather_ref: args.profile.ref,
+        gather_model: profileModelId(args.profile),
       },
     };
   }

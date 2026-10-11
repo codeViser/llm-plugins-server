@@ -20,7 +20,6 @@ export type ProfileGatherResult = {
   toolsInvoked: string[];
   finalAssistantText: string;
   api_family: string;
-  profile_hash: string;
 };
 
 function packetHash(packet: Omit<EvidencePacket, 'packet_hash'>): string {
@@ -154,6 +153,5 @@ export async function runResponsesProfileGather(args: {
     toolsInvoked,
     finalAssistantText: lastAssistant,
     api_family: args.profile.api_family,
-    profile_hash: args.profile.profile_hash ?? '',
   };
 }

@@ -4,7 +4,7 @@ import { env } from '@/common/utils/envConfig';
 import { JobStore } from '@/multiAgent/jobStore';
 
 import type { DeferredRunInput } from './deferredJobs.model';
-import { buildThinkBatchBody } from './inferenceProfile';
+import { buildThinkBatchBody, mergeProfileReasoningOverride, profileModelId } from './inferenceProfile';
 import { runProfileGather } from './profileGather';
 import {
   batchPollDelayMs,
@@ -113,6 +113,8 @@ function inputFromJob(jobId: string, jobs: JobStore, body: DeferredRunInput): De
     think_profile: body.think_profile ?? snap?.think_profile,
     gather_model: body.gather_model || snap?.gather_model,
     think_model: body.think_model || snap?.think_model,
+    gather_reasoning_effort: body.gather_reasoning_effort ?? snap?.gather_reasoning_effort,
+    think_reasoning_effort: body.think_reasoning_effort ?? snap?.think_reasoning_effort,
     skip_batch: body.skip_batch ?? snap?.skip_batch,
     allow_mcp_clients: body.allow_mcp_clients ?? snap?.allow_mcp_clients,
     deny_mcp_clients: body.deny_mcp_clients ?? snap?.deny_mcp_clients,
@@ -131,6 +133,18 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
   }
   inFlight.add(jobId);
   const resolved = inputFromJob(jobId, jobs, input);
+  if (resolved.gather_profile) {
+    resolved.gather_profile = mergeProfileReasoningOverride(
+      resolved.gather_profile,
+      resolved.gather_reasoning_effort
+    );
+  }
+  if (resolved.think_profile) {
+    resolved.think_profile = mergeProfileReasoningOverride(
+      resolved.think_profile,
+      resolved.think_reasoning_effort
+    );
+  }
 
   const progress = (phase: DeferredProgress['phase'], extra: Partial<DeferredProgress> = {}, snapExtra?: Record<string, unknown>) => {
     jobs.updateProgress(
@@ -231,8 +245,7 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
           config_echo: {
             ...configEcho,
             think_api_family: api_family,
-            think_profile_hash: thinkProfile.profile_hash,
-            think_ref: thinkProfile.ref,
+            think_model: profileModelId(thinkProfile),
           },
           raw_think_excerpt: text.slice(0, 2000),
         });
@@ -339,8 +352,7 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
         config_echo: {
           ...configEcho,
           think_api_family: resolved.think_profile?.api_family,
-          think_profile_hash: resolved.think_profile?.profile_hash,
-          think_ref: resolved.think_profile?.ref,
+          think_model: resolved.think_profile ? profileModelId(resolved.think_profile) : undefined,
         },
       });
       progress('done');

@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildOpenRouterChatBody, buildThinkBatchBody } from '../inferenceProfile';
+import {
+  buildOpenRouterChatBody,
+  buildThinkBatchBody,
+  mergeProfileReasoningOverride,
+} from '../inferenceProfile';
 import { OR_GATHER_PROFILE } from './fixtures';
 
 describe('inferenceProfile builders', () => {
@@ -19,6 +23,19 @@ describe('inferenceProfile builders', () => {
       [{ role: 'user', content: 'hi' }]
     );
     expect(body.max_tokens).toBe(100000);
+  });
+
+  it('mergeProfileReasoningOverride sets OR reasoning_effort', () => {
+    const merged = mergeProfileReasoningOverride(OR_GATHER_PROFILE, 'xhigh');
+    expect(merged.body_extensions?.reasoning_effort).toBe('xhigh');
+  });
+
+  it('mergeProfileReasoningOverride sets native reasoning object', () => {
+    const merged = mergeProfileReasoningOverride(
+      { ...OR_GATHER_PROFILE, api_family: 'openai_responses', model_slug: 'gpt-6-luna' },
+      'high'
+    );
+    expect(merged.reasoning?.effort).toBe('high');
   });
 
   it('builds batch think body', () => {

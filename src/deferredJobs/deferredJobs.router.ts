@@ -16,8 +16,9 @@ import { runDeferredJob, stashDeferredRunSecrets } from './deferredJobWorker';
 import { clients } from '@/mcp/mcp';
 import { listMcpFunctionTools } from '@/multiAgent/toolBridge';
 
+import { profileModelId } from './inferenceProfile';
 import { resolveMcpAllowList } from './mcpAllow';
-import { piToolsHash, toolsParityReport } from './parityTools';
+import { toolsParityReport } from './parityTools';
 import { RESEARCH_COUNCIL_CLIENT_ID } from '@/multiAgent/researchCouncilId';
 
 const logger = pino({ name: 'deferred-jobs' });
@@ -37,7 +38,10 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
     if (!parsed.success) {
       return res.status(StatusCodes.BAD_REQUEST).json({
         error: 'Invalid deferred job request',
-        details: parsed.error.issues.map((i) => i.message),
+        details: parsed.error.issues.map((i) => {
+          const path = i.path.length ? i.path.join('.') : 'body';
+          return `${path}: ${i.message}`;
+        }),
       });
     }
     const body = parsed.data;
@@ -53,12 +57,9 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       allow: resolvedAllow,
       deny: body.deny_mcp_clients,
     });
-    const piHash = await piToolsHash(resolvedAllow, body.deny_mcp_clients);
     const parity = toolsParityReport({
-      tm_fingerprint: body.tm_tool_fingerprint,
       tm_enabled_plugin_count: body.tm_enabled_plugin_count,
       tm_execution_context: body.tm_execution_context,
-      pi_tools_hash: piHash,
       pi_tool_count: listed.length,
       mcp_missing_on_pi: missingOnPi,
       parity_strict: body.parity_strict === true,
@@ -81,7 +82,6 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
         skip_batch: Boolean(body.skip_batch),
         allow_mcp_clients_resolved: resolvedAllow ?? null,
         tools_parity: parity,
-        pi_tools_hash: piHash,
         mcp_missing_on_pi: missingOnPi,
       });
     }
@@ -128,9 +128,9 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       job_id: job.id,
       status: 'running',
       kind: 'deferred_batch',
-      gather_ref: body.gather_profile.ref,
+      gather_model: profileModelId(body.gather_profile),
       gather_api_family: body.gather_profile.api_family,
-      think_ref: body.think_profile?.ref ?? null,
+      think_model: body.think_profile ? profileModelId(body.think_profile) : null,
       tools_parity: parity,
     });
   });

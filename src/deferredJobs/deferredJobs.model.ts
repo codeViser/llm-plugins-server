@@ -4,6 +4,7 @@ import { parsePositiveInt } from '@/multiAgent/maxAgents';
 
 import { InferenceProfileV2Schema } from './inferenceProfile';
 import { DeferredProgressSchema } from './schemas';
+import { optionalRecord } from './zodHelpers';
 
 const optionalPositiveInt = z.preprocess((value) => parsePositiveInt(value), z.number().int().positive().optional());
 
@@ -35,16 +36,12 @@ export const DeferredRunRequestSchema = z.object({
   dry_run: optionalTrueFlag,
   gather_profile: InferenceProfileV2Schema,
   think_profile: InferenceProfileV2Schema.optional(),
-  tm_tool_fingerprint: z.string().optional(),
   tm_enabled_plugin_count: z.number().int().optional(),
-  gather_typingmind_model_ref: z.string().optional(),
-  think_typingmind_model_ref: z.string().optional(),
   tm_execution_context: z
     .object({
       mcp_server_ids: z.array(z.string()).optional(),
       enabled_plugin_ids: z.array(z.string()).optional(),
-      context_hash: z.string().optional(),
-      chat_wire: z.record(z.unknown()).optional(),
+      chat_wire: optionalRecord,
     })
     .optional(),
   parity_strict: optionalTrueFlag,
