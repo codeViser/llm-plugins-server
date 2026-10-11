@@ -19,6 +19,9 @@ export const env = cleanEnv(process.env, {
   OPENAI_API_KEY: str({ default: '' }),
   /** Optional Pi-side fallback for deferred batch think tier (plugin body key preferred). */
   OPENROUTER_API_KEY: str({ default: '' }),
+  /** Optional deferred job completion alerts (Pi .env only; never commit). */
+  TELEGRAM_BOT_TOKEN: str({ default: '' }),
+  TELEGRAM_CHAT_ID: str({ default: '' }),
   MULTI_AGENT_DEFAULT_MAX_AGENTS: num({ default: 4 }),
   // Official id is gpt-6-astra (Responses API). Plugin User Settings override this.
   MULTI_AGENT_DEFAULT_MODEL: str({ default: 'gpt-6-astra' }),
