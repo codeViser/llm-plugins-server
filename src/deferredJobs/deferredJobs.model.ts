@@ -39,6 +39,15 @@ export const DeferredRunRequestSchema = z.object({
   tm_enabled_plugin_count: z.number().int().optional(),
   gather_typingmind_model_ref: z.string().optional(),
   think_typingmind_model_ref: z.string().optional(),
+  tm_execution_context: z
+    .object({
+      mcp_server_ids: z.array(z.string()).optional(),
+      enabled_plugin_ids: z.array(z.string()).optional(),
+      context_hash: z.string().optional(),
+      chat_wire: z.record(z.unknown()).optional(),
+    })
+    .optional(),
+  parity_strict: optionalTrueFlag,
 });
 
 export type DeferredRunRequest = z.infer<typeof DeferredRunRequestSchema>;

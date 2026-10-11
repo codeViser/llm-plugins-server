@@ -14,6 +14,7 @@ import {
   submitOpenRouterBatch,
 } from './openRouterBatch';
 import type { DeferredProgress, EvidencePacket, EvidenceRequest } from './schemas';
+import { runProfileThinkSync } from './thinkSync';
 
 const logger = pino({ name: 'deferred-job-worker' });
 
@@ -199,7 +200,7 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
         thinkProfile &&
         (thinkProfile.api_family === 'openrouter_batch' || thinkProfile.model_slug.includes(':batch'));
 
-      if (!useBatchThink || !resolved.openrouter_api_key) {
+      if (!thinkProfile || skipBatch) {
         jobs.complete(jobId, {
           kind: 'deferred_batch',
           final_answer: gathered.finalAssistantText,
@@ -210,6 +211,37 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
         });
         progress('done');
         return;
+      }
+
+      if (!useBatchThink) {
+        progress('thinking', { message: 'Running sync think tier' });
+        const { text, api_family } = await runProfileThinkSync({
+          profile: thinkProfile,
+          userContent: thinkPrompt(gathered.packet, resolved.goal),
+          openaiApiKey: resolved.openai_api_key,
+          openrouterApiKey: resolved.openrouter_api_key,
+        });
+        const parsedThink = parseThinkOutput(text);
+        jobs.complete(jobId, {
+          kind: 'deferred_batch',
+          final_answer: parsedThink.final_answer,
+          evidence_packet: gathered.packet,
+          tools_invoked: gathered.toolsInvoked,
+          think_sync: true,
+          config_echo: {
+            ...configEcho,
+            think_api_family: api_family,
+            think_profile_hash: thinkProfile.profile_hash,
+            think_ref: thinkProfile.ref,
+          },
+          raw_think_excerpt: text.slice(0, 2000),
+        });
+        progress('done');
+        return;
+      }
+
+      if (!resolved.openrouter_api_key) {
+        throw new Error('openrouter_api_key required for batch think profile');
       }
     }
 

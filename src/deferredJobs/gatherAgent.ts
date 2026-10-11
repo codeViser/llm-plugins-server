@@ -18,6 +18,7 @@ import {
   resolveGatherProvider,
   type GatherProvider,
 } from './reasoningParams';
+import { gatherSystemContent } from './tierInstructions';
 
 export type GatherAgentInput = {
   goal: string;
@@ -110,13 +111,14 @@ export async function runGatherAgent(input: GatherAgentInput): Promise<GatherAge
     allow: input.allowMcpClients,
     deny: input.denyMcpClients,
   });
-  const system = [
-    input.profile?.instructions ||
-      'You are the Gather tier for a deferred research job. Use MCP tools when you need external facts.',
-    input.contextPacket ? `Context from TypingMind:\n${input.contextPacket}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n\n');
+  const system = input.profile
+    ? gatherSystemContent(input.profile, input.contextPacket)
+    : [
+        'You are the Gather tier for a deferred research job. Use MCP tools when you need external facts.',
+        input.contextPacket ? `Context from TypingMind:\n${input.contextPacket}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n\n');
 
   const messages: ChatMessage[] = [
     { role: 'system', content: system },

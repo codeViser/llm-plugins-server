@@ -38,23 +38,36 @@ export function verifyProfileHash(profile: InferenceProfileV2): boolean {
   return computed === profile_hash || profile.profile_hash.length === 8;
 }
 
+function numericMaxTokens(ext: Record<string, unknown>): number | undefined {
+  const raw = ext.maxTokens ?? ext.max_tokens;
+  if (raw == null) return undefined;
+  const n = typeof raw === 'string' ? Number.parseInt(raw, 10) : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
 export function buildOpenRouterChatBody(
   profile: InferenceProfileV2,
   messages: Record<string, unknown>[],
   tools?: unknown[]
 ): Record<string, unknown> {
+  const ext = { ...(profile.body_extensions ?? {}) };
+  const { thinkingOptions: _t, promptCachingEnabled: _p, contextLimit: _c, ...wireExt } = ext;
   const body: Record<string, unknown> = {
     model: profile.model_slug,
     messages,
     stream: false,
-    ...(profile.body_extensions ?? {}),
+    ...wireExt,
   };
   const effort =
-    (profile.body_extensions?.reasoning_effort as string) ||
+    (ext.reasoning_effort as string) ||
     profile.reasoning?.effort ||
-    (profile.body_extensions as { reasoning_effort?: string })?.reasoning_effort;
+    (ext as { reasoning_effort?: string }).reasoning_effort;
   if (effort) {
     body.reasoning_effort = effort;
+  }
+  const maxTok = numericMaxTokens(ext);
+  if (maxTok) {
+    body.max_tokens = maxTok;
   }
   if (tools?.length) {
     body.tools = tools;
@@ -81,8 +94,12 @@ export function buildOpenAiResponsesBody(
     };
   }
   const ext = profile.body_extensions ?? {};
-  if (ext.maxTokens != null) {
-    body.max_output_tokens = ext.maxTokens;
+  const maxTok = numericMaxTokens(ext as Record<string, unknown>);
+  if (maxTok) {
+    body.max_output_tokens = maxTok;
+  }
+  if (ext.promptCachingEnabled === 'extended' || ext.promptCachingEnabled === true) {
+    body.store = true;
   }
   return body;
 }

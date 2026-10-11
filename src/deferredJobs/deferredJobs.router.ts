@@ -16,7 +16,9 @@ import { runDeferredJob, stashDeferredRunSecrets } from './deferredJobWorker';
 import { clients } from '@/mcp/mcp';
 import { listMcpFunctionTools } from '@/multiAgent/toolBridge';
 
+import { resolveMcpAllowList } from './mcpAllow';
 import { piToolsHash, toolsParityReport } from './parityTools';
+import { RESEARCH_COUNCIL_CLIENT_ID } from '@/multiAgent/researchCouncilId';
 
 const logger = pino({ name: 'deferred-jobs' });
 
@@ -40,17 +42,35 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
     }
     const body = parsed.data;
 
+    const piClientIds = [...clients.keys()].filter((id) => id !== RESEARCH_COUNCIL_CLIENT_ID);
+    const { allow: resolvedAllow, missingOnPi } = resolveMcpAllowList({
+      piClientIds,
+      tmContext: body.tm_execution_context,
+      explicitAllow: body.allow_mcp_clients,
+    });
+
     const listed = await listMcpFunctionTools(clients, {
-      allow: body.allow_mcp_clients,
+      allow: resolvedAllow,
       deny: body.deny_mcp_clients,
     });
-    const piHash = await piToolsHash(body.allow_mcp_clients, body.deny_mcp_clients);
+    const piHash = await piToolsHash(resolvedAllow, body.deny_mcp_clients);
     const parity = toolsParityReport({
       tm_fingerprint: body.tm_tool_fingerprint,
       tm_enabled_plugin_count: body.tm_enabled_plugin_count,
+      tm_execution_context: body.tm_execution_context,
       pi_tools_hash: piHash,
       pi_tool_count: listed.length,
+      mcp_missing_on_pi: missingOnPi,
+      parity_strict: body.parity_strict === true,
     });
+
+    if (!parity.ok) {
+      return res.status(StatusCodes.BAD_REQUEST).json({
+        error: 'Tool/MCP parity gate failed',
+        tools_parity: parity,
+        mcp_missing_on_pi: missingOnPi,
+      });
+    }
 
     if (body.dry_run) {
       return res.status(StatusCodes.OK).json({
@@ -59,13 +79,16 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
         gather_profile: body.gather_profile,
         think_profile: body.think_profile ?? null,
         skip_batch: Boolean(body.skip_batch),
+        allow_mcp_clients_resolved: resolvedAllow ?? null,
         tools_parity: parity,
         pi_tools_hash: piHash,
+        mcp_missing_on_pi: missingOnPi,
       });
     }
 
     const input: DeferredRunInput = {
       ...body,
+      allow_mcp_clients: resolvedAllow,
       context_packet: contextPacketToString(body.context_packet),
       progress: { phase: 'gathering', updated_at: new Date().toISOString() },
     };
@@ -78,7 +101,7 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       think_model: body.think_profile?.model_slug,
       skip_batch: body.skip_batch,
       progress: input.progress,
-      allow_mcp_clients: body.allow_mcp_clients,
+      allow_mcp_clients: resolvedAllow,
       deny_mcp_clients: body.deny_mcp_clients,
       max_gather_turns: body.max_gather_turns,
       max_tool_calls: body.max_tool_calls,

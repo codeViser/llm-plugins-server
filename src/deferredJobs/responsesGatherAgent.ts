@@ -10,6 +10,7 @@ import { runBackgroundResponsesTurn } from '@/multiAgent/openaiBackgroundTurn';
 
 import type { InferenceProfileV2 } from './inferenceProfile';
 import { buildOpenAiResponsesBody } from './inferenceProfile';
+import { composeTierInstructions, GATHER_TIER_ADDENDUM } from './tierInstructions';
 import type { EvidencePacket, ToolTraceEntry } from './schemas';
 import { EVIDENCE_PACKET_SCHEMA_VERSION } from './schemas';
 import { createHash } from 'crypto';
@@ -96,7 +97,14 @@ export async function runResponsesProfileGather(args: {
   let toolCallsUsed = 0;
 
   for (let turn = 0; turn < args.maxTurns; turn++) {
-    const body = buildOpenAiResponsesBody(args.profile, nextInput, oaiTools);
+    const body = buildOpenAiResponsesBody(
+      {
+        ...args.profile,
+        instructions: composeTierInstructions(args.profile.instructions, GATHER_TIER_ADDENDUM),
+      },
+      nextInput,
+      oaiTools
+    );
     const result = await runBackgroundResponsesTurn({
       body,
       timeoutMs: 180_000,

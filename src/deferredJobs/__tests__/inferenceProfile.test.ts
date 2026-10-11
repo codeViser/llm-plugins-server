@@ -10,6 +10,17 @@ describe('inferenceProfile builders', () => {
     expect(body.reasoning_effort).toBe('high');
   });
 
+  it('maps maxTokens string to max_tokens', () => {
+    const body = buildOpenRouterChatBody(
+      {
+        ...OR_GATHER_PROFILE,
+        body_extensions: { maxTokens: '100000', reasoning_effort: 'high' },
+      },
+      [{ role: 'user', content: 'hi' }]
+    );
+    expect(body.max_tokens).toBe(100000);
+  });
+
   it('builds batch think body', () => {
     const body = buildThinkBatchBody(
       {

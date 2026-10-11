@@ -5,6 +5,7 @@ import { JobStore } from '@/multiAgent/jobStore';
 import { resumeInterruptedDeferredJobs, runDeferredJob, stashDeferredRunSecrets } from '../deferredJobWorker';
 import * as profileGather from '../profileGather';
 import * as openRouterBatch from '../openRouterBatch';
+import * as thinkSync from '../thinkSync';
 import { BATCH_THINK_PROFILE, OR_GATHER_PROFILE } from './fixtures';
 
 describe('deferredJobWorker', () => {
@@ -48,6 +49,58 @@ describe('deferredJobWorker', () => {
     const done = jobs.get(job.id);
     expect(done?.status).toBe('done');
     expect((done?.result as { tools_invoked?: string[] }).tools_invoked).toEqual(['mcp__test__tool']);
+  });
+
+  it('runs sync think when think profile is not batch', async () => {
+    vi.spyOn(profileGather, 'runProfileGather').mockResolvedValue({
+      packet: {
+        schema_version: 1,
+        goal: 'sync think',
+        sources: [],
+        tool_trace: [],
+        gather_model: 'gpt-6-luna',
+        packet_hash: 'x',
+      },
+      toolsInvoked: [],
+      finalAssistantText: 'gather preview',
+      config_echo: {
+        gather_api_family: 'openai_responses',
+        gather_profile_hash: 'h',
+        gather_ref: 'native:gpt-6-luna',
+      },
+    });
+    vi.spyOn(thinkSync, 'runProfileThinkSync').mockResolvedValue({
+      text: '{"final_answer":"deep answer","evidence_requests":[]}',
+      api_family: 'openai_responses',
+    });
+
+    const jobs = new JobStore({ dbPath: ':memory:' });
+    const job = jobs.create('sync think', { job_kind: 'deferred_batch' });
+
+    await runDeferredJob(
+      job.id,
+      {
+        goal: 'sync think',
+        gather_profile: {
+          ...OR_GATHER_PROFILE,
+          api_family: 'openai_responses',
+          model_slug: 'gpt-6-luna',
+          ref: 'native:gpt-6-luna',
+        },
+        think_profile: {
+          ...OR_GATHER_PROFILE,
+          api_family: 'openai_responses',
+          model_slug: 'gpt-6-luna',
+          ref: 'native:gpt-6-luna',
+        },
+        openai_api_key: 'sk-test',
+      },
+      jobs
+    );
+
+    const done = jobs.get(job.id);
+    expect(done?.status).toBe('done');
+    expect((done?.result as { think_sync?: boolean }).think_sync).toBe(true);
   });
 
   it('runs think tier when batch profile set', async () => {
