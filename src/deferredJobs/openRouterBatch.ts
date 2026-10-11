@@ -1,5 +1,8 @@
 import got from 'got';
 
+import { ensureBatchModelSlug } from './batchModelSlug';
+import { openRouterBatchHttpError } from './openRouterBatchErrors';
+
 const OR_BATCH_BASE = 'https://openrouter.ai/api/v1/batches';
 
 export type BatchSubmitParams = {
@@ -22,20 +25,30 @@ export type BatchStatus = {
 };
 
 export async function submitOpenRouterBatch(params: BatchSubmitParams): Promise<{ id: string; status: string }> {
+  const batchModel = ensureBatchModelSlug(params.model);
+  const requestBody = { ...params.body };
+  if (typeof requestBody.model === 'string') {
+    requestBody.model = ensureBatchModelSlug(requestBody.model);
+  }
   const payload = {
     endpoint: params.endpoint,
-    model: params.model,
-    requests: [{ custom_id: params.customId, body: params.body }],
+    model: batchModel,
+    requests: [{ custom_id: params.customId, body: requestBody }],
   };
-  const res = await got.post(OR_BATCH_BASE, {
-    json: payload,
-    headers: {
-      Authorization: `Bearer ${params.apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    responseType: 'json',
-    timeout: { request: 120_000 },
-  });
+  let res;
+  try {
+    res = await got.post(OR_BATCH_BASE, {
+      json: payload,
+      headers: {
+        Authorization: `Bearer ${params.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      responseType: 'json',
+      timeout: { request: 120_000 },
+    });
+  } catch (error) {
+    throw openRouterBatchHttpError(error, 'submit');
+  }
   const body = res.body as { id?: string; status?: string };
   if (!body.id) {
     throw new Error('OpenRouter batch submit missing id');
@@ -44,11 +57,16 @@ export async function submitOpenRouterBatch(params: BatchSubmitParams): Promise<
 }
 
 export async function getOpenRouterBatch(apiKey: string, batchId: string): Promise<BatchStatus> {
-  const res = await got.get(`${OR_BATCH_BASE}/${batchId}`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-    responseType: 'json',
-    timeout: { request: 60_000 },
-  });
+  let res;
+  try {
+    res = await got.get(`${OR_BATCH_BASE}/${encodeURIComponent(batchId)}`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      responseType: 'json',
+      timeout: { request: 60_000 },
+    });
+  } catch (error) {
+    throw openRouterBatchHttpError(error, 'poll');
+  }
   return res.body as BatchStatus;
 }
 
