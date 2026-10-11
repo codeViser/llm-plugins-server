@@ -4,7 +4,8 @@ import { env } from '@/common/utils/envConfig';
 import { JobStore } from '@/multiAgent/jobStore';
 
 import type { DeferredRunInput } from './deferredJobs.model';
-import { runGatherAgent } from './gatherAgent';
+import { buildThinkBatchBody } from './inferenceProfile';
+import { runProfileGather } from './profileGather';
 import {
   batchPollDelayMs,
   extractBatchCompletionText,
@@ -107,7 +108,9 @@ function inputFromJob(jobId: string, jobs: JobStore, body: DeferredRunInput): De
   return {
     goal: body.goal || job?.goal || snap?.goal || '',
     context_packet: body.context_packet,
-    gather_model: body.gather_model || snap?.gather_model || 'openai/gpt-4o-mini',
+    gather_profile: body.gather_profile ?? snap?.gather_profile,
+    think_profile: body.think_profile ?? snap?.think_profile,
+    gather_model: body.gather_model || snap?.gather_model,
     think_model: body.think_model || snap?.think_model,
     skip_batch: body.skip_batch ?? snap?.skip_batch,
     allow_mcp_clients: body.allow_mcp_clients ?? snap?.allow_mcp_clients,
@@ -152,15 +155,28 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
     const maxRefine = resolved.max_refine_rounds ?? 1;
     const toolsInvoked: string[] = [];
 
-    if (resumePhase === 'batch_polling' && resumeBatchId && packet && resolved.openrouter_api_key && resolved.think_model) {
+    const gatherProfile = resolved.gather_profile;
+    if (!gatherProfile) {
+      throw new Error('gather_profile (inference_profile_v2) is required');
+    }
+
+    let configEcho: Record<string, unknown> = {};
+
+    if (
+      resumePhase === 'batch_polling' &&
+      resumeBatchId &&
+      packet &&
+      resolved.openrouter_api_key &&
+      resolved.think_profile
+    ) {
       logger.info({ jobId, batchId: resumeBatchId }, 'resuming deferred job at batch_polling');
     } else {
       progress('gathering', { message: 'Running gather tier' });
 
-      gatherResult = await runGatherAgent({
+      const gathered = await runProfileGather({
+        profile: gatherProfile,
         goal: resolved.goal,
         contextPacket: resolved.context_packet,
-        gatherModel: resolved.gather_model,
         openaiApiKey: resolved.openai_api_key,
         openrouterApiKey: resolved.openrouter_api_key,
         allowMcpClients: resolved.allow_mcp_clients,
@@ -168,16 +184,29 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
         maxTurns: resolved.max_gather_turns ?? 8,
         maxToolCalls: resolved.max_tool_calls ?? 12,
       });
-      packet = gatherResult.packet;
-      toolsInvoked.push(...gatherResult.toolsInvoked);
+      gatherResult = {
+        packet: gathered.packet,
+        toolsInvoked: gathered.toolsInvoked,
+        finalAssistantText: gathered.finalAssistantText,
+      };
+      packet = gathered.packet;
+      toolsInvoked.push(...gathered.toolsInvoked);
+      configEcho = gathered.config_echo;
 
-      if (skipBatch || !resolved.think_model || !resolved.openrouter_api_key) {
+      const thinkProfile = resolved.think_profile;
+      const useBatchThink =
+        !skipBatch &&
+        thinkProfile &&
+        (thinkProfile.api_family === 'openrouter_batch' || thinkProfile.model_slug.includes(':batch'));
+
+      if (!useBatchThink || !resolved.openrouter_api_key) {
         jobs.complete(jobId, {
           kind: 'deferred_batch',
-          final_answer: gatherResult.finalAssistantText,
-          evidence_packet: gatherResult.packet,
-          tools_invoked: gatherResult.toolsInvoked,
+          final_answer: gathered.finalAssistantText,
+          evidence_packet: gathered.packet,
+          tools_invoked: gathered.toolsInvoked,
           gather_only: true,
+          config_echo: configEcho,
         });
         progress('done');
         return;
@@ -196,13 +225,12 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
 
       if (!batchId) {
         progress('batch_submitted', { message: 'Submitting OpenRouter batch' }, { evidence_packet_snapshot: packet, refine_rounds: refineRounds });
-        const body = {
-          messages: [{ role: 'user', content: thinkPrompt(packet, resolved.goal) }],
-        };
+        const thinkProfile = resolved.think_profile!;
+        const body = buildThinkBatchBody(thinkProfile, thinkPrompt(packet, resolved.goal));
         const submitted = await submitOpenRouterBatch({
           apiKey: resolved.openrouter_api_key!,
           endpoint: '/v1/chat/completions',
-          model: resolved.think_model!,
+          model: thinkProfile.model_slug,
           customId,
           body,
         });
@@ -243,10 +271,10 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
       if (parsed.evidence_requests.length && refineRounds < maxRefine) {
         progress('refining', { message: `Executing ${parsed.evidence_requests.length} evidence requests` });
         refineRounds++;
-        const extra = await runGatherAgent({
+        const extraOut = await runProfileGather({
+          profile: gatherProfile,
           goal: `${resolved.goal}\n\nFollow-up evidence requests:\n${JSON.stringify(parsed.evidence_requests)}`,
           contextPacket: JSON.stringify(packet),
-          gatherModel: resolved.gather_model,
           openaiApiKey: resolved.openai_api_key,
           openrouterApiKey: resolved.openrouter_api_key,
           allowMcpClients: resolved.allow_mcp_clients,
@@ -254,10 +282,11 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
           maxTurns: Math.min(4, resolved.max_gather_turns ?? 8),
           maxToolCalls: Math.min(6, resolved.max_tool_calls ?? 12),
         });
+        const extra = {
+          packet: extraOut.packet,
+          toolsInvoked: extraOut.toolsInvoked,
+        };
         toolsInvoked.push(...extra.toolsInvoked);
-        if (gatherResult) {
-          gatherResult.toolsInvoked.push(...extra.toolsInvoked);
-        }
         packet = {
           ...extra.packet,
           sources: [...packet.sources, ...extra.packet.sources],
@@ -266,15 +295,21 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
         continue;
       }
 
-      const allTools = gatherResult?.toolsInvoked ?? toolsInvoked;
+      const allTools = toolsInvoked.length ? toolsInvoked : gatherResult?.toolsInvoked ?? [];
       jobs.complete(jobId, {
         kind: 'deferred_batch',
         final_answer: parsed.final_answer,
         evidence_packet: packet,
         tools_invoked: allTools,
-        think_model: resolved.think_model,
+        think_model: resolved.think_profile?.model_slug ?? resolved.think_model,
         refine_rounds: refineRounds,
         raw_think_excerpt: text.slice(0, 2000),
+        config_echo: {
+          ...configEcho,
+          think_api_family: resolved.think_profile?.api_family,
+          think_profile_hash: resolved.think_profile?.profile_hash,
+          think_ref: resolved.think_profile?.ref,
+        },
       });
       progress('done');
       break;

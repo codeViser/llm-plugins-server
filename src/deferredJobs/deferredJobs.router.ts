@@ -13,6 +13,10 @@ import {
   type DeferredRunInput,
 } from './deferredJobs.model';
 import { runDeferredJob, stashDeferredRunSecrets } from './deferredJobWorker';
+import { clients } from '@/mcp/mcp';
+import { listMcpFunctionTools } from '@/multiAgent/toolBridge';
+
+import { piToolsHash, toolsParityReport } from './parityTools';
 
 const logger = pino({ name: 'deferred-jobs' });
 
@@ -36,21 +40,32 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
     }
     const body = parsed.data;
 
+    const listed = await listMcpFunctionTools(clients, {
+      allow: body.allow_mcp_clients,
+      deny: body.deny_mcp_clients,
+    });
+    const piHash = await piToolsHash(body.allow_mcp_clients, body.deny_mcp_clients);
+    const parity = toolsParityReport({
+      tm_fingerprint: body.tm_tool_fingerprint,
+      tm_enabled_plugin_count: body.tm_enabled_plugin_count,
+      pi_tools_hash: piHash,
+      pi_tool_count: listed.length,
+    });
+
     if (body.dry_run) {
       return res.status(StatusCodes.OK).json({
         dry_run: true,
         goal: body.goal,
-        gather_model: body.gather_model,
-        think_model: body.think_model ?? null,
+        gather_profile: body.gather_profile,
+        think_profile: body.think_profile ?? null,
         skip_batch: Boolean(body.skip_batch),
+        tools_parity: parity,
+        pi_tools_hash: piHash,
       });
     }
 
-    const gatherModel = body.gather_model ?? 'openai/gpt-4o-mini';
-
     const input: DeferredRunInput = {
       ...body,
-      gather_model: gatherModel,
       context_packet: contextPacketToString(body.context_packet),
       progress: { phase: 'gathering', updated_at: new Date().toISOString() },
     };
@@ -59,8 +74,8 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       goal: body.goal,
       job_kind: 'deferred_batch',
       context_packet: body.context_packet,
-      gather_model: gatherModel,
-      think_model: body.think_model,
+      gather_model: body.gather_profile.model_slug,
+      think_model: body.think_profile?.model_slug,
       skip_batch: body.skip_batch,
       progress: input.progress,
       allow_mcp_clients: body.allow_mcp_clients,
@@ -68,6 +83,8 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       max_gather_turns: body.max_gather_turns,
       max_tool_calls: body.max_tool_calls,
       max_refine_rounds: body.max_refine_rounds,
+      gather_profile: body.gather_profile,
+      think_profile: body.think_profile,
     });
 
     stashDeferredRunSecrets(job.id, {
@@ -88,8 +105,10 @@ export function createDeferredJobsRouter(deps: DeferredJobsRouterDeps): Router {
       job_id: job.id,
       status: 'running',
       kind: 'deferred_batch',
-      gather_model: body.gather_model,
-      think_model: body.think_model ?? null,
+      gather_ref: body.gather_profile.ref,
+      gather_api_family: body.gather_profile.api_family,
+      think_ref: body.think_profile?.ref ?? null,
+      tools_parity: parity,
     });
   });
 

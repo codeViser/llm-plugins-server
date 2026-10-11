@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { parsePositiveInt } from '@/multiAgent/maxAgents';
 
+import { InferenceProfileV2Schema } from './inferenceProfile';
 import { DeferredProgressSchema } from './schemas';
 
 const optionalPositiveInt = z.preprocess((value) => parsePositiveInt(value), z.number().int().positive().optional());
@@ -20,7 +21,10 @@ export const DeferredRunRequestSchema = z.object({
   openai_api_key: z.string().optional(),
   openrouter_api_key: z.string().optional(),
   gather_model: z.string().min(1).optional(),
+  gather_provider: z.enum(['openai', 'openrouter']).optional(),
+  gather_reasoning_effort: z.string().min(1).optional(),
   think_model: z.string().optional(),
+  think_reasoning_effort: z.string().min(1).optional(),
   allow_mcp_clients: z.array(z.string()).optional(),
   deny_mcp_clients: z.array(z.string()).optional(),
   max_gather_turns: optionalPositiveInt,
@@ -29,6 +33,12 @@ export const DeferredRunRequestSchema = z.object({
   skip_batch: optionalTrueFlag,
   async: optionalTrueFlag,
   dry_run: optionalTrueFlag,
+  gather_profile: InferenceProfileV2Schema,
+  think_profile: InferenceProfileV2Schema.optional(),
+  tm_tool_fingerprint: z.string().optional(),
+  tm_enabled_plugin_count: z.number().int().optional(),
+  gather_typingmind_model_ref: z.string().optional(),
+  think_typingmind_model_ref: z.string().optional(),
 });
 
 export type DeferredRunRequest = z.infer<typeof DeferredRunRequestSchema>;

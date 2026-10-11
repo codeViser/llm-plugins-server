@@ -9,19 +9,29 @@ import {
   OpenAIFunctionTool,
 } from '@/multiAgent/toolBridge';
 
+import type { InferenceProfileV2 } from './inferenceProfile';
+import { buildOpenRouterChatBody } from './inferenceProfile';
 import type { EvidencePacket, EvidenceSource, ToolTraceEntry } from './schemas';
 import { EVIDENCE_PACKET_SCHEMA_VERSION } from './schemas';
+import {
+  applyReasoningToChatBody,
+  resolveGatherProvider,
+  type GatherProvider,
+} from './reasoningParams';
 
 export type GatherAgentInput = {
   goal: string;
   contextPacket?: string;
   gatherModel: string;
+  gatherProvider?: string;
+  gatherReasoningEffort?: string;
   openaiApiKey?: string;
   openrouterApiKey?: string;
   allowMcpClients?: string[];
   denyMcpClients?: string[];
   maxTurns: number;
   maxToolCalls: number;
+  profile?: InferenceProfileV2;
 };
 
 export type GatherAgentResult = {
@@ -36,23 +46,32 @@ async function chatCompletionRound(args: {
   messages: ChatMessage[];
   tools: OpenAIFunctionTool[];
   model: string;
+  provider: GatherProvider;
+  reasoningEffort?: string;
+  profile?: InferenceProfileV2;
   openaiApiKey?: string;
   openrouterApiKey?: string;
 }): Promise<{ message: Record<string, unknown>; raw: unknown; resolve: (name: string) => string | undefined }> {
-  const useOr = Boolean(args.openrouterApiKey);
+  const useOr = args.provider === 'openrouter';
   const apiKey = useOr ? args.openrouterApiKey! : args.openaiApiKey!;
   const url = useOr
-    ? 'https://openrouter.ai/api/v1/chat/completions'
+    ? args.profile?.endpoint || 'https://openrouter.ai/api/v1/chat/completions'
     : 'https://api.openai.com/v1/chat/completions';
   const { tools, resolve } = bindToolsForOpenAI(args.tools);
-  const payload: Record<string, unknown> = {
-    model: args.model,
-    messages: args.messages,
-    tools: tools.map((t) => ({
-      type: 'function',
-      function: { name: t.name, description: t.description, parameters: t.parameters },
-    })),
-  };
+  const oaiTools = tools.map((t) => ({
+    type: 'function',
+    function: { name: t.name, description: t.description, parameters: t.parameters },
+  }));
+  const payload: Record<string, unknown> = args.profile
+    ? buildOpenRouterChatBody(args.profile, args.messages, oaiTools)
+    : {
+        model: args.model,
+        messages: args.messages,
+        tools: oaiTools,
+      };
+  if (!args.profile) {
+    applyReasoningToChatBody(args.provider, payload, args.reasoningEffort);
+  }
   const res = await got.post(url, {
     json: payload,
     headers: {
@@ -75,16 +94,25 @@ function packetHash(packet: Omit<EvidencePacket, 'packet_hash'>): string {
 }
 
 export async function runGatherAgent(input: GatherAgentInput): Promise<GatherAgentResult> {
-  if (!input.openaiApiKey && !input.openrouterApiKey) {
-    throw new Error('gather requires openai_api_key or openrouter_api_key');
+  const provider = resolveGatherProvider({
+    gatherProvider: input.gatherProvider,
+    gatherModel: input.gatherModel,
+    hasOpenaiKey: Boolean(input.openaiApiKey),
+    hasOpenrouterKey: Boolean(input.openrouterApiKey),
+  });
+  if (provider === 'openai' && !input.openaiApiKey) {
+    throw new Error('gather_provider=openai requires openai_api_key in plugin settings');
+  }
+  if (provider === 'openrouter' && !input.openrouterApiKey) {
+    throw new Error('gather_provider=openrouter requires openrouter_api_key in plugin settings');
   }
   const mcpTools = await listMcpFunctionTools(clients, {
     allow: input.allowMcpClients,
     deny: input.denyMcpClients,
   });
   const system = [
-    'You are the Gather tier for a deferred research job.',
-    'Use MCP tools when you need external facts. When enough evidence is collected, answer with a concise synthesis.',
+    input.profile?.instructions ||
+      'You are the Gather tier for a deferred research job. Use MCP tools when you need external facts.',
     input.contextPacket ? `Context from TypingMind:\n${input.contextPacket}` : '',
   ]
     .filter(Boolean)
@@ -106,6 +134,9 @@ export async function runGatherAgent(input: GatherAgentInput): Promise<GatherAge
       messages,
       tools: mcpTools,
       model: input.gatherModel,
+      provider,
+      reasoningEffort: input.gatherReasoningEffort,
+      profile: input.profile,
       openaiApiKey: input.openaiApiKey,
       openrouterApiKey: input.openrouterApiKey,
     });

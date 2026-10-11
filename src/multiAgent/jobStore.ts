@@ -40,7 +40,10 @@ export type JobInputSnapshot = {
   applied_max_agents?: number;
   job_kind?: 'council' | 'deferred_batch';
   gather_model?: string;
+  gather_provider?: 'openai' | 'openrouter';
+  gather_reasoning_effort?: string;
   think_model?: string;
+  think_reasoning_effort?: string;
   skip_batch?: boolean;
   progress?: Record<string, unknown>;
   allow_mcp_clients?: string[];
@@ -51,6 +54,8 @@ export type JobInputSnapshot = {
   /** Gather output persisted before batch submit so batch_polling can resume after restart. */
   evidence_packet_snapshot?: unknown;
   refine_rounds?: number;
+  gather_profile?: unknown;
+  think_profile?: unknown;
 };
 
 export interface JobSummary {
@@ -250,7 +255,10 @@ function serializeInput(input: JobInputSnapshot | undefined, storedGoal: string)
     applied_max_agents: input?.applied_max_agents,
     job_kind: input?.job_kind,
     gather_model: input?.gather_model,
+    gather_provider: input?.gather_provider,
+    gather_reasoning_effort: input?.gather_reasoning_effort,
     think_model: input?.think_model,
+    think_reasoning_effort: input?.think_reasoning_effort,
     skip_batch: input?.skip_batch,
     progress: input?.progress,
     allow_mcp_clients: input?.allow_mcp_clients,
@@ -260,6 +268,8 @@ function serializeInput(input: JobInputSnapshot | undefined, storedGoal: string)
     max_refine_rounds: input?.max_refine_rounds,
     evidence_packet_snapshot: input?.evidence_packet_snapshot,
     refine_rounds: input?.refine_rounds,
+    gather_profile: input?.gather_profile,
+    think_profile: input?.think_profile,
   };
   const encoded = JSON.stringify(snapshot);
   if (!encoded || encoded === '{}') {
