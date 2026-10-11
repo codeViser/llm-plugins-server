@@ -15,6 +15,9 @@ import { normalizeRequestPath } from '@/common/middleware/normalizeRequestPath';
 import requestLogger from '@/common/middleware/requestLogger';
 import { env } from '@/common/utils/envConfig';
 import { mcpRouter } from '@/mcp/mcp.router';
+import { deferredJobsRouter } from '@/deferredJobs';
+import { multiAgentRouter } from '@/multiAgent';
+import { pluginCorp, pluginJsonBody, pluginSandboxCors } from '@/multiAgent/pluginCors';
 import { reasoningCacheRouter } from '@/routes/reasoningCache';
 import { healthCheckRegistry, healthCheckRouter } from '@/routes/healthCheck/healthCheckRouter';
 import { paperDiscoveryRegistry, paperDiscoveryRouter } from '@/routes/paperDiscovery/paperDiscoveryRouter';
@@ -43,6 +46,15 @@ app.set('trust proxy', true);
 // iOS WebKit does not collapse `//start` when a connector URL has a trailing slash.
 app.use(normalizeRequestPath);
 
+// JS plugin sandbox uses Origin: null. These routes must CORS * without credentials
+// and be mounted before the global credentials:true cors() middleware.
+// pluginJsonBody parses the body as JSON for any Content-Type (the browser sends
+// text/plain to keep the request preflight-free).
+app.use('/api/multi-agent', pluginSandboxCors, pluginCorp, pluginJsonBody, multiAgentRouter);
+app.use('/multi-agent', pluginSandboxCors, pluginCorp, pluginJsonBody, multiAgentRouter);
+app.use('/api/deferred-jobs', pluginSandboxCors, pluginCorp, pluginJsonBody, deferredJobsRouter);
+app.use('/deferred-jobs', pluginSandboxCors, pluginCorp, pluginJsonBody, deferredJobsRouter);
+
 app.use(
   '/paper-discovery',
   (req, res, next) => {
@@ -63,8 +75,7 @@ const corsOriginValue = env.CORS_ORIGIN || '*'; // Default to * if undefined
 const allowedOriginsFromEnv = corsOriginValue.split(',').map((s) => s.trim());
 const isWildcardOriginConfig = allowedOriginsFromEnv.includes('*');
 const trustedTypingMindOriginRegexes = [
-  /^https:\/\/([a-z0-9-]+\.)?typingmind\.com$/i,
-  /^https:\/\/cloud\d+\.typingmind\.com$/i,
+  /^https:\/\/([a-z0-9-]+\.)*typingmind\.com$/i,
   /^app:\/\/typingmind$/i,
   /^capacitor:\/\/localhost$/i,
 ];
@@ -114,7 +125,13 @@ app.use(
     exposedHeaders: ["ETag", "X-Object-Modified-Time"],
   })
 );
-app.use(helmet());
+// TypingMind plugins fetch this origin from the browser. Helmet's default
+// Cross-Origin-Resource-Policy: same-origin turns those into "Failed to fetch".
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
 app.use(bodyParser.json({ limit: "50mb" }));
 
 app.use((req, res, next) => {
