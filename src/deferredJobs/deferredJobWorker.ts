@@ -13,7 +13,7 @@ import { runProfileGather } from './profileGather';
 import {
   batchPollDelayMs,
   extractBatchCompletionText,
-  getOpenRouterBatch,
+  getOpenRouterBatchWhenReady,
   isTerminalBatchStatus,
   submitOpenRouterBatch,
 } from './openRouterBatch';
@@ -67,18 +67,14 @@ function parseThinkOutput(text: string): { final_answer: string; evidence_reques
   return { final_answer: text.trim(), evidence_requests: [] };
 }
 
-async function completeSyncThinkTier(args: {
-  jobId: string;
+async function runSyncThinkText(args: {
   thinkProfile: InferenceProfileV2;
   packet: EvidencePacket;
   goal: string;
-  toolsInvoked: string[];
-  configEcho: Record<string, unknown>;
   openaiApiKey?: string;
   openrouterApiKey?: string;
   batchFallback?: boolean;
-  jobs: JobStore;
-}): Promise<void> {
+}): Promise<{ text: string; api_family: string; model: string }> {
   const profile = args.batchFallback ? thinkProfileForSyncChat(args.thinkProfile) : args.thinkProfile;
   const { text, api_family } = await runProfileThinkSync({
     profile,
@@ -86,21 +82,7 @@ async function completeSyncThinkTier(args: {
     openaiApiKey: args.openaiApiKey,
     openrouterApiKey: args.openrouterApiKey,
   });
-  const parsedThink = parseThinkOutput(text);
-  args.jobs.complete(args.jobId, {
-    kind: 'deferred_batch',
-    final_answer: parsedThink.final_answer,
-    evidence_packet: args.packet,
-    tools_invoked: args.toolsInvoked,
-    think_sync: true,
-    think_batch_fallback: args.batchFallback === true,
-    config_echo: {
-      ...args.configEcho,
-      think_api_family: api_family,
-      think_model: profileModelId(profile),
-    },
-    raw_think_excerpt: text.slice(0, 2000),
-  });
+  return { text, api_family, model: profileModelId(profile) };
 }
 
 function thinkPrompt(packet: unknown, goal: string): string {
@@ -125,7 +107,7 @@ async function pollBatchUntilDone(
 ): Promise<{ text: string; batchStatus: string }> {
   let attempt = 0;
   while (true) {
-    const status = await getOpenRouterBatch(apiKey, batchId);
+    const status = await getOpenRouterBatchWhenReady(apiKey, batchId);
     onProgress?.(status.status);
     if (isTerminalBatchStatus(status.status)) {
       if (status.status !== 'completed') {
@@ -265,24 +247,7 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
         return;
       }
 
-      if (!useBatchThink) {
-        progress('thinking', { message: 'Running sync think tier' });
-        await completeSyncThinkTier({
-          jobId,
-          thinkProfile,
-          packet: gathered.packet,
-          goal: resolved.goal,
-          toolsInvoked: gathered.toolsInvoked,
-          configEcho,
-          openaiApiKey: resolved.openai_api_key,
-          openrouterApiKey: resolved.openrouter_api_key,
-          jobs,
-        });
-        progress('done');
-        return;
-      }
-
-      if (!resolved.openrouter_api_key) {
+      if (useBatchThink && !resolved.openrouter_api_key) {
         throw new Error('openrouter_api_key required for batch think profile');
       }
     }
@@ -291,80 +256,106 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
       throw new Error('deferred job missing evidence packet');
     }
 
+    const thinkProfile = resolved.think_profile!;
+    const useBatchThink =
+      !resolved.skip_batch &&
+      thinkProfile &&
+      (thinkProfile.api_family === 'openrouter_batch' || thinkProfile.model_slug.includes(':batch'));
+
+    let thinkBatchFallback = false;
+    let lastThinkApiFamily: string | undefined;
+
     while (true) {
       const customId = `${jobId}-think-${refineRounds}`;
+      let thinkText: string | undefined;
       let batchId = resumePhase === 'batch_polling' && refineRounds === (jobs.get(jobId)?.input?.refine_rounds ?? 0)
         ? resumeBatchId
         : undefined;
 
-      if (!batchId) {
-        progress('batch_submitted', { message: 'Submitting OpenRouter batch' }, { evidence_packet_snapshot: packet, refine_rounds: refineRounds });
-        const thinkProfile = resolved.think_profile!;
-        const body = buildThinkBatchBody(thinkProfile, thinkPrompt(packet, resolved.goal));
-        try {
-          const submitted = await submitOpenRouterBatch({
-            apiKey: resolved.openrouter_api_key!,
-            endpoint: '/v1/chat/completions',
-            model: thinkProfile.model_slug,
-            customId,
-            body,
-          });
-          batchId = submitted.id;
-          jobs.updateProgress(
-            jobId,
-            {
-              phase: 'batch_polling',
-              updated_at: nowIso(),
-              or_batch_id: submitted.id,
-              or_batch_status: submitted.status,
-            },
-            { evidence_packet_snapshot: packet, refine_rounds: refineRounds }
-          );
-        } catch (error) {
-          if (!isOpenRouterBatchUnavailableError(error)) {
-            throw error;
+      if (useBatchThink) {
+        if (!batchId) {
+          progress('batch_submitted', { message: 'Submitting OpenRouter batch' }, { evidence_packet_snapshot: packet, refine_rounds: refineRounds });
+          const body = buildThinkBatchBody(thinkProfile, thinkPrompt(packet, resolved.goal));
+          try {
+            const submitted = await submitOpenRouterBatch({
+              apiKey: resolved.openrouter_api_key!,
+              endpoint: '/v1/chat/completions',
+              model: thinkProfile.model_slug,
+              customId,
+              body,
+            });
+            batchId = submitted.id;
+            jobs.updateProgress(
+              jobId,
+              {
+                phase: 'batch_polling',
+                updated_at: nowIso(),
+                or_batch_id: submitted.id,
+                or_batch_status: submitted.status,
+              },
+              { evidence_packet_snapshot: packet, refine_rounds: refineRounds }
+            );
+          } catch (error) {
+            if (!isOpenRouterBatchUnavailableError(error)) {
+              throw error;
+            }
+            const message = error instanceof Error ? error.message : String(error);
+            logger.warn({ jobId, err: message }, 'OpenRouter batch submit failed; falling back to sync think');
+            thinkBatchFallback = true;
           }
-          const message = error instanceof Error ? error.message : String(error);
-          logger.warn({ jobId, err: message }, 'OpenRouter batch think unavailable; falling back to sync');
-          progress('thinking', { message: 'Batch unavailable; running sync think tier' });
-          const allTools = toolsInvoked.length ? toolsInvoked : gatherResult?.toolsInvoked ?? [];
-          await completeSyncThinkTier({
-            jobId,
-            thinkProfile,
-            packet,
-            goal: resolved.goal,
-            toolsInvoked: allTools,
-            configEcho,
-            openaiApiKey: resolved.openai_api_key,
-            openrouterApiKey: resolved.openrouter_api_key,
-            batchFallback: true,
-            jobs,
-          });
-          progress('done');
-          return;
+        } else {
+          progress('batch_polling', { or_batch_id: batchId, message: 'Resuming batch poll' });
         }
-      } else {
-        progress('batch_polling', { or_batch_id: batchId, message: 'Resuming batch poll' });
+
+        if (batchId && !thinkText && !thinkBatchFallback) {
+          try {
+            const polled = await pollBatchUntilDone(
+              resolved.openrouter_api_key!,
+              batchId,
+              customId,
+              (st) => {
+                jobs.updateProgress(
+                  jobId,
+                  {
+                    phase: 'batch_polling',
+                    updated_at: nowIso(),
+                    or_batch_id: batchId,
+                    or_batch_status: st,
+                  },
+                  { evidence_packet_snapshot: packet, refine_rounds: refineRounds }
+                );
+              }
+            );
+            thinkText = polled.text;
+            lastThinkApiFamily = 'openrouter_batch';
+          } catch (error) {
+            if (!isOpenRouterBatchUnavailableError(error)) {
+              throw error;
+            }
+            const message = error instanceof Error ? error.message : String(error);
+            logger.warn({ jobId, err: message }, 'OpenRouter batch poll failed; falling back to sync think');
+            thinkBatchFallback = true;
+          }
+        }
       }
 
-      const { text } = await pollBatchUntilDone(
-        resolved.openrouter_api_key!,
-        batchId!,
-        customId,
-        (st) => {
-          jobs.updateProgress(
-            jobId,
-            {
-              phase: 'batch_polling',
-              updated_at: nowIso(),
-              or_batch_id: batchId,
-              or_batch_status: st,
-            },
-            { evidence_packet_snapshot: packet, refine_rounds: refineRounds }
-          );
-        }
-      );
+      if (!thinkText) {
+        progress('thinking', {
+          message: thinkBatchFallback ? 'Batch unavailable; running sync think tier' : 'Running sync think tier',
+        });
+        const sync = await runSyncThinkText({
+          thinkProfile,
+          packet,
+          goal: resolved.goal,
+          openaiApiKey: resolved.openai_api_key,
+          openrouterApiKey: resolved.openrouter_api_key,
+          batchFallback: thinkBatchFallback,
+        });
+        thinkText = sync.text;
+        lastThinkApiFamily = sync.api_family;
+      }
 
+      const text = thinkText;
       const parsed = parseThinkOutput(text);
       if (parsed.evidence_requests.length && refineRounds < maxRefine) {
         progress('refining', { message: `Executing ${parsed.evidence_requests.length} evidence requests` });
@@ -399,12 +390,15 @@ export async function runDeferredJob(jobId: string, input: DeferredRunInput, job
         final_answer: parsed.final_answer,
         evidence_packet: packet,
         tools_invoked: allTools,
+        think_sync: thinkBatchFallback || !useBatchThink,
+        think_batch_fallback: thinkBatchFallback,
+        execution_surface: 'pi_mcp',
         think_model: resolved.think_profile?.model_slug ?? resolved.think_model,
         refine_rounds: refineRounds,
         raw_think_excerpt: text.slice(0, 2000),
         config_echo: {
           ...configEcho,
-          think_api_family: resolved.think_profile?.api_family,
+          think_api_family: lastThinkApiFamily ?? resolved.think_profile?.api_family,
           think_model: resolved.think_profile ? profileModelId(resolved.think_profile) : undefined,
         },
       });

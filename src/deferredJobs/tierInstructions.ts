@@ -1,10 +1,13 @@
 import type { InferenceProfileV2 } from './inferenceProfile';
 
 export const GATHER_TIER_ADDENDUM =
-  'Deferred gather tier: use MCP tools when you need external facts, then answer the research goal.';
+  'Deferred gather tier (orchestration): use MCP tools on the connector for external facts. ' +
+  'You may receive follow-up evidence_requests from the think tier — run tools again to fill gaps before answering. ' +
+  'This tier runs on the Pi connector; the TypingMind browser does not need to stay open after the job starts.';
 
 export const THINK_TIER_ADDENDUM =
-  'Deferred think tier: synthesize the best final answer from the evidence packet.';
+  'Deferred think tier (deep synthesis): produce the best final answer from the evidence packet. ' +
+  'If critical gaps remain, include evidence_requests (max 3) so the gather tier can run another tool pass.';
 
 /** Preserve TM system/instructions; append only a short job-specific addendum. */
 export function composeTierInstructions(tmInstructions: string | undefined, addendum: string): string {

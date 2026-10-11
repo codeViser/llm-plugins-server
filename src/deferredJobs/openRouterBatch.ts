@@ -49,11 +49,13 @@ export async function submitOpenRouterBatch(params: BatchSubmitParams): Promise<
   } catch (error) {
     throw openRouterBatchHttpError(error, 'submit');
   }
-  const body = res.body as { id?: string; status?: string };
-  if (!body.id) {
+  const raw = res.body as { id?: string; status?: string; data?: { id?: string; status?: string } };
+  const id = raw.id ?? raw.data?.id;
+  const status = raw.status ?? raw.data?.status;
+  if (!id) {
     throw new Error('OpenRouter batch submit missing id');
   }
-  return { id: body.id, status: body.status ?? 'validating' };
+  return { id, status: status ?? 'validating' };
 }
 
 export async function getOpenRouterBatch(apiKey: string, batchId: string): Promise<BatchStatus> {
@@ -68,6 +70,34 @@ export async function getOpenRouterBatch(apiKey: string, batchId: string): Promi
     throw openRouterBatchHttpError(error, 'poll');
   }
   return res.body as BatchStatus;
+}
+
+const POLL_NOT_FOUND_RETRIES = 8;
+const POLL_NOT_FOUND_BASE_MS = 2_000;
+
+/** OR may return 404 briefly after 202 submit until the batch is readable. */
+export async function getOpenRouterBatchWhenReady(
+  apiKey: string,
+  batchId: string,
+  options: { notFoundRetries?: number } = {}
+): Promise<BatchStatus> {
+  const retries = options.notFoundRetries ?? POLL_NOT_FOUND_RETRIES;
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await getOpenRouterBatch(apiKey, batchId);
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      const isNotFound = /HTTP 404/i.test(message) || /not found/i.test(message);
+      if (!isNotFound || attempt >= retries) {
+        throw error;
+      }
+      const delay = POLL_NOT_FOUND_BASE_MS * (attempt + 1);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastError;
 }
 
 const TERMINAL = new Set(['completed', 'failed', 'expired', 'cancelled']);

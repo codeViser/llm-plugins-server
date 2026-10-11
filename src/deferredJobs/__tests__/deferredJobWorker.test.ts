@@ -110,7 +110,7 @@ describe('deferredJobWorker', () => {
       },
     });
     vi.spyOn(openRouterBatch, 'submitOpenRouterBatch').mockResolvedValue({ id: 'batch-1', status: 'in_progress' });
-    vi.spyOn(openRouterBatch, 'getOpenRouterBatch').mockResolvedValue({
+    vi.spyOn(openRouterBatch, 'getOpenRouterBatchWhenReady').mockResolvedValue({
       id: 'batch-1',
       status: 'completed',
       results: [],
@@ -158,7 +158,7 @@ describe('deferredJobWorker', () => {
     });
     stashDeferredRunSecrets(job.id, { openrouter: 'or-key' });
 
-    vi.spyOn(openRouterBatch, 'getOpenRouterBatch').mockResolvedValue({
+    vi.spyOn(openRouterBatch, 'getOpenRouterBatchWhenReady').mockResolvedValue({
       id: 'batch-resume',
       status: 'completed',
       results: [],
