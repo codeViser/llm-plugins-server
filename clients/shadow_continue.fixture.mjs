@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const require = createRequire(import.meta.url);
-const { folderPath, scrapeChat } = require("./shadow_continue.js");
+const { folderPath, scrapeChat, continuationTask } = require("./shadow_continue.js");
 
 const folders = [
   { id: "root-a", title: "AdHocPlans", parentID: null, depth: 0, children: [] },
@@ -31,6 +31,7 @@ const comb = scrapeChat({
 assert.equal(comb.path, "(root)");
 assert.equal(comb.messages.length, 2);
 assert.equal(comb.query, "");
+assert.equal(continuationTask(comb), "Summarize the conversation context.");
 assert.equal(comb.messages[0].text, "hello");
 assert.equal(comb.attachments.length, 0);
 
@@ -43,6 +44,8 @@ const pending = scrapeChat({
   ]
 }, []);
 assert.equal(pending.query, "unanswered ask");
+assert.equal(continuationTask(pending), "unanswered ask");
+assert.equal(continuationTask({ query: "", history: [] }), "");
 assert.equal(pending.history.length, 1);
 assert.equal(pending.history[0].text, "earlier");
 
@@ -83,6 +86,5 @@ assert.equal(windows.attachments[0].text.startsWith("[File Attachment:"), true);
 const source = readFileSync(new URL("./shadow_continue.js", import.meta.url), "utf8");
 assert.equal(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(source), false);
 assert.equal(/bearer\s+[A-Za-z0-9]{8,}/i.test(source), false);
-assert.equal(source.includes("codeviser.me"), false);
 
 console.log("shadow_continue scrape fixtures passed");

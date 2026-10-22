@@ -119,7 +119,16 @@
     return { history: kept.slice(0, -1), query: kept[kept.length - 1].text || "" };
   }
 
-  const api = { folderPath, scrapeChat, readContent, splitUnanswered };
+  const SUMMARIZE_QUERY = "Summarize the conversation context.";
+
+  function continuationTask(scraped) {
+    if (scraped && scraped.query) return scraped.query;
+    const history = scraped && scraped.history;
+    if (Array.isArray(history) && history.length) return SUMMARIZE_QUERY;
+    return "";
+  }
+
+  const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 
   if (typeof document === "undefined") return;
@@ -323,7 +332,9 @@
       form.mode.innerHTML = modes.map((name) => `<option value="${name}">${name}</option>`).join("");
       note.textContent = flows.length ? "Flows ready." : "No flows returned.";
     } catch (err) {
-      note.textContent = err.message;
+      note.textContent = err && err.message === "Failed to fetch"
+        ? "The browser could not reach the service. Check the base URL, then authenticate again."
+        : err.message;
     }
   }
 
@@ -339,17 +350,19 @@
     try {
       const chat = await openChat();
       const scraped = scrapeChat(chat, folders());
-      if (!scraped.query) {
-        note.textContent = "The chat has no unanswered user message to send.";
+      const task = continuationTask(scraped);
+      if (!task) {
+        note.textContent = "This chat has no context to send.";
         return;
       }
+      note.textContent = scraped.query ? "Reading this chat." : "Asking the flow to summarize this chat.";
       const attachments = [];
       for (const file of scraped.attachments) attachments.push(await withBytes(file));
       const response = await fetch(origin + RUNS_PATH, {
         method: "POST",
         headers: { authorization: "Bearer " + bearer, "content-type": "application/json" },
         body: JSON.stringify({
-          task: scraped.query,
+          task,
           flow: form.flow.value,
           specialization: form.mode.value,
           all_workers: form.flow.value === "adhoc",
@@ -361,7 +374,9 @@
       const ids = body.runs ? body.runs.map((item) => item.run_id).join(", ") : (body.run_id || "run");
       note.textContent = "Started " + ids;
     } catch (err) {
-      note.textContent = err.message;
+      note.textContent = err && err.message === "Failed to fetch"
+        ? "The browser could not reach the service. Check the base URL, then authenticate again."
+        : err.message;
     }
   }
 
