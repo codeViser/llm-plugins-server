@@ -1,10 +1,8 @@
 import { Request, Response, Router } from 'express';
-import { Readable } from 'stream';
 import stringify from 'json-stable-stringify';
 import { pino } from 'pino';
 
 import { env } from '@/common/utils/envConfig';
-import { RESEARCH_COUNCIL_CLIENT_ID } from '@/multiAgent/researchCouncilId';
 
 import { clients, startClient } from './mcp';
 import { authMiddleware } from './mcp.auth';
@@ -306,9 +304,6 @@ mcpRouter.post('/clients/:id/call_tools', auth, async (req: Request, res: Respon
 // Clean up resources for a client
 mcpRouter.delete('/clients/:id', auth, async (req: Request, res: Response) => {
   const { id } = req.params;
-  if (id === RESEARCH_COUNCIL_CLIENT_ID) {
-    return res.status(200).json({ message: 'builtin MCP client kept' });
-  }
   const clientEntry = clients.get(id);
 
   if (!clientEntry) {
@@ -328,55 +323,6 @@ mcpRouter.delete('/clients/:id', auth, async (req: Request, res: Response) => {
       details: error.message,
     });
   }
-});
-
-// TypingMind's private connector proxies a remote MCP URL through this route.
-// The browser cannot call the hub directly. Auth is the existing connector token.
-mcpRouter.post('/mcp-connect', auth, async (req: Request, res: Response) => {
-  const { url, options } = req.body ?? {};
-  if (!url || typeof url !== 'string') {
-    return res.status(400).json({ error: 'URL is required' });
-  }
-  let target: URL;
-  try {
-    target = new URL(url);
-  } catch {
-    return res.status(400).json({ error: 'URL is invalid' });
-  }
-  if (target.protocol !== 'http:' && target.protocol !== 'https:') {
-    return res.status(400).json({ error: 'URL must be http or https' });
-  }
-  try {
-    const response = await fetch(target, options);
-    res.status(response.status);
-    res.setHeader('Access-Control-Expose-Headers', '*');
-    response.headers.forEach((value, key) => {
-      const lower = key.toLowerCase();
-      if (
-        lower === 'content-encoding' ||
-        lower === 'content-length' ||
-        lower === 'transfer-encoding' ||
-        lower.startsWith('access-control-')
-      ) {
-        return;
-      }
-      res.setHeader(key, value);
-    });
-    if (response.body) {
-      Readable.fromWeb(response.body as import('stream/web').ReadableStream).pipe(res);
-    } else {
-      res.end();
-    }
-  } catch (error: any) {
-    logger.error('mcp-connect failed');
-    if (!res.headersSent) {
-      res.status(502).json({ error: 'Failed to reach the MCP server' });
-    }
-  }
-});
-
-mcpRouter.options('/mcp-connect', auth, (_req: Request, res: Response) => {
-  res.status(204).end();
 });
 
 export { mcpRouter };

@@ -1,14 +1,9 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import fs from 'fs';
 import path from 'path';
 
 import { pino } from 'pino';
-
-import { RESEARCH_COUNCIL_CLIENT_ID } from '@/multiAgent/researchCouncilId';
-import { registerResearchCouncilMcp } from '@/multiAgent/researchCouncilMcp';
 
 const logger = pino({ name: 'mcp-server' });
 
@@ -22,7 +17,7 @@ export const clients = new Map<
   {
     id: string;
     client: Client;
-    transport: StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport;
+    transport: StdioClientTransport;
     command: string;
     args: string[];
     env: Record<string, string>;
@@ -33,34 +28,10 @@ export const clients = new Map<
 
 // Helper function to start a client with given configuration
 export async function startClient(clientId: string, config: any) {
-  if (clientId === RESEARCH_COUNCIL_CLIENT_ID) {
-    return {
-      id: clientId,
-      message: 'builtin MCP client already registered',
-    };
-  }
-  const { command, url, args = [], env = {}, headers } = config;
+  const { command, args = [], env = {} } = config;
 
-  if (!command && !url) {
-    throw new Error('command or url is required');
-  }
-
-  if (url && !command) {
-    const remote = await connectRemoteClient(clientId, String(url), headers);
-    clients.set(clientId, {
-      id: clientId,
-      client: remote.client,
-      transport: remote.transport,
-      command: '',
-      args: [],
-      env: {},
-      config,
-      createdAt: new Date(),
-    });
-    return {
-      id: clientId,
-      message: 'MCP client started successfully',
-    };
+  if (!command) {
+    throw new Error('Command is required');
   }
 
   // Create transport for the MCP client
@@ -105,33 +76,6 @@ export async function startClient(clientId: string, config: any) {
   };
 }
 
-async function connectRemoteClient(
-  clientId: string,
-  url: string,
-  headers: Record<string, string> | undefined,
-) {
-  const requestInit = headers ? { headers } : undefined;
-  const streamable = new StreamableHTTPClientTransport(new URL(url), { requestInit });
-  const streamableClient = new Client({
-    name: `mcp-streamable-http-bridge-${clientId}`,
-    version: '1.0.0',
-  });
-  try {
-    await streamableClient.connect(streamable);
-    return { client: streamableClient, transport: streamable };
-  } catch (error) {
-    logger.info(`Streamable HTTP failed for ${clientId}, trying SSE`);
-    await streamableClient.close().catch(() => undefined);
-    const sse = new SSEClientTransport(new URL(url), { requestInit });
-    const sseClient = new Client({
-      name: `mcp-sse-http-bridge-${clientId}`,
-      version: '1.0.0',
-    });
-    await sseClient.connect(sse);
-    return { client: sseClient, transport: sse };
-  }
-}
-
 // Graceful shutdown handling
 process.on('SIGINT', async () => {
   logger.info('Shutting down server...');
@@ -148,5 +92,3 @@ process.on('SIGINT', async () => {
 
   process.exit(0);
 });
-
-registerResearchCouncilMcp(clients as Map<string, any>);
