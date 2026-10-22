@@ -30,8 +30,21 @@ const comb = scrapeChat({
 }, []);
 assert.equal(comb.path, "(root)");
 assert.equal(comb.messages.length, 2);
+assert.equal(comb.query, "");
 assert.equal(comb.messages[0].text, "hello");
 assert.equal(comb.attachments.length, 0);
+
+const pending = scrapeChat({
+  chatTitle: "pending",
+  folderID: null,
+  messages: [
+    { role: "assistant", uuid: "a", content: "earlier" },
+    { role: "user", uuid: "u", content: [{ type: "text", text: "unanswered ask" }] }
+  ]
+}, []);
+assert.equal(pending.query, "unanswered ask");
+assert.equal(pending.history.length, 1);
+assert.equal(pending.history[0].text, "earlier");
 
 const windows = scrapeChat({
   chatTitle: "WindowsAB-4",
@@ -59,6 +72,7 @@ const windows = scrapeChat({
   ]
 }, folders);
 assert.equal(windows.messages.length, 1);
+assert.equal(windows.query, "");
 assert.equal(windows.messages[0].role, "summary");
 assert.equal(windows.messages[0].text, "SUMMARY_MARK");
 assert.equal(windows.attachments.length, 1);
@@ -69,5 +83,6 @@ assert.equal(windows.attachments[0].text.startsWith("[File Attachment:"), true);
 const source = readFileSync(new URL("./shadow_continue.js", import.meta.url), "utf8");
 assert.equal(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(source), false);
 assert.equal(/bearer\s+[A-Za-z0-9]{8,}/i.test(source), false);
+assert.equal(source.includes("codeviser.me"), false);
 
 console.log("shadow_continue scrape fixtures passed");
