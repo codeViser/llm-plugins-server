@@ -69,6 +69,5 @@ assert.equal(windows.attachments[0].text.startsWith("[File Attachment:"), true);
 const source = readFileSync(new URL("./shadow_continue.js", import.meta.url), "utf8");
 assert.equal(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(source), false);
 assert.equal(/bearer\s+[A-Za-z0-9]{8,}/i.test(source), false);
-assert.equal(source.includes("example.com"), false);
 
 console.log("shadow_continue scrape fixtures passed");

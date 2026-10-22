@@ -1,3 +1,5 @@
+import path from 'path';
+
 import { defineConfig } from 'tsup';
 
 export default defineConfig({
@@ -6,4 +8,9 @@ export default defineConfig({
   sourcemap: true,
   clean: true,
   external: ['better-sqlite3'],
+  esbuildOptions(options) {
+    options.alias = {
+      '@': path.resolve(__dirname, 'src'),
+    };
+  },
 });

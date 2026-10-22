@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Unified terminal helper for Research Council state + notifications on the Pi.
+# Installed on PATH as `council` (symlink to this file in the server repo).
+set -euo pipefail
+
+# Resolve the real scripts dir even when invoked via a symlink.
+SRC="${BASH_SOURCE[0]}"
+while [ -h "$SRC" ]; do
+  DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+  SRC="$(readlink "$SRC")"
+  [[ "$SRC" != /* ]] && SRC="$DIR/$SRC"
+done
+DIR="$(cd -P "$(dirname "$SRC")" && pwd)"
+STATUS="$DIR/council-status.py"
+NOTIFY="$DIR/council-notify.py"
+
+pm2_path() { echo "$HOME/.nvm/versions/node/v22.17.0/bin"; }
+
+usage() {
+  cat <<'EOF'
+council — inspect Research Council jobs and notifications (Pi terminal)
+
+STATUS (reads SQLite directly; no token, no API cost):
+  council list [--status running|done|error] [--limit N]   list councils
+  council show <job_id>                                     full answer + meta (id prefix ok)
+  council watch                                             live-refreshing list
+  council json                                              list as JSON
+
+NOTIFY (tracker -> OpenClaw -> Telegram):
+  council notify-config      show delivery config (redacted): transport, OpenClaw CLI, target
+  council notify-test        send one test message now (via OpenClaw)
+  council notify-once        run one detect+deliver pass now
+  council notify-logs        tail the council-notify pm2 service logs
+  council notify-status      pm2 status of the council-notify service
+
+  council help               this help
+EOF
+}
+
+cmd="${1:-help}"; shift || true
+case "$cmd" in
+  list)         exec python3 "$STATUS" list "$@" ;;
+  show)         exec python3 "$STATUS" show "$@" ;;
+  watch)        exec python3 "$STATUS" watch "$@" ;;
+  json)         exec python3 "$STATUS" list --json "$@" ;;
+  notify-config) exec python3 "$NOTIFY" --print-config ;;
+  notify-test)   exec python3 "$NOTIFY" --test ;;
+  notify-once)   exec python3 "$NOTIFY" --once "$@" ;;
+  notify-logs)   exec env PATH="$(pm2_path):$PATH" pm2 logs council-notify --lines "${1:-30}" --nostream ;;
+  notify-status) exec env PATH="$(pm2_path):$PATH" pm2 describe council-notify ;;
+  help|-h|--help) usage ;;
+  *) echo "unknown command: $cmd"; echo; usage; exit 1 ;;
+esac
