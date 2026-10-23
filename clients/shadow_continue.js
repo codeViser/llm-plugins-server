@@ -42,8 +42,49 @@
       name: String(name),
       mime: String(meta.type || "application/octet-stream"),
       text: typeof record.text === "string" ? record.text : "",
-      blobId: String(meta.localBlobID || refId || record.id || "")
+      blobId: String(meta.localBlobID || refId || record.id || ""),
+      size: Number(meta.size || 0)
     };
+  }
+
+  function blobIsUsable(type, size, expectedSize, magic) {
+    if (!size || size <= 32) return false;
+    if (type === "text/html") return false;
+    if (expectedSize && size !== expectedSize) return false;
+    if (type === "application/pdf" && magic !== "%PDF-") return false;
+    return true;
+  }
+
+  function attachmentPlaceholder(file) {
+    if (file.text && file.text.startsWith("[File Attachment:")) return file.text;
+    return "[File Attachment: " + file.name + "]";
+  }
+
+  function composeMessage(message, registry) {
+    const content = message && message.content;
+    const files = [];
+    if (typeof content === "string") return { text: content, files };
+    if (!Array.isArray(content)) {
+      return { text: typeof message.pluginResponse === "string" ? message.pluginResponse : "", files };
+    }
+    const pieces = [];
+    content.forEach((part) => {
+      if (!part || typeof part !== "object") return;
+      if (part.type === "text" && part.text) {
+        pieces.push(String(part.text));
+        return;
+      }
+      if (part.type === "thinking") return;
+      let file = null;
+      if (part.type === "tm_blob_file") file = fileRecord(part, part.id);
+      else if (part.type === "tm_attachment_ref" && registry && registry[part.id]) file = fileRecord(registry[part.id], part.id);
+      if (!file) return;
+      files.push(file);
+      pieces.push(attachmentPlaceholder(file));
+    });
+    let text = pieces.join("\n");
+    if (!text && message && typeof message.pluginResponse === "string") text = message.pluginResponse;
+    return { text, files };
   }
 
   function filesFromMessage(message, registry) {
@@ -75,10 +116,10 @@
   }
 
   function pushMessage(out, message, registry) {
-    const files = filesFromMessage(message, registry);
-    const read = readContent(message.content);
+    const read = composeMessage(message, registry);
+    const files = read.files;
     const calls = toolCalls(message);
-    const text = read.text || (typeof message.pluginResponse === "string" ? message.pluginResponse : "");
+    const text = read.text;
     if (!text && !calls.length && !files.length && message.role !== "tool") return;
     out.push({
       role: message.role || message.type || "message",
@@ -163,7 +204,7 @@
     return "";
   }
 
-  const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask };
+  const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask, blobIsUsable };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 
   if (typeof document === "undefined") return;
@@ -220,14 +261,36 @@
     return localStorage.getItem(TOKEN_KEY) || "";
   }
 
-  async function captureBlob(file) {
-    const button = [...document.querySelectorAll("button")].find((el) => (el.textContent || "").includes(file.name));
-    if (!button) return "";
-    let captured = null;
+  function viewButton(name) {
+    return [...document.querySelectorAll("button")].find((el) => (el.getAttribute("aria-label") || "") === "View " + name);
+  }
+
+  function closeViewer() {
+    const button = [...document.querySelectorAll("button")].find((el) => (el.getAttribute("aria-label") || "") === "Close");
+    if (button) button.click();
+  }
+
+  async function blobMagic(blob) {
+    const head = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+    return String.fromCharCode(...head);
+  }
+
+  async function captureByView(file) {
+    let button = viewButton(file.name);
+    if (!button) {
+      const scroller = document.querySelector(".flex-grow.overflow-y-auto");
+      if (scroller) {
+        scroller.scrollTop = scroller.scrollHeight;
+        await new Promise((resolve) => setTimeout(resolve, 400));
+        button = viewButton(file.name);
+      }
+    }
+    if (!button) return null;
+    const seen = [];
     const originalCreate = URL.createObjectURL;
     const originalClick = HTMLAnchorElement.prototype.click;
     URL.createObjectURL = function (blob) {
-      captured = blob;
+      seen.push(blob);
       return originalCreate.call(URL, blob);
     };
     HTMLAnchorElement.prototype.click = function () {
@@ -237,13 +300,24 @@
     try {
       button.click();
       await new Promise((resolve) => setTimeout(resolve, 1500));
-      return captured ? await blobToBase64(captured) : "";
-    } catch (err) {
-      return captured ? await blobToBase64(captured) : "";
+      for (const blob of seen) {
+        const magic = blob && blob.type === "application/pdf" ? await blobMagic(blob) : "";
+        if (blob && blobIsUsable(blob.type, blob.size, file.size, magic)) return blob;
+      }
+      return null;
     } finally {
       URL.createObjectURL = originalCreate;
       HTMLAnchorElement.prototype.click = originalClick;
+      closeViewer();
     }
+  }
+
+  async function storedBlob(file) {
+    if (!file.blobId) return null;
+    const stored = await idbGet("BLOB_" + file.blobId);
+    if (!stored || typeof stored.arrayBuffer !== "function") return null;
+    const magic = stored.type === "application/pdf" ? await blobMagic(stored) : "";
+    return blobIsUsable(stored.type || file.mime, stored.size, file.size, magic) ? stored : null;
   }
 
   function blobToBase64(blob) {
@@ -259,17 +333,14 @@
   }
 
   async function withBytes(file) {
-    let data = "";
-    if (file.blobId) {
-      const stored = await idbGet("BLOB_" + file.blobId);
-      if (stored && typeof stored.arrayBuffer === "function") data = await blobToBase64(stored);
-    }
-    if (!data) data = await captureBlob(file);
+    const blob = (await captureByView(file)) || (await storedBlob(file));
+    const data = blob ? await blobToBase64(blob) : "";
     return {
       name: file.name,
       mime: file.mime,
       text: file.text,
       data_base64: data,
+      bytes: blob ? blob.size : 0,
       on_query: Boolean(file.onQuery)
     };
   }
@@ -303,7 +374,7 @@
         font-size: 16px; line-height: 1;
       }
       #shadowContinue-panel button.primary { background: #38a169; border-color: #2f855a; color: #f0fff4; }
-      #shadowContinue-panel [data-note] { margin: 0; min-height: 1.1rem; font-size: 12px; color: #a0aec0; }
+      #shadowContinue-panel [data-note] { margin: 0; min-height: 1.1rem; font-size: 12px; color: #a0aec0; white-space: pre-line; }
     `;
     document.head.appendChild(style);
   }
@@ -418,7 +489,10 @@
       const body = await readJson(response);
       if (!response.ok) throw new Error(body.error || "run failed");
       const ids = body.runs ? body.runs.map((item) => item.run_id).join(", ") : (body.run_id || "run");
-      note.textContent = "Started " + ids;
+      const captured = attachments.length
+        ? attachments.map((file) => file.name + " · " + (file.bytes ? file.bytes + " bytes" : "not captured")).join("\n")
+        : "No attachments";
+      note.textContent = "Started " + ids + "\n" + captured;
     } catch (err) {
       note.textContent = err && err.message === "Failed to fetch"
         ? "The browser could not reach the service. Check the base URL, then authenticate again."

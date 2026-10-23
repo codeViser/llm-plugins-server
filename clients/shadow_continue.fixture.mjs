@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const require = createRequire(import.meta.url);
-const { folderPath, scrapeChat, continuationTask } = require("./shadow_continue.js");
+const { folderPath, scrapeChat, continuationTask, blobIsUsable } = require("./shadow_continue.js");
 
 const folders = [
   { id: "root-a", title: "AdHocPlans", parentID: null, depth: 0, children: [] },
@@ -113,7 +113,8 @@ const filed = scrapeChat({
     }
   ]
 }, []);
-assert.equal(filed.query, "Does this file help");
+assert.equal(filed.query, "Does this file help\n[File Attachment: sample.pdf]");
+assert.equal(filed.history[0].text.includes("[File Attachment: notes.txt]"), true);
 assert.equal(filed.history.length, 2);
 assert.equal(filed.history[1].text, "visible answer");
 assert.equal(filed.history[1].text.includes("hidden thought"), false);
@@ -125,20 +126,26 @@ assert.equal(filed.attachments[1].name, "sample.pdf");
 assert.equal(filed.attachments[1].mime, "application/pdf");
 assert.equal(filed.attachments[1].onQuery, true);
 assert.equal(filed.attachments[1].blobId, "ref-1");
-assert.equal(continuationTask(filed), "Does this file help");
+assert.equal(continuationTask(filed), "Does this file help\n[File Attachment: sample.pdf]");
 
 const fileOnly = scrapeChat({
   attachmentRegistry: registry,
   messages: [{ role: "user", uuid: "only", content: [{ type: "tm_attachment_ref", id: "ref-1" }] }]
 }, []);
-assert.equal(fileOnly.query, "");
+assert.equal(fileOnly.query, "[File Attachment: sample.pdf]");
 assert.equal(fileOnly.attachments[0].onQuery, true);
-assert.equal(continuationTask(fileOnly), "Use the attached files.");
+assert.equal(continuationTask(fileOnly), "[File Attachment: sample.pdf]");
+assert.equal(blobIsUsable("application/pdf", 241219, 241219, "%PDF-"), true);
+assert.equal(blobIsUsable("text/html", 1752298, 241219, ""), false);
+assert.equal(blobIsUsable("application/pdf", 97, 241219, "%PDF-"), false);
+assert.equal(blobIsUsable("application/pdf", 241219, 241219, "XXXXX"), false);
 
 const source = readFileSync(new URL("./shadow_continue.js", import.meta.url), "utf8");
 assert.equal(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(source), false);
 assert.equal(/bearer\s+[A-Za-z0-9]{8,}/i.test(source), false);
 assert.equal(source.includes("BLOB_"), true);
+assert.equal(source.includes('=== "View "'), true);
+assert.equal(source.includes("text/html"), true);
 assert.equal(source.includes("tm_attachment_ref"), true);
 assert.equal(source.includes("sync-v2"), false);
 
