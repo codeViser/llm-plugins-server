@@ -44,7 +44,8 @@
       mime: String(meta.type || "application/octet-stream"),
       text: typeof record.text === "string" ? record.text : "",
       blobId: String(meta.localBlobID || refId || record.id || ""),
-      size: Number(meta.size || 0)
+      size: Number(meta.size || 0),
+      record
     };
   }
 
@@ -131,13 +132,43 @@
     });
   }
 
+  function summaryText(message) {
+    const text = message && message.contextSummary && message.contextSummary.content;
+    return typeof text === "string" ? text : "";
+  }
+
+  function summaryHasBody(text) {
+    return text.replace(/<\/?CONVERSATION_SUMMARY>/g, "").trim().length > 0;
+  }
+
+  function lastUsableSummary(messages) {
+    let chosen = null;
+    messages.forEach((message) => {
+      if (!message || message.type !== "tm_context_summary") return;
+      if (summaryHasBody(summaryText(message))) chosen = message;
+    });
+    return chosen;
+  }
+
+  function preContextNote(files) {
+    const lines = files.map((file) => "- " + file.name);
+    return {
+      role: "files",
+      text: [
+        "Pre-context summarization documents.",
+        "These files were attached before the last context summary. Their original turns are not repeated.",
+        lines.join("\n")
+      ].join("\n"),
+      tool_calls: [],
+      tool_call_id: "",
+      files: []
+    };
+  }
+
   function scrapeChat(chat, folders) {
     const messages = (chat && chat.messages) || [];
     const registry = chat && chat.attachmentRegistry;
-    let summary = null;
-    messages.forEach((message) => {
-      if (message && message.type === "tm_context_summary") summary = message;
-    });
+    const summary = lastUsableSummary(messages);
     const kept = [];
     const summarizedFiles = [];
     if (summary && summary.contextSummary && summary.contextSummary.content) {
@@ -165,6 +196,12 @@
         if (!message || message.type === "tm_context_summary" || message.contextClearedAt) return;
         pushMessage(kept, message, registry);
       });
+    }
+    const unanswered = Boolean(kept.length) && kept[kept.length - 1].role === "user";
+    if (summarizedFiles.length) {
+      const note = preContextNote(summarizedFiles);
+      if (unanswered) kept.splice(kept.length - 1, 0, note);
+      else kept.push(note);
     }
     const split = splitUnanswered(kept);
     const queryIsLast = Boolean(kept.length) && split.history.length !== kept.length;
@@ -297,7 +334,8 @@
   }
 
   function viewButton(name) {
-    return [...document.querySelectorAll("button")].find((el) => (el.getAttribute("aria-label") || "") === "View " + name);
+    const label = "View " + name;
+    return [...document.querySelectorAll("button")].find((el) => (el.getAttribute("aria-label") || "") === label);
   }
 
   function closeViewer() {
@@ -305,22 +343,30 @@
     if (button) button.click();
   }
 
+  function viewerOpener() {
+    const button = [...document.querySelectorAll("button")].find((el) => {
+      const label = el.getAttribute("aria-label") || "";
+      return label.startsWith("View ") && label !== "View assistant";
+    });
+    if (!button) return null;
+    const fiberKey = Object.keys(button).find((key) => key.startsWith("__reactFiber"));
+    let node = fiberKey ? button[fiberKey] : null;
+    let guard = 0;
+    while (node && guard < 40) {
+      const props = node.memoizedProps;
+      if (props && typeof props.onViewAttachment === "function") return props.onViewAttachment;
+      node = node.return;
+      guard += 1;
+    }
+    return null;
+  }
+
   async function blobMagic(blob) {
     const head = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
     return String.fromCharCode(...head);
   }
 
-  async function captureByView(file) {
-    let button = viewButton(file.name);
-    if (!button) {
-      const scroller = document.querySelector(".flex-grow.overflow-y-auto");
-      if (scroller) {
-        scroller.scrollTop = scroller.scrollHeight;
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        button = viewButton(file.name);
-      }
-    }
-    if (!button) return null;
+  async function blobsFrom(action) {
     const seen = [];
     const originalCreate = URL.createObjectURL;
     const originalClick = HTMLAnchorElement.prototype.click;
@@ -333,18 +379,59 @@
       return originalClick.call(this);
     };
     try {
-      button.click();
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      for (const blob of seen) {
-        const magic = blob && blob.type === "application/pdf" ? await blobMagic(blob) : "";
-        if (blob && blobIsUsable(blob.type, blob.size, file.size, magic)) return blob;
-      }
-      return null;
+      action();
+      await new Promise((resolve) => setTimeout(resolve, 1600));
+      return seen;
     } finally {
       URL.createObjectURL = originalCreate;
       HTMLAnchorElement.prototype.click = originalClick;
       closeViewer();
     }
+  }
+
+  async function firstUsable(file, blobs) {
+    for (const blob of blobs) {
+      if (!blob) continue;
+      const magic = blob.type === "application/pdf" ? await blobMagic(blob) : "";
+      if (blobIsUsable(blob.type, blob.size, file.size, magic)) return blob;
+    }
+    return null;
+  }
+
+  async function ensureViewerOpener() {
+    const ready = viewerOpener();
+    if (ready) return ready;
+    const scroller = document.querySelector(".flex-grow.overflow-y-auto");
+    if (!scroller) return null;
+    const start = scroller.scrollTop;
+    const step = Math.max(240, Math.floor(scroller.clientHeight * 0.7) || 400);
+    let top = 0;
+    for (let guard = 0; guard < 40; guard += 1) {
+      scroller.scrollTop = top;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      const opened = viewerOpener();
+      if (opened) {
+        scroller.scrollTop = start;
+        return opened;
+      }
+      if (top >= scroller.scrollHeight) break;
+      top += step;
+    }
+    scroller.scrollTop = start;
+    return null;
+  }
+
+  async function captureByView(file) {
+    const button = viewButton(file.name);
+    if (button) {
+      const blobs = await blobsFrom(() => button.click());
+      const usable = await firstUsable(file, blobs);
+      if (usable) return usable;
+    }
+    const open = await ensureViewerOpener();
+    if (!open || !file.record) return null;
+    const blobs = await blobsFrom(() => open({ attachment: file.record }));
+    return firstUsable(file, blobs);
   }
 
   async function storedBlob(file) {

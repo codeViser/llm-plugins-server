@@ -6,6 +6,7 @@ import { env } from '@/common/utils/envConfig';
 
 import { clients, startClient } from './mcp';
 import { authMiddleware } from './mcp.auth';
+import { proxyMcpConnect } from './mcp.connect';
 
 const mcpRouter = Router();
 const logger = pino({ name: 'mcp-router' });
@@ -19,6 +20,12 @@ const auth = authMiddleware(authToken || 'dummy-token');
 // Health check endpoint
 mcpRouter.get('/ping', auth, (req: Request, res: Response) => {
   res.status(200).json({ status: 'ok' });
+});
+
+// Fetch proxy used by TypingMind for remote HTTP MCP servers.
+// Must stay registered here so unknown paths do not fall through to Swagger HTML.
+mcpRouter.post('/mcp-connect', auth, (req: Request, res: Response) => {
+  void proxyMcpConnect(req, res);
 });
 
 // Start MCP clients using Claude Desktop config format
