@@ -6,6 +6,7 @@
   const TOKEN_KEY = `typingmind.extension.${EXTENSION_ID}.token`;
   const FLOWS_PATH = "/shadow/v1/flows";
   const RUNS_PATH = "/shadow/v1/runs";
+  const CONNECTION_KEY = "shadowContinue.connectionOpen";
   const ATTR = "data-shadow-continue";
 
   function folderPath(folders, folderId) {
@@ -138,6 +139,7 @@
       if (message && message.type === "tm_context_summary") summary = message;
     });
     const kept = [];
+    const summarizedFiles = [];
     if (summary && summary.contextSummary && summary.contextSummary.content) {
       kept.push({
         role: "summary",
@@ -151,6 +153,7 @@
       messages.forEach((message) => {
         if (!message || message.type === "tm_context_summary") return;
         if (!passed) {
+          summarizedFiles.push(...composeMessage(message, registry).files);
           if (message.uuid === cutoff || message.id === cutoff) passed = true;
           return;
         }
@@ -166,6 +169,7 @@
     const split = splitUnanswered(kept);
     const queryIsLast = Boolean(kept.length) && split.history.length !== kept.length;
     const attachments = [];
+    summarizedFiles.forEach((file) => attachments.push({ ...file, onQuery: false }));
     kept.forEach((message, index) => {
       const onQuery = queryIsLast && index === kept.length - 1;
       (message.files || []).forEach((file) => attachments.push({ ...file, onQuery }));
@@ -204,7 +208,34 @@
     return "";
   }
 
-  const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask, blobIsUsable };
+  function formatStartSummary(scraped, ids, attachments) {
+    const messages = (scraped && scraped.messages) || [];
+    let user = 0;
+    let assistant = 0;
+    let tool = 0;
+    let summary = 0;
+    let calls = 0;
+    messages.forEach((message) => {
+      const role = message && message.role;
+      if (role === "user") user += 1;
+      else if (role === "assistant") assistant += 1;
+      else if (role === "tool") tool += 1;
+      else if (role === "summary") summary += 1;
+      const listed = message && message.tool_calls;
+      if (Array.isArray(listed)) calls += listed.length;
+    });
+    const files = Array.isArray(attachments) ? attachments : [];
+    const fileLine = files.length
+      ? files.map((file) => (file && file.name ? file.name : "file") + " · " + (file && file.bytes ? file.bytes + " bytes" : "not captured")).join("\n")
+      : "No attachments";
+    return [
+      "Started " + (ids || "run"),
+      user + " user · " + assistant + " assistant · " + tool + " tool · " + calls + " tool calls · " + summary + " summary",
+      fileLine
+    ].join("\n");
+  }
+
+  const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask, blobIsUsable, formatStartSummary };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 
   if (typeof document === "undefined") return;
@@ -351,32 +382,46 @@
     style.id = "shadow-continue-styles";
     style.textContent = `
       #shadowContinue-panel {
-        position: fixed; top: 4.2rem; right: 1rem; z-index: 80;
-        width: min(22rem, 92vw); display: none;
+        position: fixed; top: 3.4rem; right: 0.6rem; z-index: 80;
+        width: min(18rem, 92vw); display: none;
         background: #2d3748; color: #e2e8f0;
         border: 1px solid #4a5568; border-radius: 8px;
-        padding: 14px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
+        padding: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
         font-family: ui-sans-serif, system-ui, sans-serif;
       }
-      #shadowContinue-panel.is-open { display: grid; gap: 8px; }
-      #shadowContinue-panel h3 { margin: 0 0 4px; font-size: 14px; font-weight: 650; }
-      #shadowContinue-panel label { display: grid; gap: 4px; font-size: 12px; color: #e2e8f0; }
+      #shadowContinue-panel.is-open { display: grid; gap: 6px; }
+      #shadowContinue-panel h3 { margin: 0; font-size: 13px; font-weight: 650; }
+      #shadowContinue-panel label { display: grid; gap: 3px; font-size: 11px; color: #e2e8f0; }
       #shadowContinue-panel input, #shadowContinue-panel select {
-        width: 100%; box-sizing: border-box; padding: 8px 10px;
+        width: 100%; box-sizing: border-box; padding: 6px 8px;
         border: 1px solid #4a5568; border-radius: 4px;
         background: #1a202c; color: #f8fafc;
-        font-size: 14px; font-family: ui-monospace, monospace;
+        font-size: 12px; font-family: ui-monospace, monospace;
       }
       #shadowContinue-panel .row { display: flex; gap: 6px; justify-content: flex-end; }
       #shadowContinue-panel button {
-        min-width: 2.2rem; padding: 6px 10px; border-radius: 4px; cursor: pointer;
+        min-width: 2rem; padding: 5px 8px; border-radius: 4px; cursor: pointer;
         border: 1px solid #4a5568; background: #4a5568; color: #e2e8f0;
-        font-size: 16px; line-height: 1;
+        font-size: 14px; line-height: 1;
       }
       #shadowContinue-panel button.primary { background: #38a169; border-color: #2f855a; color: #f0fff4; }
-      #shadowContinue-panel [data-note] { margin: 0; min-height: 1.1rem; font-size: 12px; color: #a0aec0; white-space: pre-line; }
+      #shadowContinue-panel [data-connection-toggle] { width: 100%; text-align: left; font-size: 11px; min-width: 0; }
+      #shadowContinue-panel [data-connection] { display: grid; gap: 6px; }
+      #shadowContinue-panel [data-note] { margin: 0; min-height: 1.1rem; font-size: 11px; color: #a0aec0; white-space: pre-line; }
     `;
     document.head.appendChild(style);
+  }
+
+  function connectionStoredOpen() {
+    try { return localStorage.getItem(CONNECTION_KEY) !== "0"; } catch (err) { return true; }
+  }
+
+  function setConnection(form, open) {
+    const block = form.querySelector("[data-connection]");
+    const toggle = form.querySelector("[data-connection-toggle]");
+    if (block) block.hidden = !open;
+    if (toggle) toggle.textContent = open ? "Connection ▾" : "Connection ▸";
+    try { localStorage.setItem(CONNECTION_KEY, open ? "1" : "0"); } catch (err) { /* private mode */ }
   }
 
   function panel() {
@@ -387,11 +432,15 @@
     node.id = "shadowContinue-panel";
     node.innerHTML = `
       <h3>Shadow continuation</h3>
-      <label>Base URL <input name="base" type="url" autocomplete="off" spellcheck="false"></label>
-      <label>Bearer <input name="token" type="password" autocomplete="off" spellcheck="false"></label>
-      <div class="row"><button type="button" data-auth title="Authenticate" aria-label="Authenticate">⚿</button></div>
+      <button type="button" data-connection-toggle>Connection ▾</button>
+      <div data-connection>
+        <label>Base URL <input name="base" type="url" autocomplete="off" spellcheck="false"></label>
+        <label>Bearer <input name="token" type="password" autocomplete="off" spellcheck="false"></label>
+        <div class="row"><button type="button" data-auth title="Authenticate" aria-label="Authenticate">⚿</button></div>
+      </div>
       <label>Flow <select name="flow"></select></label>
       <label>Mode <select name="mode"></select></label>
+      <label>Instances <input name="instances" type="number" min="1" max="16" value="1"></label>
       <p data-note></p>
       <div class="row">
         <button type="button" data-close title="Close" aria-label="Close">✕</button>
@@ -403,11 +452,18 @@
       event.stopPropagation();
       node.classList.remove("is-open");
     });
+    node.querySelector("[data-connection-toggle]").addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const open = node.querySelector("[data-connection]").hidden;
+      setConnection(node, open);
+    });
     node.querySelector("[data-auth]").addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       loadFlows(node);
     });
+    setConnection(node, connectionStoredOpen());
     node.addEventListener("submit", (event) => {
       event.preventDefault();
       start(node);
@@ -448,6 +504,7 @@
       form.flow.innerHTML = flowNames.map((name) => `<option value="${name}">${name}</option>`).join("");
       form.mode.innerHTML = modes.map((name) => `<option value="${name}">${name}</option>`).join("");
       note.textContent = flows.length ? "Flows ready." : "No flows returned.";
+      if (flows.length) setConnection(form, false);
     } catch (err) {
       note.textContent = err && err.message === "Failed to fetch"
         ? "The browser could not reach the service. Check the base URL, then authenticate again."
@@ -482,17 +539,14 @@
           task,
           flow: form.flow.value,
           specialization: form.mode.value,
-          all_workers: form.flow.value === "adhoc",
+          instances: Math.min(16, Math.max(1, Number(form.instances.value) || 1)),
           context: { messages: scraped.history, attachments }
         })
       });
       const body = await readJson(response);
       if (!response.ok) throw new Error(body.error || "run failed");
       const ids = body.runs ? body.runs.map((item) => item.run_id).join(", ") : (body.run_id || "run");
-      const captured = attachments.length
-        ? attachments.map((file) => file.name + " · " + (file.bytes ? file.bytes + " bytes" : "not captured")).join("\n")
-        : "No attachments";
-      note.textContent = "Started " + ids + "\n" + captured;
+      note.textContent = formatStartSummary(scraped, ids, attachments);
     } catch (err) {
       note.textContent = err && err.message === "Failed to fetch"
         ? "The browser could not reach the service. Check the base URL, then authenticate again."
