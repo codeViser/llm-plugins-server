@@ -235,7 +235,11 @@
     ].join("\n");
   }
 
-  const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask, blobIsUsable, formatStartSummary };
+  function runsReady(flowCount) {
+    return Number(flowCount) > 0;
+  }
+
+  const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask, blobIsUsable, formatStartSummary, runsReady };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 
   if (typeof document === "undefined") return;
@@ -405,8 +409,14 @@
         font-size: 14px; line-height: 1;
       }
       #shadowContinue-panel button.primary { background: #38a169; border-color: #2f855a; color: #f0fff4; }
+      #shadowContinue-panel button.primary:disabled {
+        background: #1a202c; border-color: #2d3748; color: #718096;
+        cursor: not-allowed; pointer-events: none; opacity: 0.72;
+      }
       #shadowContinue-panel [data-connection-toggle] { width: 100%; text-align: left; font-size: 11px; min-width: 0; }
-      #shadowContinue-panel [data-connection] { display: grid; gap: 6px; }
+      #shadowContinue-panel [data-connection]:not([hidden]) { display: grid; gap: 6px; }
+      #shadowContinue-panel [data-connection][hidden],
+      #shadowContinue-panel [data-connection].is-collapsed { display: none !important; }
       #shadowContinue-panel [data-note] { margin: 0; min-height: 1.1rem; font-size: 11px; color: #a0aec0; white-space: pre-line; }
     `;
     document.head.appendChild(style);
@@ -419,9 +429,29 @@
   function setConnection(form, open) {
     const block = form.querySelector("[data-connection]");
     const toggle = form.querySelector("[data-connection-toggle]");
-    if (block) block.hidden = !open;
-    if (toggle) toggle.textContent = open ? "Connection ▾" : "Connection ▸";
+    if (block) {
+      block.hidden = !open;
+      block.classList.toggle("is-collapsed", !open);
+    }
+    if (toggle) {
+      toggle.textContent = open ? "Connection ▾" : "Connection ▸";
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    }
     try { localStorage.setItem(CONNECTION_KEY, open ? "1" : "0"); } catch (err) { /* private mode */ }
+  }
+
+  function setRunsReady(form, ready) {
+    const button = form.querySelector("[data-start]");
+    if (!button) return;
+    button.disabled = !ready;
+    button.title = ready ? "Start" : "Authenticate before starting a run";
+    button.setAttribute("aria-disabled", ready ? "false" : "true");
+  }
+
+  function lockRuns(form) {
+    form.flow.innerHTML = "";
+    form.mode.innerHTML = "";
+    setRunsReady(form, false);
   }
 
   function panel() {
@@ -444,7 +474,7 @@
       <p data-note></p>
       <div class="row">
         <button type="button" data-close title="Close" aria-label="Close">✕</button>
-        <button class="primary" type="submit" title="Start" aria-label="Start">▶</button>
+        <button class="primary" type="submit" data-start disabled title="Authenticate before starting a run" aria-label="Start" aria-disabled="true">▶</button>
       </div>`;
     node.addEventListener("click", (event) => event.stopPropagation());
     node.querySelector("[data-close]").addEventListener("click", (event) => {
@@ -463,6 +493,9 @@
       event.stopPropagation();
       loadFlows(node);
     });
+    node.base.addEventListener("input", () => lockRuns(node));
+    node.token.addEventListener("input", () => lockRuns(node));
+    setRunsReady(node, false);
     setConnection(node, connectionStoredOpen());
     node.addEventListener("submit", (event) => {
       event.preventDefault();
@@ -487,8 +520,7 @@
     localStorage.setItem(TOKEN_KEY, form.token.value);
     const origin = baseUrl();
     const bearer = token();
-    form.flow.innerHTML = "";
-    form.mode.innerHTML = "";
+    lockRuns(form);
     if (!origin || !bearer) {
       note.textContent = "Enter the base URL and bearer, then authenticate.";
       return;
@@ -503,9 +535,12 @@
       const modes = [...new Set(flows.map((item) => item.specialization))];
       form.flow.innerHTML = flowNames.map((name) => `<option value="${name}">${name}</option>`).join("");
       form.mode.innerHTML = modes.map((name) => `<option value="${name}">${name}</option>`).join("");
-      note.textContent = flows.length ? "Flows ready." : "No flows returned.";
-      if (flows.length) setConnection(form, false);
+      const ready = runsReady(flows.length);
+      setRunsReady(form, ready);
+      note.textContent = ready ? "Flows ready." : "No flows returned.";
+      if (ready) setConnection(form, false);
     } catch (err) {
+      setRunsReady(form, false);
       note.textContent = err && err.message === "Failed to fetch"
         ? "The browser could not reach the service. Check the base URL, then authenticate again."
         : err.message;
@@ -514,6 +549,11 @@
 
   async function start(form) {
     const note = form.querySelector("[data-note]");
+    const runButton = form.querySelector("[data-start]");
+    if (!runButton || runButton.disabled) {
+      note.textContent = "Authenticate before starting a run.";
+      return;
+    }
     const origin = baseUrl();
     const bearer = token();
     if (!origin || !bearer || !form.flow.value || !form.mode.value) {

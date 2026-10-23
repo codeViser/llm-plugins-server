@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const require = createRequire(import.meta.url);
-const { folderPath, scrapeChat, formatStartSummary } = require("./shadow_continue.js");
+const { folderPath, scrapeChat, formatStartSummary, runsReady } = require("./shadow_continue.js");
 
 const folders = [
   { id: "root-a", title: "AdHocPlans", parentID: null, depth: 0, children: [] },
@@ -85,6 +85,14 @@ assert.equal(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(source), false);
 assert.equal(/bearer\s+[A-Za-z0-9]{8,}/i.test(source), false);
 assert.equal(source.includes("all_workers"), false);
 assert.equal(source.includes('name="instances"'), true);
+assert.equal(runsReady(0), false);
+assert.equal(runsReady(2), true);
+assert.equal(source.includes("[data-connection][hidden]"), true);
+assert.equal(source.includes("is-collapsed"), true);
+assert.equal(source.includes("display: none !important"), true);
+assert.equal(source.includes("button.primary:disabled"), true);
+assert.equal(source.includes("data-start"), true);
+assert.equal(source.includes('type="submit" data-start disabled'), true);
 
 const summary = formatStartSummary(
   {
