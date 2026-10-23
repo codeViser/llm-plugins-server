@@ -78,13 +78,68 @@ assert.equal(windows.messages.length, 1);
 assert.equal(windows.query, "");
 assert.equal(windows.messages[0].role, "summary");
 assert.equal(windows.messages[0].text, "SUMMARY_MARK");
-assert.equal(windows.attachments.length, 1);
-assert.equal(windows.attachments[0].name, "WindowsAB-3.pdf");
-assert.equal(windows.attachments[0].mime, "application/pdf");
-assert.equal(windows.attachments[0].text.startsWith("[File Attachment:"), true);
+assert.equal(windows.attachments.length, 0);
+assert.equal(continuationTask(windows), "Summarize the conversation context.");
+
+const registry = {
+  "ref-1": {
+    id: "ref-1",
+    type: "tm_blob_file",
+    text: "[File Attachment: sample.pdf]",
+    metadata: { name: "sample.pdf", type: "application/pdf", size: 241219, localBlobID: null }
+  }
+};
+const filed = scrapeChat({
+  chatTitle: "Find Clamping Comb For Spiky Hair",
+  folderID: null,
+  attachmentRegistry: registry,
+  messages: [
+    {
+      role: "user",
+      uuid: "old",
+      content: [
+        { type: "text", text: "older note" },
+        { type: "tm_blob_file", text: "[File Attachment: notes.txt]", metadata: { name: "notes.txt", type: "text/plain", localBlobID: "note-blob" } }
+      ]
+    },
+    { role: "assistant", uuid: "a", content: [{ type: "thinking", thinking: "hidden thought" }, { type: "text", text: "visible answer" }] },
+    {
+      role: "user",
+      uuid: "ask",
+      content: [
+        { type: "text", text: "Does this file help" },
+        { type: "tm_attachment_ref", id: "ref-1" }
+      ]
+    }
+  ]
+}, []);
+assert.equal(filed.query, "Does this file help");
+assert.equal(filed.history.length, 2);
+assert.equal(filed.history[1].text, "visible answer");
+assert.equal(filed.history[1].text.includes("hidden thought"), false);
+assert.equal(filed.attachments.length, 2);
+assert.equal(filed.attachments[0].name, "notes.txt");
+assert.equal(filed.attachments[0].onQuery, false);
+assert.equal(filed.attachments[0].blobId, "note-blob");
+assert.equal(filed.attachments[1].name, "sample.pdf");
+assert.equal(filed.attachments[1].mime, "application/pdf");
+assert.equal(filed.attachments[1].onQuery, true);
+assert.equal(filed.attachments[1].blobId, "ref-1");
+assert.equal(continuationTask(filed), "Does this file help");
+
+const fileOnly = scrapeChat({
+  attachmentRegistry: registry,
+  messages: [{ role: "user", uuid: "only", content: [{ type: "tm_attachment_ref", id: "ref-1" }] }]
+}, []);
+assert.equal(fileOnly.query, "");
+assert.equal(fileOnly.attachments[0].onQuery, true);
+assert.equal(continuationTask(fileOnly), "Use the attached files.");
 
 const source = readFileSync(new URL("./shadow_continue.js", import.meta.url), "utf8");
 assert.equal(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(source), false);
 assert.equal(/bearer\s+[A-Za-z0-9]{8,}/i.test(source), false);
+assert.equal(source.includes("BLOB_"), true);
+assert.equal(source.includes("tm_attachment_ref"), true);
+assert.equal(source.includes("sync-v2"), false);
 
 console.log("shadow_continue scrape fixtures passed");

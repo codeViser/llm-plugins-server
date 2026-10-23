@@ -33,48 +33,68 @@
     });
   }
 
+  function fileRecord(record, refId) {
+    if (!record || typeof record !== "object") return null;
+    const meta = record.metadata || {};
+    const name = meta.name || record.name;
+    if (!name) return null;
+    return {
+      name: String(name),
+      mime: String(meta.type || "application/octet-stream"),
+      text: typeof record.text === "string" ? record.text : "",
+      blobId: String(meta.localBlobID || refId || record.id || "")
+    };
+  }
+
+  function filesFromMessage(message, registry) {
+    const content = message && message.content;
+    if (!Array.isArray(content)) return [];
+    const files = [];
+    content.forEach((part) => {
+      if (!part || typeof part !== "object") return;
+      if (part.type === "tm_blob_file") {
+        const file = fileRecord(part, part.id);
+        if (file) files.push(file);
+      } else if (part.type === "tm_attachment_ref" && registry && registry[part.id]) {
+        const file = fileRecord(registry[part.id], part.id);
+        if (file) files.push(file);
+      }
+    });
+    return files;
+  }
+
   function readContent(content) {
     if (typeof content === "string") return { text: content, files: [] };
     if (!Array.isArray(content)) return { text: "", files: [] };
     const texts = [];
-    const files = [];
     content.forEach((part) => {
       if (!part || typeof part !== "object") return;
       if (part.type === "text" && part.text) texts.push(String(part.text));
-      if (part.type === "tm_blob_file" && part.metadata && part.metadata.name) {
-        files.push({
-          name: String(part.metadata.name),
-          mime: String(part.metadata.type || "application/octet-stream"),
-          text: typeof part.text === "string" ? part.text : "",
-          syncUrl: part.sync && part.sync.url ? String(part.sync.url) : ""
-        });
-      }
     });
-    return { text: texts.join("\n"), files };
+    return { text: texts.join("\n"), files: filesFromMessage({ content }, null) };
   }
 
-  function pushMessage(out, message) {
+  function pushMessage(out, message, registry) {
+    const files = filesFromMessage(message, registry);
     const read = readContent(message.content);
     const calls = toolCalls(message);
     const text = read.text || (typeof message.pluginResponse === "string" ? message.pluginResponse : "");
-    if (!text && !calls.length && message.role !== "tool") return;
+    if (!text && !calls.length && !files.length && message.role !== "tool") return;
     out.push({
       role: message.role || message.type || "message",
       text,
       tool_calls: calls,
-      tool_call_id: message.tool_call_id || ""
+      tool_call_id: message.tool_call_id || "",
+      files
     });
   }
 
   function scrapeChat(chat, folders) {
     const messages = (chat && chat.messages) || [];
+    const registry = chat && chat.attachmentRegistry;
     let summary = null;
     messages.forEach((message) => {
       if (message && message.type === "tm_context_summary") summary = message;
-    });
-    const attachments = [];
-    messages.forEach((message) => {
-      readContent(message && message.content).files.forEach((file) => attachments.push(file));
     });
     const kept = [];
     if (summary && summary.contextSummary && summary.contextSummary.content) {
@@ -82,7 +102,8 @@
         role: "summary",
         text: String(summary.contextSummary.content),
         tool_calls: [],
-        tool_call_id: ""
+        tool_call_id: "",
+        files: []
       });
       const cutoff = summary.contextSummary.contextCutOffAtUUID;
       let passed = !cutoff;
@@ -93,21 +114,33 @@
           return;
         }
         if (message.contextClearedAt) return;
-        pushMessage(kept, message);
+        pushMessage(kept, message, registry);
       });
     } else {
       messages.forEach((message) => {
         if (!message || message.type === "tm_context_summary" || message.contextClearedAt) return;
-        pushMessage(kept, message);
+        pushMessage(kept, message, registry);
       });
     }
     const split = splitUnanswered(kept);
+    const queryIsLast = Boolean(kept.length) && split.history.length !== kept.length;
+    const attachments = [];
+    kept.forEach((message, index) => {
+      const onQuery = queryIsLast && index === kept.length - 1;
+      (message.files || []).forEach((file) => attachments.push({ ...file, onQuery }));
+    });
+    const strip = (message) => ({
+      role: message.role,
+      text: message.text,
+      tool_calls: message.tool_calls,
+      tool_call_id: message.tool_call_id
+    });
     return {
       path: chat && chat.folderID ? folderPath(folders, chat.folderID) : "(root)",
       starred: Boolean(chat && chat.favoritedAt != null),
-      history: split.history,
+      history: split.history.map(strip),
       query: split.query,
-      messages: kept,
+      messages: kept.map(strip),
       attachments
     };
   }
@@ -123,6 +156,8 @@
 
   function continuationTask(scraped) {
     if (scraped && scraped.query) return scraped.query;
+    const attachments = scraped && scraped.attachments;
+    if (Array.isArray(attachments) && attachments.some((file) => file && file.onQuery)) return "Use the attached files.";
     const history = scraped && scraped.history;
     if (Array.isArray(history) && history.length) return SUMMARIZE_QUERY;
     return "";
@@ -224,8 +259,19 @@
   }
 
   async function withBytes(file) {
-    const data = await captureBlob(file);
-    return { name: file.name, mime: file.mime, text: file.text, data_base64: data };
+    let data = "";
+    if (file.blobId) {
+      const stored = await idbGet("BLOB_" + file.blobId);
+      if (stored && typeof stored.arrayBuffer === "function") data = await blobToBase64(stored);
+    }
+    if (!data) data = await captureBlob(file);
+    return {
+      name: file.name,
+      mime: file.mime,
+      text: file.text,
+      data_base64: data,
+      on_query: Boolean(file.onQuery)
+    };
   }
 
   function addStyles() {
