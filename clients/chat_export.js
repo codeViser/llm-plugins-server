@@ -519,7 +519,12 @@
   async function fetchAttachmentBlob(url, metadata) {
     const u = attachmentFetchUrl(url);
     if (!u) throw new Error("Missing attachment URL.");
-    const res = await fetch(u, { credentials: "include", cache: "no-cache" });
+    let res;
+    try {
+      res = await fetch(u, { credentials: "include", cache: "no-store" });
+    } catch (e) {
+      throw new Error("Could not download an attachment. Stay signed in and try again.");
+    }
     if (!res.ok) throw new Error("Attachment download failed (HTTP " + res.status + ").");
     const blob = await res.blob();
     await validateBlob(blob, metadata);
@@ -795,6 +800,7 @@
         b.disabled = true;
         try { await fn(); }
         catch (e) {
+          document.querySelectorAll(".tmx-status").forEach((n) => n.remove());
           if (e?.name !== "AbortError") alert("Export failed: " + (e?.message || e));
         }
       });
