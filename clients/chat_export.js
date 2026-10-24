@@ -1,83 +1,49 @@
 (() => {
   /******************************************************************
-   * TypingMind Exporter v12
-   *
-   * UI/UX overhaul from v11:
-   * - CSS-variable theming with dark/light toggle
-   * - Compact tool calls (collapsed ~22px, passive gray, accent on expand)
-   * - Refined color palette (no pure black/white)
-   * - PDF defaults to dark mode with print-color-adjust
-   * - Unified class names (rw/an) across both tools
-   *
-   * Preserved from v11:
-   * - Desktop: fully automated (sidebar full-export -> fallback share JSON)
-   * - Mobile/PWA: passive listener + overlay
-   * - DOM JSON extraction from Share modal preview
-   * - All parsing, privacy filtering, markdown rendering logic
-   *
-   * Fixed vs ReferenceScriptDiscussion baseline:
-   * - Mblock step 13 only: %%IC%%/%%TX%% placeholders entombed inside
-   *   hb[] (via list items, table cells, headings, blockquotes) are now
-   *   resolved before hb[] restoration. All other code is unchanged.
+   * TypingMind Exporter v13 — one-shot Custom Export
+   * Interactive HTML, Nice PDF (file), Archival Export (import zip + PDF)
+   * Reads open chat from IndexedDB; no sidebar export listener.
    ******************************************************************/
 
-  const TAG = "[TMX v12]";
+  const TAG = "[TMX v13]";
   const log = (...a) => console.log(TAG, ...a);
 
   const SEL = {
-    shareBtn: '[data-element-id="share-button"]',
     shareModal: '[data-element-id="pop-up-modal"]',
     chatTitle: '[data-element-id="current-chat-title"]',
-    sidebarToggle: '[data-element-id="workspace-logo-button-compact"]',
-    selectedChat: '[data-element-id="selected-chat-item"]',
-    chatItem: '[data-element-id="custom-chat-item"]',
-    kebab: 'button[aria-label="Chat settings"]',
-    exportBtn: 'button[data-element-id="export-chat-button"]',
   };
 
-  /* ============ STYLES ============ */
+  const CDN = {
+    katexCss: "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css",
+    katexJs: "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js",
+    jszip: "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
+    html2canvas: "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js",
+    jspdf: "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js",
+  };
+
   const sEl = document.createElement("style");
   sEl.textContent = `
-    .tm-force-open button[aria-label="Chat settings"]{opacity:1!important;width:auto!important;pointer-events:auto!important}
-
-    /* pass-through overlay: does NOT block touches except Cancel */
-    .tmx-bar{position:fixed;bottom:0;left:0;right:0;z-index:2147483647;background:rgba(17,24,39,.85);color:#fff;border-top:2px solid #00a884;padding:10px 16px;font:13px/1.4 system-ui,-apple-system,sans-serif;box-shadow:0 -4px 24px rgba(0,0,0,.4);pointer-events:none}
-    .tmx-bar *{pointer-events:none}
-    .tmx-bar button{pointer-events:auto}
-    .tmx-bar b{color:#00a884}
-    .tmx-bar .row{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
-    .tmx-bar button{border:none;border-radius:10px;padding:8px 14px;font-weight:800;font-size:12px;cursor:pointer}
-    .tmx-bar .cancel{background:rgba(255,255,255,.15);color:#fff}
-    .tmx-bar .pulsedot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#00a884;margin-right:6px;animation:tmxpulse 1.2s infinite}
-    @keyframes tmxpulse{0%,100%{opacity:1}50%{opacity:.3}}
-
-    /* non-blocking status toast (desktop) */
-    .tmx-status{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;background:rgba(17,24,39,.92);color:#fff;padding:8px 16px;border-radius:10px;font:12px/1.4 system-ui,-apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.3);pointer-events:none;transition:opacity .3s}
+    .tmx-status{position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;background:rgba(17,24,39,.92);color:#fff;padding:8px 16px;border-radius:10px;font:12px/1.4 system-ui,-apple-system,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.3);pointer-events:none;transition:opacity .3s;max-width:92vw;text-align:center}
+    .tmx-menu{position:fixed;inset:0;z-index:2147483646;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px}
+    .tmx-menu-panel{background:#1f2c34;color:#e9edef;border-radius:12px;padding:16px;min-width:min(320px,92vw);box-shadow:0 8px 32px rgba(0,0,0,.4);font:13px system-ui,-apple-system,sans-serif}
+    .tmx-menu-panel h3{margin:0 0 12px;font-size:15px;font-weight:800}
+    .tmx-menu-panel button{display:block;width:100%;margin:6px 0;padding:10px 12px;border:none;border-radius:10px;font-weight:800;font-size:12px;cursor:pointer;text-align:left}
+    .tmx-menu-panel .cancel{background:rgba(255,255,255,.12);color:#fff;margin-top:10px;text-align:center}
+    .tmx-menu-panel .opt-html{background:#00a884;color:#111b21}
+    .tmx-menu-panel .opt-pdf{background:#f59e0b;color:#111b21}
+    .tmx-menu-panel .opt-zip{background:#6366f1;color:#fff}
   `;
   document.documentElement.appendChild(sEl);
 
-  /* ============ HELPERS ============ */
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  async function waitFor(fn, ms = 4000) {
-    const t = Date.now();
-    while (Date.now() - t < ms) { const v = fn(); if (v) return v; await sleep(40); }
-    return null;
-  }
-  function textOf(el) { return (el?.textContent || "").replace(/\s+/g, " ").trim(); }
-  function cssEsc(s) { try { return CSS.escape(s); } catch { return s.replace(/([^\w-])/g, "\\$1"); } }
-
-  function isMobileLike() {
-    const coarse = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
-    return coarse && Math.min(window.innerWidth || 9999, window.innerHeight || 9999) < 900;
-  }
 
   function showStatus(msg, durationMs) {
-    try { document.querySelectorAll('.tmx-status').forEach(x => x.remove()); } catch {}
-    const d = document.createElement('div');
-    d.className = 'tmx-status';
+    try { document.querySelectorAll(".tmx-status").forEach((x) => x.remove()); } catch {}
+    const d = document.createElement("div");
+    d.className = "tmx-status";
     d.textContent = msg;
     document.body.appendChild(d);
-    if (durationMs) setTimeout(() => { d.style.opacity = '0'; setTimeout(() => { try { d.remove(); } catch {} }, 400); }, durationMs);
+    if (durationMs) setTimeout(() => { d.style.opacity = "0"; setTimeout(() => { try { d.remove(); } catch {} }, 400); }, durationMs);
     return d;
   }
 
@@ -86,202 +52,136 @@
     if (!el) return "Chat";
     const c = el.cloneNode(true);
     c.querySelectorAll("button,svg").forEach((n) => n.remove());
-    return textOf(c) || "Chat";
+    return (c.textContent || "").replace(/\s+/g, " ").trim() || "Chat";
   }
 
   function closeModal() {
     const m = document.querySelector(SEL.shareModal);
     if (!m) return;
-    const b = [...m.querySelectorAll("button")].find((b) => textOf(b).toLowerCase() === "close");
-    if (b) b.click(); else document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    const buttons = [...m.querySelectorAll("button")];
+    const closeBtn = buttons.find((b) => (b.textContent || "").replace(/\s+/g, " ").trim().toLowerCase() === "close");
+    if (closeBtn) closeBtn.click();
+    else document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   }
 
-  function openModal() { document.querySelector(SEL.shareBtn)?.click(); }
+  function safeName(s) { return String(s || "chat").replace(/[^a-zA-Z0-9 -]/g, "").trim() || "chat"; }
 
-  /* ============================================================
-   * 1) CAPTURE ENGINE (unchanged from v11)
-   * ============================================================ */
-  function createCapture({ timeoutMs = 15000, suppressDownload = false, acceptSmall = false } = {}) {
-    const OrigClick = HTMLAnchorElement.prototype.click;
-    let done = false;
-    let resolveFn, rejectFn;
+  function newId() {
+    if (crypto.randomUUID) return crypto.randomUUID();
+    return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const r = (Math.random() * 16) | 0;
+      return (c === "x" ? r : (r & 0x3) | 0x8).toString(16);
+    });
+  }
 
-    const promise = new Promise((res, rej) => { resolveFn = res; rejectFn = rej; });
+  async function openKeyvalDb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open("keyval-store");
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error || new Error("IndexedDB open failed"));
+    });
+  }
 
-    const timer = setTimeout(() => {
-      if (!done) cancel(new Error("Capture timed out"));
-    }, timeoutMs);
+  async function idbGet(key) {
+    const db = await openKeyvalDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction("keyval", "readonly");
+      const req = tx.objectStore("keyval").get(key);
+      req.onsuccess = () => { db.close(); resolve(req.result); };
+      req.onerror = () => { db.close(); reject(req.error); };
+    });
+  }
 
-    function cleanup() {
-      HTMLAnchorElement.prototype.click = OrigClick;
-      document.removeEventListener("click", onDocClick, true);
+  async function readOpenChat() {
+    const m = location.hash.match(/chat=([^&]+)/);
+    if (!m) throw new Error("Open a chat first (no #chat= in URL).");
+    const key = "CHAT_" + m[1];
+    let raw = await idbGet(key);
+    if (raw == null) throw new Error("Chat not found in local storage.");
+    if (typeof raw === "string") {
+      try { raw = JSON.parse(raw); } catch { throw new Error("Chat record is not valid JSON."); }
     }
+    if (!raw || !Array.isArray(raw.messages)) throw new Error("Chat record has no messages.");
+    return raw;
+  }
 
-    function cancel(err) {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      cleanup();
-      rejectFn(err || new Error("Cancelled"));
-    }
+  async function retrieveBlob(localId) {
+    const v = await idbGet("BLOB_" + localId);
+    return v instanceof Blob ? v : null;
+  }
 
-    function restore() {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      cleanup();
-    }
-
-    function processText(txt) {
-      if (done) return;
-      try {
-        const obj = JSON.parse(txt);
-        const isFull = !!(obj?.data?.chats?.[0]);
-        const isSmall = !!(obj?.messages || Array.isArray(obj));
-
-        if (isFull) {
-          restore();
-          resolveFn({ text: txt, kind: "full" });
-        } else if (isSmall && acceptSmall) {
-          restore();
-          resolveFn({ text: txt, kind: "share" });
-        }
-      } catch {}
-    }
-
-    function isJSONDownloadAnchor(a) {
-      if (!a || a.tagName !== "A") return false;
-      const href = String(a.href || "");
-      const dl = String(a.getAttribute("download") || a.download || "").toLowerCase();
-      return href.startsWith("blob:") && (dl.includes("json") || dl.endsWith(".json"));
-    }
-
-    HTMLAnchorElement.prototype.click = function () {
-      if (!done && isJSONDownloadAnchor(this)) {
-        const href = this.href;
-        fetch(href).then(r => r.text()).then(processText).catch(() => {});
-        if (suppressDownload) return;
+  async function loadScript(url, globalCheck) {
+    if (globalCheck && globalCheck()) return;
+    if (document.querySelector(`script[data-tmx-src="${url}"]`)) {
+      for (let i = 0; i < 40; i++) {
+        if (globalCheck && globalCheck()) return;
+        await sleep(100);
       }
-      return OrigClick.call(this);
-    };
-
-    function onDocClick(e) {
-      if (done) return;
-      try {
-        const a = e.target?.closest?.("a");
-        if (!a || !isJSONDownloadAnchor(a)) return;
-        fetch(a.href).then(r => r.text()).then(processText).catch(() => {});
-      } catch {}
+      return;
     }
-    document.addEventListener("click", onDocClick, true);
-
-    return { promise, cancel, feedText: processText };
-  }
-
-  /* ============================================================
-   * 2) DOM JSON EXTRACTOR (unchanged from v11)
-   * ============================================================ */
-  function looksLikeJSON(s) {
-    if (!s) return false;
-    const t = String(s).replace(/\u00A0/g, " ").trim();
-    if (!(t.startsWith("{") || t.startsWith("["))) return false;
-    return (t.includes('"messages"') || t.includes('"role"') || t.includes('"data"'));
-  }
-
-  function extractJSONFromShareModal() {
-    const modal = document.querySelector(SEL.shareModal);
-    if (!modal) return null;
-
-    const ta = modal.querySelector("textarea");
-    if (ta && looksLikeJSON(ta.value)) return ta.value.trim();
-
-    const blocks = [...modal.querySelectorAll("pre, code")];
-    let best = "";
-    for (const el of blocks) {
-      const t = (el.textContent || "").replace(/\u00A0/g, " ").trim();
-      if (t.length > best.length && looksLikeJSON(t)) best = t;
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = url;
+      s.async = true;
+      s.dataset.tmxSrc = url;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error("Failed to load script"));
+      document.head.appendChild(s);
+    });
+    for (let i = 0; i < 40; i++) {
+      if (globalCheck && globalCheck()) return;
+      await sleep(100);
     }
-    if (best) return best;
+  }
 
-    const candidates = [...modal.querySelectorAll("div, span, p")];
-    for (const el of candidates) {
-      const t = (el.textContent || "").replace(/\u00A0/g, " ").trim();
-      if (t.length > 500 && looksLikeJSON(t)) return t;
+  async function ensureKaTeX() {
+    if (window.katex?.renderToString) return;
+    if (![...document.querySelectorAll("link")].some((l) => l.href === CDN.katexCss)) {
+      const l = document.createElement("link");
+      l.rel = "stylesheet";
+      l.href = CDN.katexCss;
+      document.head.appendChild(l);
     }
-    return null;
+    await loadScript(CDN.katexJs, () => window.katex?.renderToString);
   }
 
-  function isDownloadJsonUIButton(btn) {
-    if (!btn || btn.tagName !== "BUTTON") return false;
-    const t = textOf(btn).toLowerCase();
-    return t.includes("download") && t.includes("json");
+  async function ensureJsZip() {
+    await loadScript(CDN.jszip, () => window.JSZip);
+    if (!window.JSZip) throw new Error("JSZip unavailable");
   }
 
-  function isCopyContentUIButton(btn) {
-    if (!btn || btn.tagName !== "BUTTON") return false;
-    const t = textOf(btn).toLowerCase();
-    return t.includes("copy") && t.includes("content");
+  async function ensurePdfLibs() {
+    await loadScript(CDN.html2canvas, () => window.html2canvas);
+    await loadScript(CDN.jspdf, () => window.jspdf?.jsPDF);
+    if (!window.html2canvas || !window.jspdf?.jsPDF) throw new Error("PDF libraries unavailable");
   }
 
-  /* ============================================================
-   * 3) DESKTOP: SIDEBAR AUTOMATION (unchanged from v11)
-   * ============================================================ */
-  async function desktopTriggerFullExport() {
-    const hasAny = () => document.querySelector(SEL.selectedChat) || document.querySelector(SEL.chatItem);
-    if (!hasAny()) { document.querySelector(SEL.sidebarToggle)?.click(); await waitFor(hasAny, 3000); }
-
-    let row = document.querySelector(SEL.selectedChat);
-    if (!row) {
-      const top = getTitle().toLowerCase();
-      const items = [...document.querySelectorAll(SEL.chatItem)].filter((it) => it.querySelector(SEL.kebab));
-      let best = null, bs = 0;
-      for (const it of items) {
-        const t = textOf(it.querySelector(".truncate") || it).toLowerCase();
-        const s = t === top ? 1000 : top.includes(t) ? 600 + t.length : t.includes(top) ? 500 + top.length : 0;
-        if (s > bs) { bs = s; best = it; }
+  async function deliverFile(blob, filename) {
+    const file = new File([blob], filename, { type: blob.type || "application/octet-stream" });
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: filename });
+        return;
       }
-      if (best && bs >= 450) row = best;
+    } catch (e) {
+      if (e?.name !== "AbortError") console.warn(TAG, "share failed, falling back to download", e);
+      else throw e;
     }
-    if (!row) throw new Error("Active chat not found in sidebar");
-
-    row.classList.add("tm-force-open");
-    const kb = row.querySelector(SEL.kebab);
-    if (!kb) throw new Error("Kebab not found");
-    kb.click();
-
-    const kbId = kb.id;
-    const menuSel = kbId ? `[role="menu"][aria-labelledby="${cssEsc(kbId)}"]` : '[role="menu"]';
-    const menu = await waitFor(() => document.querySelector(menuSel), 2500);
-    if (!menu) throw new Error("Kebab menu didn't open");
-
-    const exp = menu.querySelector(SEL.exportBtn);
-    if (!exp) throw new Error("Export button not found");
-    exp.click();
+    const u = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = u;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { try { URL.revokeObjectURL(u); a.remove(); } catch {} }, 500);
   }
 
-  async function desktopTriggerShareJSON() {
-    openModal();
-    const modal = await waitFor(() => document.querySelector(SEL.shareModal), 2500);
-    if (!modal) throw new Error("Share modal didn't open");
-
-    const jsonBtn = [...modal.querySelectorAll("button")].find((b) => textOf(b) === "JSON");
-    if (!jsonBtn) throw new Error("JSON button not found");
-    jsonBtn.click();
-
-    const dl = await waitFor(() => {
-      const m = document.querySelector(SEL.shareModal);
-      if (!m) return null;
-      const btns = [...m.querySelectorAll("button")];
-      return btns.find(isDownloadJsonUIButton) || null;
-    }, 3000);
-
-    if (!dl) throw new Error("Download .json button not found");
-    dl.click();
+  function chatExportPayload(chat) {
+    return { title: chat.chatTitle || getTitle(), messages: chat.messages || [] };
   }
 
-  /* ============================================================
-   * 4) CONVERTER CORE
-   * ============================================================ */
+
+  /* ============ CONVERTER CORE (from v12) ============ */
   function S(c) {
     if (c == null) return "";
     if (typeof c === "string") return c;
@@ -581,245 +481,359 @@
     return `<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${E(title)}</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><style>${OCSS}</style></head><body><div class="w"><div class="hd"><h1>${E(title)}</h1><p>${E("Exported " + dt)}</p><button class="tt" onclick="TT()" title="Toggle theme"><span class="td">&#x2600;&#xFE0F;</span><span class="tl">&#x1F319;</span></button></div>${buildChatHTML(messages)}</div><script>function TT(){var h=document.documentElement,c=h.getAttribute("data-theme")||"dark";h.setAttribute("data-theme",c==="dark"?"light":"dark")}<\/script></body></html>`;
   }
 
-  function dlFile(html, name) {
-    const b = new Blob([html], { type: "text/html;charset=utf-8" }), u = URL.createObjectURL(b);
-    const a = document.createElement("a"); a.href = u; a.download = name; document.body.appendChild(a); a.click();
-    setTimeout(() => { try { document.body.removeChild(a); } catch {} try { URL.revokeObjectURL(u); } catch {} }, 400);
+
+  function dlFileContent(content, mime, name) {
+    deliverFile(new Blob([content], { type: mime }), name);
   }
 
-  async function ensureKaTeX() {
-    if (window.katex?.renderToString) return;
-    const css = "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css", js = "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js";
-    if (![...document.querySelectorAll("link")].some((l) => l.href === css)) { const l = document.createElement("link"); l.rel = "stylesheet"; l.href = css; document.head.appendChild(l); }
-    await new Promise((r, j) => { const s = document.createElement("script"); s.src = js; s.async = true; s.onload = r; s.onerror = () => j(new Error("KaTeX fail")); document.head.appendChild(s); });
-  }
-
-  function safeName(s) { return String(s || "chat").replace(/[^a-zA-Z0-9 -]/g, "").trim() || "chat"; }
-
-  function convertAndOutput(jsonText, mode, fallbackTitle) {
-    const parsed = parseJSON(jsonText);
-    const title = parsed.title || fallbackTitle;
-    const html = buildHTML(title, parsed.messages);
-    const base = safeName(title);
-
-    if (mode === "html") {
-      dlFile(html, `${base}-${parsed.kind}-${Date.now()}.html`);
-      return parsed.kind;
-    }
-
-    const w = window.open("", "_blank");
-    if (w) {
-      w.document.open(); w.document.write(html); w.document.close();
-      setTimeout(() => { try { w.focus(); w.print(); } catch {} }, 900);
-    } else {
-      dlFile(html, `${base}-print-${Date.now()}.html`);
-    }
-    return parsed.kind;
-  }
-
-  /* ============ DESKTOP FLOWS ============ */
-  async function desktopFlow(mode) {
-    const title = getTitle();
+  async function htmlFromChat(chat) {
     await ensureKaTeX().catch(() => {});
-    closeModal();
+    const { title, messages } = chatExportPayload(chat);
+    return buildHTML(title, messages);
+  }
 
-    showStatus("Attempting full export (sidebar)\u2026");
-    const cap1 = createCapture({ timeoutMs: 12000, suppressDownload: true, acceptSmall: false });
-
-    try {
-      await desktopTriggerFullExport();
-      const { text, kind } = await cap1.promise;
-      showStatus("Captured " + kind + " JSON. Converting\u2026", 2000);
-      convertAndOutput(text, mode, title);
-      showStatus("Done! " + mode.toUpperCase() + " from " + kind + " JSON.", 3000);
-      return;
-    } catch (e) {
-      cap1.cancel(e);
-      showStatus("Full export failed. Trying Share JSON\u2026");
+  async function validateBlob(blob, metadata) {
+    if (!blob || blob.size <= 32) throw new Error("Attachment empty or unreadable.");
+    const expected = Number(metadata?.size || 0);
+    if (expected > 0 && blob.size !== expected) {
+      throw new Error("Attachment size mismatch (expected " + expected + ", got " + blob.size + ").");
     }
-
-    await sleep(250);
-    const cap2 = createCapture({ timeoutMs: 15000, suppressDownload: true, acceptSmall: true });
-    try {
-      await desktopTriggerShareJSON();
-      await sleep(50);
-      const domTxt = extractJSONFromShareModal();
-      if (domTxt) cap2.feedText(domTxt);
-
-      const { text, kind } = await cap2.promise;
-      showStatus("Captured " + kind + " JSON. Converting\u2026", 2000);
-      convertAndOutput(text, mode, title);
-      showStatus("Done! " + mode.toUpperCase() + " from " + kind + " JSON.", 3000);
-    } catch (e2) {
-      cap2.cancel(e2);
-      throw new Error("Both full export and share JSON failed: " + (e2?.message || e2));
+    const mime = String(metadata?.type || blob.type || "");
+    if (mime === "application/pdf" || (metadata?.fileFormat === "pdf")) {
+      const head = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+      const magic = String.fromCharCode(...head);
+      if (magic !== "%PDF-") throw new Error("Downloaded file is not a valid PDF.");
     }
   }
 
-  /* ============ MOBILE FLOW ============ */
-  let mobileCapture = null;
-  let mobileDomListenerInstalled = false;
-
-  function removeOverlay() {
-    document.querySelectorAll(".tmx-bar").forEach((el) => el.remove());
-    if (mobileCapture) { mobileCapture.cancel(new Error("Cancelled by user")); mobileCapture = null; }
+  async function fetchAttachmentBlob(url, metadata) {
+    const u = String(url || "").split("?")[0];
+    if (!u) throw new Error("Missing attachment URL.");
+    const res = await fetch(u, { credentials: "include", cache: "no-cache" });
+    if (!res.ok) throw new Error("Attachment download failed (HTTP " + res.status + ").");
+    const blob = await res.blob();
+    await validateBlob(blob, metadata);
+    return blob;
   }
 
-  function installMobileShareDomCapture(cap) {
-    if (mobileDomListenerInstalled) return;
-    mobileDomListenerInstalled = true;
+  function getAtPath(root, path) {
+    let cur = root;
+    for (const key of path) {
+      if (cur == null) return null;
+      cur = cur[key];
+    }
+    return cur;
+  }
 
-    const handler = (e) => {
-      if (!mobileCapture || mobileCapture !== cap) return;
-      const modal = document.querySelector(SEL.shareModal);
-      if (!modal) return;
+  function setAttachmentLocal(part, localId) {
+    if (!part || typeof part !== "object") return;
+    const md = { ...(part.metadata || {}) };
+    md.localBlobID = localId;
+    delete md.base64;
+    part.metadata = md;
+    part.sync = null;
+  }
 
-      const btn = e.target?.closest?.("button");
-      if (!btn) return;
-
-      if (!isDownloadJsonUIButton(btn) && !isCopyContentUIButton(btn)) return;
-
-      setTimeout(() => {
-        if (!mobileCapture || mobileCapture !== cap) return;
-        const txt = extractJSONFromShareModal();
-        if (txt) cap.feedText(txt);
-      }, 0);
-    };
-
-    document.addEventListener("click", handler, true);
-
-    const origCancel = cap.cancel;
-    cap.cancel = (err) => {
-      try { document.removeEventListener("click", handler, true); } catch {}
-      mobileDomListenerInstalled = false;
-      return origCancel(err);
-    };
-    const origPromise = cap.promise;
-    cap.promise = origPromise.finally(() => {
-      try { document.removeEventListener("click", handler, true); } catch {}
-      mobileDomListenerInstalled = false;
+  function forEachContentPart(chat, fn) {
+    const reg = chat.attachmentRegistry || {};
+    Object.keys(reg).forEach((id) => {
+      const rec = reg[id];
+      if (rec && (rec.type === "tm_blob_file" || rec.sync?.url || rec.metadata?.localBlobID)) {
+        fn(rec, ["attachmentRegistry", id]);
+      }
     });
+    function walk(msgs, base) {
+      if (!Array.isArray(msgs)) return;
+      msgs.forEach((msg, mi) => {
+        const baseMsg = [...base, mi];
+        const content = msg.content;
+        if (Array.isArray(content)) {
+          content.forEach((part, pi) => {
+            if (part && typeof part === "object" && (part.type === "tm_blob_file" || part.type === "tm_attachment_ref")) {
+              if (part.type === "tm_attachment_ref" && reg[part.id]) fn(reg[part.id], ["attachmentRegistry", part.id]);
+              else fn(part, [...baseMsg, "content", pi]);
+            }
+          });
+        }
+        if (Array.isArray(msg.threads)) {
+          msg.threads.forEach((th, ti) => walk(th.messages, [...baseMsg, "threads", ti, "messages"]));
+        }
+        if (Array.isArray(msg.responses)) {
+          msg.responses.forEach((resp, ri) => walk(resp.messages, [...baseMsg, "responses", ri, "messages"]));
+        }
+      });
+    }
+    walk(chat.messages || [], ["messages"]);
   }
 
-  async function mobileFlow(mode) {
-    const title = getTitle();
-    await ensureKaTeX().catch(() => {});
+  function collectSyncGroups(chat) {
+    const groups = new Map();
+    forEachContentPart(chat, (part, path) => {
+      const sync = part.sync;
+      if (!sync?.blobID || !sync?.url) return;
+      const bid = String(sync.blobID);
+      if (!groups.has(bid)) groups.set(bid, { blobID: bid, url: sync.url, metadata: part.metadata, paths: [] });
+      groups.get(bid).paths.push(path);
+    });
+    return groups;
+  }
+
+  function collectLocalBlobIds(chat) {
+    const ids = new Map();
+    forEachContentPart(chat, (part, path) => {
+      const lid = part.metadata?.localBlobID;
+      if (lid) {
+        const k = String(lid);
+        if (!ids.has(k)) ids.set(k, []);
+        ids.get(k).push(path);
+      }
+    });
+    return ids;
+  }
+
+  function applyLocalIdAtPaths(chat, paths, localId) {
+    for (const path of paths) {
+      const target = getAtPath(chat, path);
+      if (target) setAttachmentLocal(target, localId);
+    }
+  }
+
+  async function buildTypingMindImportZip(chat, onProgress) {
+    await ensureJsZip();
+    const clone = JSON.parse(JSON.stringify(chat));
+    const blobEntries = new Map();
+    const say = (m) => { if (onProgress) onProgress(m); };
+
+    const localIds = collectLocalBlobIds(clone);
+    for (const [localId, paths] of localIds) {
+      say("Reading local attachment…");
+      let blob = await retrieveBlob(localId);
+      if (!blob) {
+        const sample = getAtPath(clone, paths[0]);
+        const url = sample?.sync?.url;
+        if (url) blob = await fetchAttachmentBlob(url, sample?.metadata);
+      }
+      if (!blob) throw new Error("Local attachment missing from device storage.");
+      await validateBlob(blob, getAtPath(clone, paths[0])?.metadata);
+      blobEntries.set(localId, { blob, mime: blob.type || getAtPath(clone, paths[0])?.metadata?.type || "application/octet-stream" });
+      applyLocalIdAtPaths(clone, paths, localId);
+    }
+
+    const syncGroups = collectSyncGroups(clone);
+    for (const [, group] of syncGroups) {
+      say("Downloading attachment for archive…");
+      const blob = await fetchAttachmentBlob(group.url, group.metadata);
+      const localId = newId();
+      blobEntries.set(localId, { blob, mime: blob.type || group.metadata?.type || "application/octet-stream" });
+      applyLocalIdAtPaths(clone, group.paths, localId);
+    }
+
+    forEachContentPart(clone, (part) => {
+      if (part.sync?.url) throw new Error("Archive still contains cloud attachment URLs.");
+    });
+
+    const zip = new window.JSZip();
+    const metadata = {};
+    for (const [localId, { blob, mime }] of blobEntries) {
+      const path = `attachments/${localId}.blob`;
+      zip.file(path, blob);
+      metadata[path] = { type: mime || "application/octet-stream" };
+    }
+    zip.file("data.json", JSON.stringify({ data: { chats: [clone] } }));
+    zip.file("metadata.json", JSON.stringify(metadata));
+    return zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+  }
+
+  async function htmlToPdfBlob(html) {
+    await ensurePdfLibs();
+    const iframe = document.createElement("iframe");
+    iframe.setAttribute("sandbox", "allow-same-origin allow-scripts");
+    iframe.style.cssText = "position:fixed;left:-10000px;top:0;width:820px;height:1200px;border:0;opacity:0;pointer-events:none";
+    document.body.appendChild(iframe);
+    const doc = iframe.contentDocument;
+    doc.open();
+    doc.write(html);
+    doc.close();
+    await sleep(1500);
+
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF({ unit: "pt", format: "a4", orientation: "portrait" });
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const margin = 36;
+    const contentW = pageW - margin * 2;
+    let y = margin;
+    const blocks = [...doc.querySelectorAll(".hd, .turn")];
+    if (!blocks.length) blocks.push(doc.body);
+
+    for (const el of blocks) {
+      const canvas = await window.html2canvas(el, { scale: 1.25, useCORS: true, logging: false, backgroundColor: null });
+      if (!canvas.width || !canvas.height) continue;
+      const imgData = canvas.toDataURL("image/jpeg", 0.9);
+      let drawH = (canvas.height * contentW) / canvas.width;
+      let offsetY = 0;
+      while (offsetY < drawH) {
+        const space = pageH - margin - y;
+        if (space < 40) {
+          pdf.addPage();
+          y = margin;
+          continue;
+        }
+        const sliceH = Math.min(space, drawH - offsetY);
+        const sliceRatio = sliceH / drawH;
+        const srcH = canvas.height * sliceRatio;
+        const sliceCanvas = document.createElement("canvas");
+        sliceCanvas.width = canvas.width;
+        sliceCanvas.height = Math.max(1, Math.floor(srcH));
+        const ctx = sliceCanvas.getContext("2d");
+        ctx.drawImage(canvas, 0, (offsetY / drawH) * canvas.height, canvas.width, srcH, 0, 0, sliceCanvas.width, sliceCanvas.height);
+        const sliceImg = sliceCanvas.toDataURL("image/jpeg", 0.9);
+        pdf.addImage(sliceImg, "JPEG", margin, y, contentW, sliceH);
+        y += sliceH + 8;
+        offsetY += sliceH;
+        if (offsetY < drawH) {
+          pdf.addPage();
+          y = margin;
+        }
+      }
+    }
+    iframe.remove();
+    const out = pdf.output("arraybuffer");
+    if (!out || out.byteLength < 800) throw new Error("PDF render produced empty output.");
+    return new Blob([out], { type: "application/pdf" });
+  }
+
+  async function exportInteractiveHtml() {
     closeModal();
+    showStatus("Building HTML…");
+    const chat = await readOpenChat();
+    const html = await htmlFromChat(chat);
+    const base = safeName(chat.chatTitle || getTitle());
+    await deliverFile(new Blob([html], { type: "text/html;charset=utf-8" }), `${base}-${Date.now()}.html`);
+    showStatus("HTML exported.", 2500);
+  }
 
-    removeOverlay();
-
-    const cap = createCapture({ timeoutMs: 60000, suppressDownload: false, acceptSmall: true });
-    mobileCapture = cap;
-    installMobileShareDomCapture(cap);
-
-    const bar = document.createElement("div");
-    bar.className = "tmx-bar";
-    bar.innerHTML = `
-      <div><span class="pulsedot"></span>Listening for JSON export\u2026</div>
-      <div style="margin-top:6px;font-size:12px;opacity:.85">
-        Option A: <b>sidebar \u2192 kebab (\u22EF) \u2192 Export</b> (full JSON).<br>
-        Option B: <b>Share \u2192 JSON \u2192 Download .json</b> (small JSON; v12 captures from preview).
-      </div>
-      <div class="row"></div>
-    `;
-    const cancelBtn = document.createElement("button");
-    cancelBtn.className = "cancel";
-    cancelBtn.textContent = "Cancel";
-    cancelBtn.onclick = () => removeOverlay();
-    bar.querySelector(".row").appendChild(cancelBtn);
-    document.body.appendChild(bar);
-
+  async function exportNicePdf() {
+    closeModal();
+    showStatus("Building PDF…");
+    const chat = await readOpenChat();
+    const html = await htmlFromChat(chat);
+    const base = safeName(chat.chatTitle || getTitle());
     try {
-      const { text, kind } = await cap.promise;
-      mobileCapture = null;
-
-      bar.innerHTML = `<div>Captured <b>${kind}</b> JSON. Converting\u2026</div>`;
-      await sleep(50);
-      convertAndOutput(text, mode, title);
-
-      bar.innerHTML = `<div>Done! Exported <b>${kind}</b> JSON \u2192 ${mode === "html" ? "HTML" : "PDF"}.</div><div class="row"></div>`;
-      const closeBtn = document.createElement("button");
-      closeBtn.className = "cancel";
-      closeBtn.textContent = "Close";
-      closeBtn.onclick = () => bar.remove();
-      bar.querySelector(".row").appendChild(closeBtn);
-      setTimeout(() => { try { bar.remove(); } catch {} }, 5000);
+      const pdfBlob = await htmlToPdfBlob(html);
+      await deliverFile(pdfBlob, `${base}-${Date.now()}.pdf`);
+      showStatus("PDF exported.", 2500);
     } catch (e) {
-      mobileCapture = null;
-      if (bar.parentNode) {
-        bar.innerHTML = `<div>Export ${e?.message === "Cancelled by user" ? "cancelled" : "failed"}: ${E(e?.message || "unknown error")}</div><div class="row"></div>`;
-        const closeBtn = document.createElement("button");
-        closeBtn.className = "cancel";
-        closeBtn.textContent = "Close";
-        closeBtn.onclick = () => bar.remove();
-        bar.querySelector(".row").appendChild(closeBtn);
-        setTimeout(() => { try { bar.remove(); } catch {} }, 4000);
+      console.warn(TAG, "PDF file render failed, opening print view", e);
+      const w = window.open("", "_blank");
+      if (w) {
+        w.document.open();
+        w.document.write(html);
+        w.document.close();
+        setTimeout(() => { try { w.focus(); w.print(); } catch {} }, 900);
+        showStatus("Opened print view (PDF file render unavailable).", 4000);
+      } else {
+        throw new Error("PDF render failed and popup was blocked.");
       }
     }
   }
 
-  /* ============ ROUTER ============ */
-  async function doHTML() { return isMobileLike() ? mobileFlow("html") : desktopFlow("html"); }
-  async function doPDF()  { return isMobileLike() ? mobileFlow("pdf")  : desktopFlow("pdf");  }
+  async function exportArchival() {
+    closeModal();
+    const chat = await readOpenChat();
+    const base = safeName(chat.chatTitle || getTitle());
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    showStatus("Preparing archival export…");
+    const html = await htmlFromChat(chat);
+    let pdfBlob = null;
+    let pdfName = null;
+    try {
+      showStatus("Rendering PDF…");
+      pdfBlob = await htmlToPdfBlob(html);
+      pdfName = `${base}-${stamp}.pdf`;
+    } catch (e) {
+      console.warn(TAG, "Archival PDF skipped, including HTML", e);
+    }
+    showStatus("Building import package…");
+    const importZipBlob = await buildTypingMindImportZip(chat, (m) => showStatus(m));
+    await ensureJsZip();
+    const outer = new window.JSZip();
+    outer.file("typingmind-import.zip", importZipBlob);
+    if (pdfBlob && pdfName) outer.file(pdfName, pdfBlob);
+    else outer.file("chat.html", html);
+    showStatus("Creating zip…");
+    const outerBlob = await outer.generateAsync({ type: "blob", compression: "DEFLATE" });
+    await deliverFile(outerBlob, `${base}-archival-${stamp}.zip`);
+    showStatus("Archival export complete.", 3000);
+  }
 
-  /* ============ INJECT BUTTONS ============ */
-  function inject(modal) {
-    if (!modal || modal.querySelector("[data-tmx='v12']")) return;
-    const grid = modal.querySelector(".grid.grid-cols-2");
-    if (!grid) return;
-
-    const mobile = isMobileLike();
-
-    const mkBtn = (label, bg, fn) => {
+  function openCustomExportMenu() {
+    const existing = document.querySelector(".tmx-menu");
+    if (existing) existing.remove();
+    const overlay = document.createElement("div");
+    overlay.className = "tmx-menu";
+    const panel = document.createElement("div");
+    panel.className = "tmx-menu-panel";
+    panel.innerHTML = "<h3>Custom Export</h3>";
+    const mk = (label, cls, fn) => {
       const b = document.createElement("button");
       b.type = "button";
+      b.className = cls;
       b.textContent = label;
-      b.style.cssText = `
-        display:inline-flex;align-items:center;justify-content:center;
-        padding:10px 14px;border-radius:10px;border:none;
-        font-weight:900;font-size:12px;background:${bg};
-        color:#111b21;box-shadow:0 1px 2px rgba(0,0,0,.2);width:100%
-      `;
       b.addEventListener("click", async () => {
-        b.disabled = true; const old = b.textContent; b.textContent = "Working\u2026";
+        overlay.remove();
+        b.disabled = true;
         try { await fn(); }
-        catch (e) { if (e?.message !== "Cancelled by user") alert("Export failed: " + (e?.message || e)); }
-        finally { b.disabled = false; b.textContent = old; }
+        catch (e) {
+          if (e?.name !== "AbortError") alert("Export failed: " + (e?.message || e));
+        }
       });
       return b;
     };
+    panel.appendChild(mk("Interactive HTML", "opt-html", exportInteractiveHtml));
+    panel.appendChild(mk("Nice PDF", "opt-pdf", exportNicePdf));
+    panel.appendChild(mk("Archival Export", "opt-zip", exportArchival));
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "cancel";
+    cancel.textContent = "Cancel";
+    cancel.onclick = () => overlay.remove();
+    panel.appendChild(cancel);
+    overlay.appendChild(panel);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  }
 
-    const addRow = (btn, desc) => {
-      const l = document.createElement("div");
-      l.className = "flex items-center justify-end";
-      l.appendChild(btn);
-      const r = document.createElement("div");
-      r.textContent = desc;
-      grid.appendChild(l);
-      grid.appendChild(r);
-    };
+  function inject(modal) {
+    if (!modal || modal.querySelector("[data-tmx='v13']")) return;
+    const grid = modal.querySelector(".grid.grid-cols-2");
+    if (!grid) return;
 
-    addRow(
-      mkBtn("Interactive HTML", "#00a884", doHTML),
-      mobile ? "Listener: Export OR Share\u2192JSON\u2192Download .json." : "One-click: full export (fallback: share JSON)."
-    );
-    addRow(
-      mkBtn("Nice PDF", "#f59e0b", doPDF),
-      mobile ? "Listener: Export OR Share\u2192JSON\u2192Download .json \u2192 print." : "One-click: full export \u2192 print."
-    );
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Custom Export";
+    btn.style.cssText = "display:inline-flex;align-items:center;justify-content:center;padding:10px 14px;border-radius:10px;border:none;font-weight:900;font-size:12px;background:#00a884;color:#111b21;box-shadow:0 1px 2px rgba(0,0,0,.2);width:100%;cursor:pointer";
+    btn.addEventListener("click", () => openCustomExportMenu());
+
+    const l = document.createElement("div");
+    l.className = "flex items-center justify-end";
+    l.appendChild(btn);
+    const r = document.createElement("div");
+    r.textContent = "HTML, PDF, or archival zip (TypingMind import + PDF). One click, no sidebar export.";
+    grid.appendChild(l);
+    grid.appendChild(r);
 
     const m = document.createElement("div");
-    m.setAttribute("data-tmx", "v12");
+    m.setAttribute("data-tmx", "v13");
     m.style.display = "none";
     modal.appendChild(m);
-
-    log("Buttons injected.", mobile ? "(mobile)" : "(desktop)");
+    log("Custom Export injected.");
   }
 
   new MutationObserver(() => {
-    const m = document.querySelector(SEL.shareModal);
-    if (m) inject(m);
+    const modal = document.querySelector(SEL.shareModal);
+    if (modal) inject(modal);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
-  log("v12 loaded.", isMobileLike() ? "Mobile mode." : "Desktop mode.");
+  log("v13 loaded.");
 })();
