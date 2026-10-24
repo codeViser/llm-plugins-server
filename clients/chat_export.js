@@ -1,11 +1,11 @@
 (() => {
   /******************************************************************
-   * TypingMind Exporter v13 — one-shot Custom Export
+   * TypingMind Exporter v14 — one-shot Custom Export
    * Interactive HTML, Nice PDF (file), Archival Export (import zip + PDF)
    * Reads open chat from IndexedDB; no sidebar export listener.
    ******************************************************************/
 
-  const TAG = "[TMX v13]";
+  const TAG = "[TMX v14]";
   const log = (...a) => console.log(TAG, ...a);
 
   const SEL = {
@@ -17,7 +17,6 @@
     katexCss: "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css",
     katexJs: "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js",
     jszip: "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
-    html2canvas: "https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js",
     jspdf: "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js",
   };
 
@@ -224,9 +223,8 @@
   }
 
   async function ensurePdfLibs() {
-    await loadScript(CDN.html2canvas, () => window.html2canvas);
     await loadScript(CDN.jspdf, () => window.jspdf?.jsPDF);
-    if (!window.html2canvas || !window.jspdf?.jsPDF) throw new Error("PDF libraries unavailable");
+    if (!window.jspdf?.jsPDF) throw new Error("PDF library unavailable");
   }
 
   async function deliverFile(blob, filename) {
@@ -472,7 +470,7 @@
 
   function renderArt(name, args) {
     let src = ""; if (args) src = args.htmlSource || args.html_source || args.htmlsource || "";
-    if (src && src.length > 50) return `<details class="rw" open><summary>Rendered: ${E(name)}</summary><iframe srcdoc="${src.replace(/"/g, "&quot;")}" sandbox="allow-scripts" style="width:100%;min-height:300px;border:none;background:#fff" loading="lazy"></iframe></details>`;
+    if (src && src.length > 50) return `<details class="rw"><summary>Rendered: ${E(name)}</summary><iframe srcdoc="${src.replace(/"/g, "&quot;")}" sandbox="allow-scripts" style="width:100%;min-height:300px;border:none;background:#fff" loading="lazy"></iframe></details>`;
     if (args) {
       if (args.matplotlib_code) return `<details class="rw"><summary>Code: ${E(name)}</summary><pre><code>${E(args.matplotlib_code)}</code></pre></details>`;
       if (args.graphCode) return `<details class="rw"><summary>Code: ${E(name)}</summary><pre><code>${E(args.graphCode)}</code></pre></details>`;
@@ -512,39 +510,131 @@
     `details.tc:hover{background:var(--bth)}details.tc:hover summary{opacity:.7}` +
     `details.tc[open]{background:var(--bto);border-color:var(--bdt);border-radius:6px;margin:3px 0}` +
     `details.tc[open] summary{opacity:1;color:var(--ca);padding:5px 10px}` +
-    `.tb{padding:6px 10px;border-top:1px solid var(--bdt);max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;font-family:monospace;font-size:.68rem;color:var(--c2);background:var(--bc)}` +
+    `.tb{padding:6px 10px;border-top:1px solid var(--bdt);max-height:320px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;font-family:monospace;font-size:.68rem;color:var(--c2);background:var(--bc)}` +
+    `.tc-sec{margin:0 0 8px}.tc-sec:last-child{margin-bottom:0}.tc-lbl{display:block;font-size:.62rem;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:var(--ca);margin-bottom:4px}.tc-pre{margin:0;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,monospace;font-size:.68rem;color:var(--c2)}` +
+    `details.thinking{background:none;border:1px solid transparent;border-radius:4px;margin:2px 0;font-size:.7rem;max-width:95%}@media(min-width:900px){details.thinking{max-width:75%}}` +
+    `details.thinking summary{padding:2px 10px;cursor:pointer;color:var(--c2);opacity:.45;list-style:none;display:flex;align-items:center;gap:5px;font-size:.68rem;line-height:1.4}` +
+    `details.thinking summary::before{content:"\\203A";font-size:.8rem;font-weight:700;flex-shrink:0;transition:transform .15s;width:8px;text-align:center}` +
+    `details.thinking[open] summary::before{transform:rotate(90deg)}details.thinking[open]{background:var(--bto);border-color:var(--bdt);border-radius:6px;margin:3px 0}` +
+    `details.thinking[open] summary{opacity:1;color:#a78bfa;padding:5px 10px}` +
     `details.rw{background:var(--bc);border:1px solid var(--bd);border-radius:6px;margin:3px 0;max-width:95%}@media(min-width:900px){details.rw{max-width:75%}}` +
     `details.rw summary{padding:8px 12px;cursor:pointer;color:var(--ca);font-weight:700;font-size:.8rem;list-style:none;display:flex;align-items:center;gap:6px}` +
     `details.rw summary::before{content:"\\203A";font-size:.8rem;font-weight:700;transition:transform .15s}details.rw[open] summary::before{transform:rotate(90deg)}` +
     `.an{background:var(--bto);border:1px dashed var(--bd);border-radius:6px;padding:6px 10px;margin:3px 0;max-width:95%;font-size:.76rem;color:var(--c2);font-style:italic}@media(min-width:900px){.an{max-width:75%}}` +
-    `@media print{.tt{display:none!important}body,.w,.hd,.msg.u,.msg.a{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}.msg{box-shadow:none;break-inside:avoid}details.rw iframe{display:none!important}details.tc .tb{display:none!important}details.tc{break-inside:avoid}}`;
+    `@media print{.tt{display:none!important}body,.w,.hd,.msg.u,.msg.a{-webkit-print-color-adjust:exact!important;print-color-adjust:exact!important}.msg{box-shadow:none;break-inside:avoid}details.rw iframe{display:none!important}details.tc .tb,details.thinking .thinking-body{display:none!important}details.tc,details.thinking,details.rw{break-inside:avoid;border:1px solid #ccc;border-radius:4px;margin:4px 0}details.tc summary,details.thinking summary,details.rw summary{opacity:1!important;color:#333!important;padding:4px 8px!important}}`;
+
+  function previewOneLine(s, max) {
+    return String(s || "").replace(/[\n\r\t]+/g, " ").trim().slice(0, max || 100);
+  }
+
+  function toolCallArgsText(tc) {
+    const fn = tc?.function || tc || {};
+    const ag = fn.arguments ?? "";
+    if (typeof ag === "string") {
+      try { return JSON.stringify(JSON.parse(ag), null, 2); } catch { return ag; }
+    }
+    try { return JSON.stringify(ag, null, 2); } catch { return String(ag); }
+  }
+
+  function buildToolCallArgsById(ms) {
+    const map = {};
+    for (const m of ms) {
+      if (m.role !== "assistant" || !Array.isArray(m.tool_calls)) continue;
+      for (const tc of m.tool_calls) {
+        if (tc?.id) map[tc.id] = tc;
+      }
+    }
+    return map;
+  }
+
+  function getReasoning(m) {
+    const rc = m?.reasoning_content ?? m?.reasoning;
+    if (rc == null) return "";
+    return S(rc).trim();
+  }
+
+  function toolCallsAnsweredLater(ms, fromIndex, ids) {
+    const answered = new Set();
+    for (let k = fromIndex + 1; k < ms.length && ms[k].role !== "user"; k++) {
+      if (ms[k].role === "tool" && ms[k].tool_call_id) answered.add(ms[k].tool_call_id);
+    }
+    return ids.filter((id) => id && !answered.has(id));
+  }
+
+  function parseToolCallArgs(tc) {
+    if (!tc) return null;
+    const fn = tc.function || tc;
+    const ag = fn.arguments;
+    if (ag == null) return null;
+    if (typeof ag === "object") return ag;
+    try { return JSON.parse(ag); } catch { return { raw: ag }; }
+  }
+
+  function renderThinkingBlock(text) {
+    const t = String(text || "").trim();
+    if (!t) return "";
+    const pv = previewOneLine(t, 90);
+    return `<details class="thinking"><summary>Thinking \u2014 ${E(pv)}${t.length > 90 ? "\u2026" : ""}</summary><div class="tb thinking-body">${Mblock(t)}</div></details>`;
+  }
+
+  function renderToolCallPending(tc) {
+    const fn = tc.function || tc;
+    const nm = fn.name || "tool";
+    const ag = toolCallArgsText(tc);
+    const pv = previewOneLine(ag, 70);
+    return `<details class="tc"><summary><b>${E(nm)}</b> \u2014 ${E(pv)}${ag.length > 70 ? "\u2026" : ""}</summary><div class="tb"><div class="tc-sec"><span class="tc-lbl">Arguments</span><pre class="tc-pre">${E(ag || "(none)")}</pre></div><div class="tc-sec"><span class="tc-lbl">Output</span><pre class="tc-pre">(no response in export)</pre></div></div></details>`;
+  }
+
+  function renderToolResult(n, tcById, maps) {
+    const tn = n.name || maps.names[n.tool_call_id] || "tool";
+    const tc = tcById[n.tool_call_id];
+    let agObj = parseToolCallArgs(tc);
+    if (!agObj && maps.args) {
+      for (const row of Object.values(maps.args)) {
+        if (row && row[tn]) { agObj = row[tn]; break; }
+      }
+    }
+    if (RT[tn]) return renderArt(tn, agObj);
+    const b = S(n.content || "");
+    const pv = previewOneLine(b, 100);
+    const ag = tc ? toolCallArgsText(tc) : (agObj ? JSON.stringify(agObj, null, 2) : "");
+    const argsBlock = ag
+      ? `<div class="tc-sec"><span class="tc-lbl">Arguments</span><pre class="tc-pre">${E(ag)}</pre></div>`
+      : "";
+    return `<details class="tc"><summary><b>${E(tn)}</b> \u2014 ${E(pv)}${b.length > 100 ? "\u2026" : ""}</summary><div class="tb">${argsBlock}<div class="tc-sec"><span class="tc-lbl">Output</span><pre class="tc-pre">${E(b || "(empty)")}</pre></div></div></details>`;
+  }
 
   function buildChatHTML(ms) {
-    const maps = buildMaps(ms); let out = "";
+    const maps = buildMaps(ms);
+    const tcById = buildToolCallArgsById(ms);
+    let out = "";
     for (let i = 0; i < ms.length; i++) {
-      const m = ms[i]; if (m.role !== "user") continue;
+      const m = ms[i];
+      if (m.role !== "user") continue;
       out += `<div class="turn"><div class="msg u"><span class="rl">You</span><div class="bd">${Mblock(S(m.content))}</div></div>`;
-      let tools = ""; const replies = []; let j = i + 1;
+      let j = i + 1;
       while (j < ms.length && ms[j].role !== "user") {
         const n = ms[j];
-        if (n.role === "tool") {
-          const tn = n.name || maps.names[n.tool_call_id] || "tool";
-          if (RT[tn]) {
-            let ag = null;
-            for (let k = j - 1; k >= Math.max(0, j - 7); k--) { if (maps.args[k]?.[tn]) { ag = maps.args[k][tn]; break; } }
-            tools += renderArt(tn, ag);
-          } else {
-            const b = S(n.content || ""), pv = b.replace(/[\n\r]+/g, " ").slice(0, 100);
-            tools += `<details class="tc"><summary><b>${E(tn)}</b> \u2014 ${E(pv)}${b.length > 100 ? "\u2026" : ""}</summary><div class="tb">${E(b || "(empty)")}</div></details>`;
+        if (n.role === "assistant") {
+          const think = getReasoning(n);
+          if (think) out += renderThinkingBlock(think);
+          if (Array.isArray(n.tool_calls) && n.tool_calls.length) {
+            const pending = toolCallsAnsweredLater(ms, j, n.tool_calls.map((tc) => tc.id));
+            for (const tc of n.tool_calls) {
+              if (pending.includes(tc.id)) out += renderToolCallPending(tc);
+            }
           }
-        } else if (n.role === "assistant") {
-          const ac = S(n.content); if (ac.trim().length > 2) replies.push(ac);
+          const ac = S(n.content);
+          if (ac.trim().length > 2) {
+            out += `<div class="msg a"><span class="rl">Assistant</span><div class="bd">${Mblock(ac)}</div></div>`;
+          }
+        } else if (n.role === "tool") {
+          out += renderToolResult(n, tcById, maps);
         }
         j++;
       }
-      out += tools;
-      if (replies.length) out += `<div class="msg a"><span class="rl">Assistant</span><div class="bd">${Mblock(replies[replies.length - 1])}</div></div>`;
-      out += `</div>`; i = j - 1;
+      out += `</div>`;
+      i = j - 1;
     }
     return out || `<div style="text-align:center;color:var(--c2);padding:40px">No messages.</div>`;
   }
@@ -732,60 +822,108 @@
     return zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
   }
 
-  async function htmlToPdfBlob(html) {
-    await ensurePdfLibs();
-    const iframe = document.createElement("iframe");
-    iframe.setAttribute("sandbox", "allow-same-origin allow-scripts");
-    iframe.style.cssText = "position:fixed;left:-10000px;top:0;width:820px;height:1200px;border:0;opacity:0;pointer-events:none";
-    document.body.appendChild(iframe);
-    const doc = iframe.contentDocument;
-    doc.open();
-    doc.write(html);
-    doc.close();
-    await sleep(1500);
+  function plainForPdf(text) {
+    let s = S(text);
+    s = s.replace(/```[\s\S]*?```/g, "[code block]");
+    s = s.replace(/`([^`\n]+)`/g, "$1");
+    s = s.replace(/\*\*\*(.+?)\*\*\*/g, "$1");
+    s = s.replace(/\*\*(.+?)\*\*/g, "$1");
+    s = s.replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1");
+    s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+    return s.replace(/\r\n/g, "\n").trim();
+  }
 
+  async function chatToVectorPdfBlob(chat) {
+    await ensurePdfLibs();
     const { jsPDF } = window.jspdf;
     const pdf = new jsPDF({ unit: "pt", format: "a4", orientation: "portrait" });
     const pageW = pdf.internal.pageSize.getWidth();
     const pageH = pdf.internal.pageSize.getHeight();
-    const margin = 36;
-    const contentW = pageW - margin * 2;
+    const margin = 48;
+    const maxW = pageW - margin * 2;
     let y = margin;
-    const blocks = [...doc.querySelectorAll(".hd, .turn")];
-    if (!blocks.length) blocks.push(doc.body);
 
-    for (const el of blocks) {
-      const canvas = await window.html2canvas(el, { scale: 1.25, useCORS: true, logging: false, backgroundColor: null });
-      if (!canvas.width || !canvas.height) continue;
-      const imgData = canvas.toDataURL("image/jpeg", 0.9);
-      let drawH = (canvas.height * contentW) / canvas.width;
-      let offsetY = 0;
-      while (offsetY < drawH) {
-        const space = pageH - margin - y;
-        if (space < 40) {
-          pdf.addPage();
-          y = margin;
-          continue;
-        }
-        const sliceH = Math.min(space, drawH - offsetY);
-        const sliceRatio = sliceH / drawH;
-        const srcH = canvas.height * sliceRatio;
-        const sliceCanvas = document.createElement("canvas");
-        sliceCanvas.width = canvas.width;
-        sliceCanvas.height = Math.max(1, Math.floor(srcH));
-        const ctx = sliceCanvas.getContext("2d");
-        ctx.drawImage(canvas, 0, (offsetY / drawH) * canvas.height, canvas.width, srcH, 0, 0, sliceCanvas.width, sliceCanvas.height);
-        const sliceImg = sliceCanvas.toDataURL("image/jpeg", 0.9);
-        pdf.addImage(sliceImg, "JPEG", margin, y, contentW, sliceH);
-        y += sliceH + 8;
-        offsetY += sliceH;
-        if (offsetY < drawH) {
-          pdf.addPage();
-          y = margin;
-        }
+    const ensureSpace = (need) => {
+      if (y + need > pageH - margin) {
+        pdf.addPage();
+        y = margin;
       }
+    };
+
+    const writeLines = (text, opts = {}) => {
+      const size = opts.size || 10;
+      const style = opts.style || "normal";
+      const lineH = opts.lineH || (size + 3);
+      pdf.setFont("helvetica", style);
+      pdf.setFontSize(size);
+      const lines = pdf.splitTextToSize(String(text || ""), maxW);
+      for (const line of lines) {
+        ensureSpace(lineH);
+        pdf.text(line, margin, y);
+        y += lineH;
+      }
+    };
+
+    const { title, messages } = chatExportPayload(chat);
+    const maps = buildMaps(messages);
+    const tcById = buildToolCallArgsById(messages);
+
+    writeLines(title, { size: 16, style: "bold", lineH: 20 });
+    y += 4;
+    writeLines(
+      "Exported " + new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
+      { size: 9, style: "italic", lineH: 12 }
+    );
+    y += 12;
+
+    for (let i = 0; i < messages.length; i++) {
+      const m = messages[i];
+      if (m.role !== "user") continue;
+      ensureSpace(16);
+      writeLines("You", { size: 9, style: "bold", lineH: 12 });
+      writeLines(plainForPdf(m.content), { size: 10, lineH: 13 });
+      y += 6;
+
+      let j = i + 1;
+      while (j < messages.length && messages[j].role !== "user") {
+        const n = messages[j];
+        if (n.role === "assistant") {
+          const think = getReasoning(n);
+          if (think) {
+            writeLines(
+              `[Thinking] ${previewOneLine(think, 72)}${think.length > 72 ? "…" : ""} (${think.length} characters)`,
+              { size: 9, style: "italic", lineH: 11 }
+            );
+          }
+          if (Array.isArray(n.tool_calls)) {
+            const pending = toolCallsAnsweredLater(messages, j, n.tool_calls.map((tc) => tc.id));
+            for (const tc of n.tool_calls) {
+              if (!pending.includes(tc.id)) continue;
+              const fn = tc.function || tc;
+              const nm = fn.name || "tool";
+              writeLines(`[Tool call] ${nm} — ${previewOneLine(toolCallArgsText(tc), 60)}`, { size: 9, style: "italic", lineH: 11 });
+            }
+          }
+          const ac = plainForPdf(n.content);
+          if (ac.length > 2) {
+            writeLines("Assistant", { size: 9, style: "bold", lineH: 12 });
+            writeLines(ac, { size: 10, lineH: 13 });
+            y += 4;
+          }
+        } else if (n.role === "tool") {
+          const tn = n.name || maps.names[n.tool_call_id] || "tool";
+          const body = S(n.content || "");
+          writeLines(
+            `[Tool] ${tn} — ${previewOneLine(body, 72)}${body.length > 72 ? "…" : ""}`,
+            { size: 9, style: "italic", lineH: 11 }
+          );
+        }
+        j++;
+      }
+      y += 8;
+      i = j - 1;
     }
-    iframe.remove();
+
     const out = pdf.output("arraybuffer");
     if (!out || out.byteLength < 800) throw new Error("PDF render produced empty output.");
     return new Blob([out], { type: "application/pdf" });
@@ -808,7 +946,7 @@
     const html = await htmlFromChat(chat);
     const base = safeName(chat.chatTitle || getTitle());
     try {
-      const pdfBlob = await htmlToPdfBlob(html);
+      const pdfBlob = await chatToVectorPdfBlob(chat);
       await deliverFile(pdfBlob, `${base}-${Date.now()}.pdf`);
       showStatus("PDF exported.", 2500);
     } catch (e) {
@@ -837,7 +975,7 @@
     let pdfName = null;
     try {
       showStatus("Rendering PDF…");
-      pdfBlob = await htmlToPdfBlob(html);
+      pdfBlob = await chatToVectorPdfBlob(chat);
       pdfName = `${base}-${stamp}.pdf`;
     } catch (e) {
       console.warn(TAG, "Archival PDF skipped, including HTML", e);
@@ -894,7 +1032,7 @@
   }
 
   function inject(modal) {
-    if (!modal || modal.querySelector("[data-tmx='v13']")) return;
+    if (!modal || modal.querySelector("[data-tmx='v14']")) return;
     const grid = modal.querySelector(".grid.grid-cols-2");
     if (!grid) return;
 
@@ -913,7 +1051,7 @@
     grid.appendChild(r);
 
     const m = document.createElement("div");
-    m.setAttribute("data-tmx", "v13");
+    m.setAttribute("data-tmx", "v14");
     m.style.display = "none";
     modal.appendChild(m);
     log("Custom Export injected.");
@@ -924,5 +1062,5 @@
     if (modal) inject(modal);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
-  log("v13 loaded.");
+  log("v14 loaded.");
 })();
