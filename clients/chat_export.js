@@ -1,11 +1,11 @@
 (() => {
   /******************************************************************
-   * TypingMind Exporter v14 — one-shot Custom Export
+   * TypingMind Exporter v15 — one-shot Custom Export
    * Interactive HTML, Nice PDF (file), Archival Export (import zip + PDF)
    * Reads open chat from IndexedDB; no sidebar export listener.
    ******************************************************************/
 
-  const TAG = "[TMX v14]";
+  const TAG = "[TMX v15]";
   const log = (...a) => console.log(TAG, ...a);
 
   const SEL = {
@@ -17,7 +17,6 @@
     katexCss: "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css",
     katexJs: "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js",
     jszip: "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
-    jspdf: "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js",
   };
 
   const sEl = document.createElement("style");
@@ -222,11 +221,6 @@
     if (!window.JSZip) throw new Error("JSZip unavailable");
   }
 
-  async function ensurePdfLibs() {
-    await loadScript(CDN.jspdf, () => window.jspdf?.jsPDF);
-    if (!window.jspdf?.jsPDF) throw new Error("PDF library unavailable");
-  }
-
   async function deliverFile(blob, filename) {
     const file = new File([blob], filename, { type: blob.type || "application/octet-stream" });
     try {
@@ -256,9 +250,47 @@
   function S(c) {
     if (c == null) return "";
     if (typeof c === "string") return c;
-    if (Array.isArray(c)) return c.map((x) => x?.text || x?.content || String(x)).join("\n");
+    if (Array.isArray(c)) return c.map((x) => (typeof x === "string" ? x : (x?.text || x?.content || ""))).filter(Boolean).join("\n");
     if (typeof c === "object") return JSON.stringify(c, null, 2);
     return String(c);
+  }
+
+  function attachmentLabel(record) {
+    if (!record || typeof record !== "object") return "";
+    const stored = typeof record.text === "string" ? record.text.trim() : "";
+    if (stored.startsWith("[File Attachment:")) return stored;
+    const meta = record.metadata || {};
+    const name = meta.name || record.name;
+    if (!name) return "";
+    const mime = meta.type || "";
+    return mime ? `[File Attachment: ${name} (${mime})]` : `[File Attachment: ${name}]`;
+  }
+
+  function viewText(content, registry) {
+    if (content == null) return "";
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return S(content);
+    const pieces = [];
+    for (const part of content) {
+      if (part == null) continue;
+      if (typeof part === "string") { pieces.push(part); continue; }
+      if (typeof part !== "object") continue;
+      if (part.type === "thinking") continue;
+      if (part.type === "tm_blob_file") {
+        const label = attachmentLabel(part);
+        if (label) pieces.push(label);
+        continue;
+      }
+      if (part.type === "tm_attachment_ref") {
+        const rec = registry && part.id ? registry[part.id] : null;
+        const label = attachmentLabel(rec) || attachmentLabel(part);
+        if (label) pieces.push(label);
+        continue;
+      }
+      if (typeof part.text === "string" && part.text) pieces.push(part.text);
+      else if (typeof part.content === "string" && part.content) pieces.push(part.content);
+    }
+    return pieces.join("\n");
   }
   function SH(s) {
     if (!s) return "";
@@ -604,14 +636,14 @@
     return `<details class="tc"><summary><b>${E(tn)}</b> \u2014 ${E(pv)}${b.length > 100 ? "\u2026" : ""}</summary><div class="tb">${argsBlock}<div class="tc-sec"><span class="tc-lbl">Output</span><pre class="tc-pre">${E(b || "(empty)")}</pre></div></div></details>`;
   }
 
-  function buildChatHTML(ms) {
+  function buildChatHTML(ms, registry) {
     const maps = buildMaps(ms);
     const tcById = buildToolCallArgsById(ms);
     let out = "";
     for (let i = 0; i < ms.length; i++) {
       const m = ms[i];
       if (m.role !== "user") continue;
-      out += `<div class="turn"><div class="msg u"><span class="rl">You</span><div class="bd">${Mblock(S(m.content))}</div></div>`;
+      out += `<div class="turn"><div class="msg u"><span class="rl">You</span><div class="bd">${Mblock(viewText(m.content, registry))}</div></div>`;
       let j = i + 1;
       while (j < ms.length && ms[j].role !== "user") {
         const n = ms[j];
@@ -624,7 +656,7 @@
               if (pending.includes(tc.id)) out += renderToolCallPending(tc);
             }
           }
-          const ac = S(n.content);
+          const ac = viewText(n.content, registry);
           if (ac.trim().length > 2) {
             out += `<div class="msg a"><span class="rl">Assistant</span><div class="bd">${Mblock(ac)}</div></div>`;
           }
@@ -639,9 +671,9 @@
     return out || `<div style="text-align:center;color:var(--c2);padding:40px">No messages.</div>`;
   }
 
-  function buildHTML(title, messages) {
+  function buildHTML(title, messages, registry) {
     const dt = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
-    return `<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${E(title)}</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><style>${OCSS}</style></head><body><div class="w"><div class="hd"><h1>${E(title)}</h1><p>${E("Exported " + dt)}</p><button class="tt" onclick="TT()" title="Toggle theme"><span class="td">&#x2600;&#xFE0F;</span><span class="tl">&#x1F319;</span></button></div>${buildChatHTML(messages)}</div><script>function TT(){var h=document.documentElement,c=h.getAttribute("data-theme")||"dark";h.setAttribute("data-theme",c==="dark"?"light":"dark")}<\/script></body></html>`;
+    return `<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${E(title)}</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><style>${OCSS}</style></head><body><div class="w"><div class="hd"><h1>${E(title)}</h1><p>${E("Exported " + dt)}</p><button class="tt" onclick="TT()" title="Toggle theme"><span class="td">&#x2600;&#xFE0F;</span><span class="tl">&#x1F319;</span></button></div>${buildChatHTML(messages, registry)}</div><script>function TT(){var h=document.documentElement,c=h.getAttribute("data-theme")||"dark";h.setAttribute("data-theme",c==="dark"?"light":"dark")}<\/script></body></html>`;
   }
 
 
@@ -652,7 +684,16 @@
   async function htmlFromChat(chat) {
     await ensureKaTeX().catch(() => {});
     const { title, messages } = chatExportPayload(chat);
-    return buildHTML(title, messages);
+    return buildHTML(title, messages, chat.attachmentRegistry || {});
+  }
+
+  function openPrintView(html) {
+    const w = window.open("", "_blank");
+    if (!w) throw new Error("Popup blocked. Allow popups, then choose Save as PDF in the print dialog.");
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+    setTimeout(() => { try { w.focus(); w.print(); } catch {} }, 900);
   }
 
   async function validateBlob(blob, metadata) {
@@ -822,113 +863,6 @@
     return zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
   }
 
-  function plainForPdf(text) {
-    let s = S(text);
-    s = s.replace(/```[\s\S]*?```/g, "[code block]");
-    s = s.replace(/`([^`\n]+)`/g, "$1");
-    s = s.replace(/\*\*\*(.+?)\*\*\*/g, "$1");
-    s = s.replace(/\*\*(.+?)\*\*/g, "$1");
-    s = s.replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1");
-    s = s.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
-    return s.replace(/\r\n/g, "\n").trim();
-  }
-
-  async function chatToVectorPdfBlob(chat) {
-    await ensurePdfLibs();
-    const { jsPDF } = window.jspdf;
-    const pdf = new jsPDF({ unit: "pt", format: "a4", orientation: "portrait" });
-    const pageW = pdf.internal.pageSize.getWidth();
-    const pageH = pdf.internal.pageSize.getHeight();
-    const margin = 48;
-    const maxW = pageW - margin * 2;
-    let y = margin;
-
-    const ensureSpace = (need) => {
-      if (y + need > pageH - margin) {
-        pdf.addPage();
-        y = margin;
-      }
-    };
-
-    const writeLines = (text, opts = {}) => {
-      const size = opts.size || 10;
-      const style = opts.style || "normal";
-      const lineH = opts.lineH || (size + 3);
-      pdf.setFont("helvetica", style);
-      pdf.setFontSize(size);
-      const lines = pdf.splitTextToSize(String(text || ""), maxW);
-      for (const line of lines) {
-        ensureSpace(lineH);
-        pdf.text(line, margin, y);
-        y += lineH;
-      }
-    };
-
-    const { title, messages } = chatExportPayload(chat);
-    const maps = buildMaps(messages);
-    const tcById = buildToolCallArgsById(messages);
-
-    writeLines(title, { size: 16, style: "bold", lineH: 20 });
-    y += 4;
-    writeLines(
-      "Exported " + new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" }),
-      { size: 9, style: "italic", lineH: 12 }
-    );
-    y += 12;
-
-    for (let i = 0; i < messages.length; i++) {
-      const m = messages[i];
-      if (m.role !== "user") continue;
-      ensureSpace(16);
-      writeLines("You", { size: 9, style: "bold", lineH: 12 });
-      writeLines(plainForPdf(m.content), { size: 10, lineH: 13 });
-      y += 6;
-
-      let j = i + 1;
-      while (j < messages.length && messages[j].role !== "user") {
-        const n = messages[j];
-        if (n.role === "assistant") {
-          const think = getReasoning(n);
-          if (think) {
-            writeLines(
-              `[Thinking] ${previewOneLine(think, 72)}${think.length > 72 ? "…" : ""} (${think.length} characters)`,
-              { size: 9, style: "italic", lineH: 11 }
-            );
-          }
-          if (Array.isArray(n.tool_calls)) {
-            const pending = toolCallsAnsweredLater(messages, j, n.tool_calls.map((tc) => tc.id));
-            for (const tc of n.tool_calls) {
-              if (!pending.includes(tc.id)) continue;
-              const fn = tc.function || tc;
-              const nm = fn.name || "tool";
-              writeLines(`[Tool call] ${nm} — ${previewOneLine(toolCallArgsText(tc), 60)}`, { size: 9, style: "italic", lineH: 11 });
-            }
-          }
-          const ac = plainForPdf(n.content);
-          if (ac.length > 2) {
-            writeLines("Assistant", { size: 9, style: "bold", lineH: 12 });
-            writeLines(ac, { size: 10, lineH: 13 });
-            y += 4;
-          }
-        } else if (n.role === "tool") {
-          const tn = n.name || maps.names[n.tool_call_id] || "tool";
-          const body = S(n.content || "");
-          writeLines(
-            `[Tool] ${tn} — ${previewOneLine(body, 72)}${body.length > 72 ? "…" : ""}`,
-            { size: 9, style: "italic", lineH: 11 }
-          );
-        }
-        j++;
-      }
-      y += 8;
-      i = j - 1;
-    }
-
-    const out = pdf.output("arraybuffer");
-    if (!out || out.byteLength < 800) throw new Error("PDF render produced empty output.");
-    return new Blob([out], { type: "application/pdf" });
-  }
-
   async function exportInteractiveHtml() {
     closeModal();
     showStatus("Building HTML…");
@@ -941,27 +875,11 @@
 
   async function exportNicePdf() {
     closeModal();
-    showStatus("Building PDF…");
+    showStatus("Opening print view…");
     const chat = await readOpenChat();
     const html = await htmlFromChat(chat);
-    const base = safeName(chat.chatTitle || getTitle());
-    try {
-      const pdfBlob = await chatToVectorPdfBlob(chat);
-      await deliverFile(pdfBlob, `${base}-${Date.now()}.pdf`);
-      showStatus("PDF exported.", 2500);
-    } catch (e) {
-      console.warn(TAG, "PDF file render failed, opening print view", e);
-      const w = window.open("", "_blank");
-      if (w) {
-        w.document.open();
-        w.document.write(html);
-        w.document.close();
-        setTimeout(() => { try { w.focus(); w.print(); } catch {} }, 900);
-        showStatus("Opened print view (PDF file render unavailable).", 4000);
-      } else {
-        throw new Error("PDF render failed and popup was blocked.");
-      }
-    }
+    openPrintView(html);
+    showStatus("Choose Save as PDF in the print dialog.", 4000);
   }
 
   async function exportArchival() {
@@ -971,22 +889,12 @@
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     showStatus("Preparing archival export…");
     const html = await htmlFromChat(chat);
-    let pdfBlob = null;
-    let pdfName = null;
-    try {
-      showStatus("Rendering PDF…");
-      pdfBlob = await chatToVectorPdfBlob(chat);
-      pdfName = `${base}-${stamp}.pdf`;
-    } catch (e) {
-      console.warn(TAG, "Archival PDF skipped, including HTML", e);
-    }
     showStatus("Building import package…");
     const importZipBlob = await buildTypingMindImportZip(chat, (m) => showStatus(m));
     await ensureJsZip();
     const outer = new window.JSZip();
     outer.file("typingmind-import.zip", importZipBlob);
-    if (pdfBlob && pdfName) outer.file(pdfName, pdfBlob);
-    else outer.file("chat.html", html);
+    outer.file("chat.html", html);
     showStatus("Creating zip…");
     const outerBlob = await outer.generateAsync({ type: "blob", compression: "DEFLATE" });
     await deliverFile(outerBlob, `${base}-archival-${stamp}.zip`);
@@ -1032,7 +940,7 @@
   }
 
   function inject(modal) {
-    if (!modal || modal.querySelector("[data-tmx='v14']")) return;
+    if (!modal || modal.querySelector("[data-tmx='v15']")) return;
     const grid = modal.querySelector(".grid.grid-cols-2");
     if (!grid) return;
 
@@ -1046,12 +954,12 @@
     l.className = "flex items-center justify-end";
     l.appendChild(btn);
     const r = document.createElement("div");
-    r.textContent = "HTML, PDF, or archival zip (TypingMind import + PDF). One click, no sidebar export.";
+    r.textContent = "HTML, print-to-PDF, or archival zip (TypingMind import + HTML). One click, no sidebar export.";
     grid.appendChild(l);
     grid.appendChild(r);
 
     const m = document.createElement("div");
-    m.setAttribute("data-tmx", "v14");
+    m.setAttribute("data-tmx", "v15");
     m.style.display = "none";
     modal.appendChild(m);
     log("Custom Export injected.");
@@ -1062,5 +970,5 @@
     if (modal) inject(modal);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
-  log("v14 loaded.");
+  log("v15 loaded.");
 })();
