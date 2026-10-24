@@ -1,11 +1,11 @@
 (() => {
   /******************************************************************
-   * TypingMind Exporter v19 — one-shot Custom Export
+   * TypingMind Exporter v20 — one-shot Custom Export
    * Interactive HTML, Nice PDF (file), Archival Export (import zip + PDF)
    * Reads open chat from IndexedDB; no sidebar export listener.
    ******************************************************************/
 
-  const TAG = "[TMX v19]";
+  const TAG = "[TMX v20]";
   const log = (...a) => console.log(TAG, ...a);
 
   const SEL = {
@@ -874,28 +874,65 @@
     return urls;
   }
 
-  async function tryCaptureBlob(url, metadata) {
-    for (const u of attachmentUrlCandidates(url)) {
-      try {
-        const res = await fetch(u, { credentials: "include", cache: "no-store" });
-        if (!res.ok) continue;
-        const blob = await res.blob();
-        if (await blobIsCapturable(blob, metadata)) return blob;
-      } catch {}
+  async function blobFromEmbeddedBase64(part) {
+    const raw = part?.metadata?.base64;
+    if (typeof raw !== "string" || raw.length < 40) return null;
+    try {
+      const cleaned = raw.replace(/^data:[^,]*,/, "");
+      const bin = atob(cleaned);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return new Blob([bytes], { type: part?.metadata?.type || "application/octet-stream" });
+    } catch {
+      return null;
+    }
+  }
+
+  function localIdCandidates(part) {
+    const ids = [];
+    const add = (value) => {
+      const id = value == null ? "" : String(value);
+      if (id && !ids.includes(id)) ids.push(id);
+    };
+    add(part?.metadata?.localBlobID);
+    add(part?.id);
+    add(part?.sync?.blobID);
+    return ids;
+  }
+
+  async function fetchCapturable(url, metadata, cacheMode) {
+    const res = await fetch(url, { credentials: "include", cache: cacheMode });
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    if (await blobIsCapturable(blob, metadata)) return blob;
+    return null;
+  }
+
+  async function captureAttachmentBytes(part) {
+    const meta = part?.metadata;
+    for (const id of localIdCandidates(part)) {
+      const blob = await retrieveBlob(id);
+      if (await blobIsCapturable(blob, meta)) return blob;
+    }
+    const embedded = await blobFromEmbeddedBase64(part);
+    if (await blobIsCapturable(embedded, meta)) return embedded;
+    const urls = attachmentUrlCandidates(part?.sync?.url);
+    for (const cacheMode of ["no-store", "default"]) {
+      for (const url of urls) {
+        try {
+          const blob = await fetchCapturable(url, meta, cacheMode);
+          if (blob) return blob;
+        } catch {}
+      }
     }
     return null;
   }
 
-  async function remoteAttachmentExists(url) {
-    for (const u of attachmentUrlCandidates(url)) {
-      try {
-        const res = await fetch(u, { credentials: "include", cache: "no-store" });
-        const ok = res.ok;
-        try { await res.body?.cancel(); } catch {}
-        if (ok) return true;
-      } catch {}
-    }
-    return false;
+  function attachmentGroupKey(part) {
+    if (part?.sync?.url) return "url:" + part.sync.url;
+    if (part?.metadata?.localBlobID) return "local:" + part.metadata.localBlobID;
+    if (typeof part?.metadata?.base64 === "string" && part.metadata.base64.length > 40) return "b64:" + (part.id || "");
+    return "";
   }
 
   async function findMissingAttachmentKeys(chat) {
@@ -903,26 +940,17 @@
     const names = [];
     const groups = new Map();
     forEachContentPart(chat, (part) => {
-      const lid = part?.metadata?.localBlobID ? "local:" + part.metadata.localBlobID : "";
-      const url = part?.sync?.url ? "url:" + part.sync.url : "";
-      const gk = lid || url;
+      const gk = attachmentGroupKey(part);
       if (!gk) return;
       if (!groups.has(gk)) groups.set(gk, { part, keys: [] });
       for (const key of attachmentKeys(part)) groups.get(gk).keys.push(key);
     });
     for (const [, group] of groups) {
-      let ok = false;
-      const lid = group.part?.metadata?.localBlobID;
-      if (lid) {
-        const blob = await retrieveBlob(lid);
-        ok = await blobIsCapturable(blob, group.part.metadata);
-      }
-      if (!ok && group.part?.sync?.url) ok = await remoteAttachmentExists(group.part.sync.url);
-      if (!ok) {
-        for (const key of group.keys) missing.add(key);
-        const name = attachmentFileName(group.part);
-        if (!names.includes(name)) names.push(name);
-      }
+      const blob = await captureAttachmentBytes(group.part);
+      if (blob) continue;
+      for (const key of group.keys) missing.add(key);
+      const name = attachmentFileName(group.part);
+      if (!names.includes(name)) names.push(name);
     }
     return { keys: missing, names };
   }
@@ -1027,45 +1055,11 @@
     walk(chat.messages || [], ["messages"]);
   }
 
-  function collectSyncGroups(chat) {
-    const groups = new Map();
-    forEachContentPart(chat, (part, path) => {
-      const sync = part.sync;
-      if (!sync?.blobID || !sync?.url) return;
-      const bid = String(sync.blobID);
-      if (!groups.has(bid)) groups.set(bid, { blobID: bid, url: sync.url, metadata: part.metadata, paths: [] });
-      groups.get(bid).paths.push(path);
-    });
-    return groups;
-  }
-
-  function collectLocalBlobIds(chat) {
-    const ids = new Map();
-    forEachContentPart(chat, (part, path) => {
-      const lid = part.metadata?.localBlobID;
-      if (lid) {
-        const k = String(lid);
-        if (!ids.has(k)) ids.set(k, []);
-        ids.get(k).push(path);
-      }
-    });
-    return ids;
-  }
-
   function applyLocalIdAtPaths(chat, paths, localId) {
     for (const path of paths) {
       const target = getAtPath(chat, path);
       if (target) setAttachmentLocal(target, localId);
     }
-  }
-
-  function clearCloudSync(part) {
-    if (!part || typeof part !== "object") return;
-    part.sync = null;
-  }
-
-  function clearCloudSyncAtPaths(chat, paths) {
-    for (const path of paths) clearCloudSync(getAtPath(chat, path));
   }
 
   function markMissingPart(part, missingKeys) {
@@ -1115,39 +1109,22 @@
       return true;
     }
 
-    const localIds = collectLocalBlobIds(clone);
-    for (const [localId, paths] of localIds) {
-      say("Reading local attachment…");
-      const sample = getAtPath(clone, paths[0]);
-      const meta = sample?.metadata;
-      let blob = await retrieveBlob(localId);
-      if (!(await blobIsCapturable(blob, meta)) && sample?.sync?.url) {
-        say("Downloading attachment for archive…");
-        blob = await tryCaptureBlob(sample.sync.url, meta);
-      }
-      if (await storeCaptured(blob, meta, localId, paths, sample)) continue;
-      markMissingAtPaths(clone, paths, missingKeys);
-      rememberFailure(failed, sample);
-      skipped += 1;
-    }
-
-    const syncGroups = collectSyncGroups(clone);
-    for (const [, group] of syncGroups) {
-      say("Downloading attachment for archive…");
-      const blob = await tryCaptureBlob(group.url, group.metadata);
-      const localId = newId();
-      const sample = getAtPath(clone, group.paths[0]);
-      if (await storeCaptured(blob, group.metadata, localId, group.paths, sample)) continue;
-      markMissingAtPaths(clone, group.paths, missingKeys);
-      rememberFailure(failed, sample);
-      skipped += 1;
-    }
-
+    const groups = new Map();
     forEachContentPart(clone, (part, path) => {
-      if (!part?.sync?.url) return;
-      rememberFailure(failed, part);
-      markMissingAtPaths(clone, [path], missingKeys);
+      const gk = attachmentGroupKey(part);
+      if (!gk) return;
+      if (!groups.has(gk)) groups.set(gk, { part, paths: [] });
+      groups.get(gk).paths.push(path);
     });
+    for (const [, group] of groups) {
+      say("Downloading attachment for archive…");
+      const blob = await captureAttachmentBytes(group.part);
+      const localId = group.part?.metadata?.localBlobID || newId();
+      if (await storeCaptured(blob, group.part?.metadata, String(localId), group.paths, group.part)) continue;
+      markMissingAtPaths(clone, group.paths, missingKeys);
+      rememberFailure(failed, group.part);
+      skipped += 1;
+    }
 
     const zip = new window.JSZip();
     const metadata = {};
@@ -1249,7 +1226,7 @@
   }
 
   function inject(modal) {
-    if (!modal || modal.querySelector("[data-tmx='v19']")) return;
+    if (!modal || modal.querySelector("[data-tmx='v20']")) return;
     const grid = modal.querySelector(".grid.grid-cols-2");
     if (!grid) return;
 
@@ -1268,7 +1245,7 @@
     grid.appendChild(r);
 
     const m = document.createElement("div");
-    m.setAttribute("data-tmx", "v19");
+    m.setAttribute("data-tmx", "v20");
     m.style.display = "none";
     modal.appendChild(m);
     log("Custom Export injected.");
@@ -1279,5 +1256,5 @@
     if (modal) inject(modal);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
-  log("v19 loaded.");
+  log("v20 loaded.");
 })();
