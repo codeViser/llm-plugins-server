@@ -506,8 +506,18 @@
     }
   }
 
+  function attachmentFetchUrl(url) {
+    try {
+      const u = new URL(String(url || ""));
+      u.searchParams.delete("presign_token");
+      return u.toString();
+    } catch {
+      return String(url || "");
+    }
+  }
+
   async function fetchAttachmentBlob(url, metadata) {
-    const u = String(url || "").split("?")[0];
+    const u = attachmentFetchUrl(url);
     if (!u) throw new Error("Missing attachment URL.");
     const res = await fetch(u, { credentials: "include", cache: "no-cache" });
     if (!res.ok) throw new Error("Attachment download failed (HTTP " + res.status + ").");
