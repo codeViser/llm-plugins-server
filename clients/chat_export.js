@@ -1,11 +1,11 @@
 (() => {
   /******************************************************************
-   * TypingMind Exporter v15 — one-shot Custom Export
+   * TypingMind Exporter v16 — one-shot Custom Export
    * Interactive HTML, Nice PDF (file), Archival Export (import zip + PDF)
    * Reads open chat from IndexedDB; no sidebar export listener.
    ******************************************************************/
 
-  const TAG = "[TMX v15]";
+  const TAG = "[TMX v16]";
   const log = (...a) => console.log(TAG, ...a);
 
   const SEL = {
@@ -30,6 +30,12 @@
     .tmx-menu-panel .opt-html{background:#00a884;color:#111b21}
     .tmx-menu-panel .opt-pdf{background:#f59e0b;color:#111b21}
     .tmx-menu-panel .opt-zip{background:#6366f1;color:#fff}
+    .tmx-dl{position:fixed;inset:0;z-index:2147483645;background:rgba(0,0,0,.5);display:flex;align-items:flex-end;justify-content:center;padding:12px}
+    .tmx-dl-panel{background:#1f2c34;color:#e9edef;border-radius:14px 14px 10px 10px;padding:16px;width:min(420px,100%);box-shadow:0 -4px 24px rgba(0,0,0,.35);font:13px system-ui,-apple-system,sans-serif}
+    .tmx-dl-panel p{margin:0 0 12px;line-height:1.45;color:#c8d1d6;font-size:12px}
+    .tmx-dl-panel strong{color:#fff;font-weight:800;word-break:break-all}
+    .tmx-dl-btn{display:block;width:100%;padding:12px;border-radius:10px;background:#00a884;color:#111b21;font-weight:800;text-align:center;text-decoration:none;margin-bottom:8px}
+    .tmx-dl-dismiss{display:block;width:100%;padding:10px;border:none;border-radius:10px;background:rgba(255,255,255,.12);color:#fff;font-weight:700;cursor:pointer}
   `;
   document.documentElement.appendChild(sEl);
 
@@ -221,24 +227,105 @@
     if (!window.JSZip) throw new Error("JSZip unavailable");
   }
 
-  async function deliverFile(blob, filename) {
-    const file = new File([blob], filename, { type: blob.type || "application/octet-stream" });
-    try {
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: filename });
-        return;
-      }
-    } catch (e) {
-      if (e?.name !== "AbortError") console.warn(TAG, "share failed, falling back to download", e);
-      else throw e;
-    }
+  function exportMimeType(filename, blob) {
+    const name = String(filename || "").toLowerCase();
+    if (name.endsWith(".zip")) return "application/zip";
+    if (name.endsWith(".html") || name.endsWith(".htm")) return "text/html;charset=utf-8";
+    if (name.endsWith(".pdf")) return "application/pdf";
+    const t = String(blob?.type || "").trim();
+    if (t && t !== "application/octet-stream") return t;
+    return "application/octet-stream";
+  }
+
+  function normalizedExportBlob(blob, filename) {
+    const mime = exportMimeType(filename, blob);
+    if (blob instanceof Blob && blob.type === mime) return blob;
+    return new Blob([blob], { type: mime });
+  }
+
+  function isMobileExportClient() {
+    const ua = String(navigator.userAgent || "");
+    if (/Android/i.test(ua)) return true;
+    if (/iPhone|iPod|iPad/i.test(ua)) return true;
+    if (navigator.maxTouchPoints > 1 && /Macintosh/i.test(ua)) return true;
+    return false;
+  }
+
+  function exportUsesDownloadNotShare(filename) {
+    const name = String(filename || "").toLowerCase();
+    if (/\.(zip|html|htm|pdf|json)$/i.test(name)) return true;
+    return isMobileExportClient();
+  }
+
+  function offerDownloadFallback(blob, filename) {
+    if (!isMobileExportClient()) return;
+    try { document.querySelectorAll(".tmx-dl").forEach((n) => n.remove()); } catch {}
+    const u = URL.createObjectURL(blob);
+    const wrap = document.createElement("div");
+    wrap.className = "tmx-dl";
+    const panel = document.createElement("div");
+    panel.className = "tmx-dl-panel";
+    const p = document.createElement("p");
+    const strong = document.createElement("strong");
+    strong.textContent = filename;
+    p.append("Save ", strong, " to your device.");
+    const a = document.createElement("a");
+    a.className = "tmx-dl-btn";
+    a.href = u;
+    a.download = filename;
+    a.textContent = "Download file";
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.className = "tmx-dl-dismiss";
+    dismiss.textContent = "Dismiss";
+    dismiss.addEventListener("click", () => {
+      wrap.remove();
+      setTimeout(() => { try { URL.revokeObjectURL(u); } catch {} }, 120000);
+    });
+    panel.append(p, a, dismiss);
+    wrap.append(panel);
+    document.body.appendChild(wrap);
+  }
+
+  function triggerBlobDownload(blob, filename) {
     const u = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = u;
     a.download = filename;
+    a.rel = "noopener";
+    a.style.display = "none";
     document.body.appendChild(a);
-    a.click();
-    setTimeout(() => { try { URL.revokeObjectURL(u); a.remove(); } catch {} }, 500);
+    const run = () => {
+      try { a.click(); } catch (e) { console.warn(TAG, "download click failed", e); }
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+    else run();
+    setTimeout(() => {
+      try { a.remove(); } catch {}
+      setTimeout(() => { try { URL.revokeObjectURL(u); } catch {} }, isMobileExportClient() ? 120000 : 1500);
+    }, 300);
+  }
+
+  async function deliverFile(blob, filename) {
+    const safeName = String(filename || "export").replace(/[/\\?%*:|"<>]/g, "-");
+    const out = normalizedExportBlob(blob, safeName);
+    const file = new File([out], safeName, { type: out.type || "application/octet-stream" });
+    const preferDownload = exportUsesDownloadNotShare(safeName);
+
+    if (!preferDownload) {
+      try {
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          await navigator.share({ files: [file], title: safeName });
+          return;
+        }
+      } catch (e) {
+        if (e?.name === "AbortError") throw e;
+        console.warn(TAG, "share failed, falling back to download", e);
+      }
+    }
+
+    triggerBlobDownload(out, safeName);
+    offerDownloadFallback(out, safeName);
   }
 
   function chatExportPayload(chat) {
@@ -896,7 +983,11 @@
     outer.file("typingmind-import.zip", importZipBlob);
     outer.file("chat.html", html);
     showStatus("Creating zip…");
-    const outerBlob = await outer.generateAsync({ type: "blob", compression: "DEFLATE" });
+    const outerBlob = await outer.generateAsync({
+      type: "blob",
+      mimeType: "application/zip",
+      compression: "DEFLATE",
+    });
     await deliverFile(outerBlob, `${base}-archival-${stamp}.zip`);
     showStatus("Archival export complete.", 3000);
   }
@@ -940,7 +1031,7 @@
   }
 
   function inject(modal) {
-    if (!modal || modal.querySelector("[data-tmx='v15']")) return;
+    if (!modal || modal.querySelector("[data-tmx='v16']")) return;
     const grid = modal.querySelector(".grid.grid-cols-2");
     if (!grid) return;
 
@@ -959,7 +1050,7 @@
     grid.appendChild(r);
 
     const m = document.createElement("div");
-    m.setAttribute("data-tmx", "v15");
+    m.setAttribute("data-tmx", "v16");
     m.style.display = "none";
     modal.appendChild(m);
     log("Custom Export injected.");
@@ -970,5 +1061,5 @@
     if (modal) inject(modal);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
-  log("v15 loaded.");
+  log("v16 loaded.");
 })();
