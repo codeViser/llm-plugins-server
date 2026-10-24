@@ -1,11 +1,11 @@
 (() => {
   /******************************************************************
-   * TypingMind Exporter v16 — one-shot Custom Export
+   * TypingMind Exporter v17 — one-shot Custom Export
    * Interactive HTML, Nice PDF (file), Archival Export (import zip + PDF)
    * Reads open chat from IndexedDB; no sidebar export listener.
    ******************************************************************/
 
-  const TAG = "[TMX v16]";
+  const TAG = "[TMX v17]";
   const log = (...a) => console.log(TAG, ...a);
 
   const SEL = {
@@ -816,6 +816,11 @@
     } catch (e) {
       throw new Error("Could not download an attachment. Stay signed in and try again.");
     }
+    if (res.status === 404) {
+      const missing = new Error("Attachment is no longer stored.");
+      missing.code = "TMX_ATTACHMENT_MISSING";
+      throw missing;
+    }
     if (!res.ok) throw new Error("Attachment download failed (HTTP " + res.status + ").");
     const blob = await res.blob();
     await validateBlob(blob, metadata);
@@ -904,11 +909,25 @@
     }
   }
 
+  function clearCloudSync(part) {
+    if (!part || typeof part !== "object") return;
+    part.sync = null;
+  }
+
+  function clearCloudSyncAtPaths(chat, paths) {
+    for (const path of paths) clearCloudSync(getAtPath(chat, path));
+  }
+
+  function isMissingAttachment(err) {
+    return err && err.code === "TMX_ATTACHMENT_MISSING";
+  }
+
   async function buildTypingMindImportZip(chat, onProgress) {
     await ensureJsZip();
     const clone = JSON.parse(JSON.stringify(chat));
     const blobEntries = new Map();
     const say = (m) => { if (onProgress) onProgress(m); };
+    let skipped = 0;
 
     const localIds = collectLocalBlobIds(clone);
     for (const [localId, paths] of localIds) {
@@ -917,7 +936,16 @@
       if (!blob) {
         const sample = getAtPath(clone, paths[0]);
         const url = sample?.sync?.url;
-        if (url) blob = await fetchAttachmentBlob(url, sample?.metadata);
+        if (url) {
+          try {
+            blob = await fetchAttachmentBlob(url, sample?.metadata);
+          } catch (err) {
+            if (!isMissingAttachment(err)) throw err;
+            clearCloudSyncAtPaths(clone, paths);
+            skipped += 1;
+            continue;
+          }
+        }
       }
       if (!blob) throw new Error("Local attachment missing from device storage.");
       await validateBlob(blob, getAtPath(clone, paths[0])?.metadata);
@@ -928,7 +956,15 @@
     const syncGroups = collectSyncGroups(clone);
     for (const [, group] of syncGroups) {
       say("Downloading attachment for archive…");
-      const blob = await fetchAttachmentBlob(group.url, group.metadata);
+      let blob;
+      try {
+        blob = await fetchAttachmentBlob(group.url, group.metadata);
+      } catch (err) {
+        if (!isMissingAttachment(err)) throw err;
+        clearCloudSyncAtPaths(clone, group.paths);
+        skipped += 1;
+        continue;
+      }
       const localId = newId();
       blobEntries.set(localId, { blob, mime: blob.type || group.metadata?.type || "application/octet-stream" });
       applyLocalIdAtPaths(clone, group.paths, localId);
@@ -947,7 +983,8 @@
     }
     zip.file("data.json", JSON.stringify({ data: { chats: [clone] } }));
     zip.file("metadata.json", JSON.stringify(metadata));
-    return zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+    const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
+    return { blob, skipped };
   }
 
   async function exportInteractiveHtml() {
@@ -977,7 +1014,8 @@
     showStatus("Preparing archival export…");
     const html = await htmlFromChat(chat);
     showStatus("Building import package…");
-    const importZipBlob = await buildTypingMindImportZip(chat, (m) => showStatus(m));
+    const packed = await buildTypingMindImportZip(chat, (m) => showStatus(m));
+    const importZipBlob = packed.blob;
     await ensureJsZip();
     const outer = new window.JSZip();
     outer.file("typingmind-import.zip", importZipBlob);
@@ -989,7 +1027,8 @@
       compression: "DEFLATE",
     });
     await deliverFile(outerBlob, `${base}-archival-${stamp}.zip`);
-    showStatus("Archival export complete.", 3000);
+    const skipped = packed.skipped || 0;
+    showStatus(skipped ? "Archival export complete. Skipped " + skipped + " attachments that are no longer stored." : "Archival export complete.", 4000);
   }
 
   function openCustomExportMenu() {
@@ -1031,7 +1070,7 @@
   }
 
   function inject(modal) {
-    if (!modal || modal.querySelector("[data-tmx='v16']")) return;
+    if (!modal || modal.querySelector("[data-tmx='v17']")) return;
     const grid = modal.querySelector(".grid.grid-cols-2");
     if (!grid) return;
 
@@ -1050,7 +1089,7 @@
     grid.appendChild(r);
 
     const m = document.createElement("div");
-    m.setAttribute("data-tmx", "v16");
+    m.setAttribute("data-tmx", "v17");
     m.style.display = "none";
     modal.appendChild(m);
     log("Custom Export injected.");
@@ -1061,5 +1100,5 @@
     if (modal) inject(modal);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
-  log("v16 loaded.");
+  log("v17 loaded.");
 })();
