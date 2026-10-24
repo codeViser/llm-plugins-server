@@ -92,17 +92,90 @@
     });
   }
 
+  function asChatRecord(raw) {
+    if (raw == null) return null;
+    if (typeof raw === "string") {
+      try { raw = JSON.parse(raw); } catch { return null; }
+    }
+    if (!raw || typeof raw !== "object" || !Array.isArray(raw.messages)) return null;
+    return raw;
+  }
+
+  function cloneChat(chat) {
+    return JSON.parse(JSON.stringify(chat));
+  }
+
+  async function findStoredChat(hash) {
+    const direct = asChatRecord(await idbGet("CHAT_" + hash));
+    if (direct && (direct.id === hash || direct.chatID === hash || !direct.id)) return direct;
+    const db = await openKeyvalDb();
+    const keys = await new Promise((resolve, reject) => {
+      const tx = db.transaction("keyval", "readonly");
+      const req = tx.objectStore("keyval").getAllKeys();
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    const chatKeys = keys.filter((k) => typeof k === "string" && k.startsWith("CHAT_"));
+    for (const key of chatKeys) {
+      const rec = asChatRecord(await new Promise((resolve, reject) => {
+        const tx = db.transaction("keyval", "readonly");
+        const req = tx.objectStore("keyval").get(key);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      }));
+      if (rec && (rec.id === hash || rec.chatID === hash || key === "CHAT_" + hash)) {
+        db.close();
+        return rec;
+      }
+    }
+    db.close();
+    return direct;
+  }
+
+  function findRenderedChat(hash) {
+    const rootEl = document.getElementById("__next") || document.body;
+    const fiberKey = Object.keys(rootEl).find((k) => k.startsWith("__reactContainer") || k.startsWith("__reactFiber"));
+    const root = fiberKey ? rootEl[fiberKey] : null;
+    if (!root) return null;
+    const seen = new Set();
+    const stack = [root];
+    let best = null;
+    let fibers = 0;
+    const consider = (obj) => {
+      if (!obj || typeof obj !== "object" || !Array.isArray(obj.messages)) return;
+      if (obj.id !== hash && obj.chatID !== hash) return;
+      if (!best || obj.messages.length > best.messages.length) best = obj;
+    };
+    while (stack.length && fibers < 200000) {
+      const node = stack.pop();
+      if (!node || typeof node !== "object" || seen.has(node)) continue;
+      seen.add(node);
+      fibers += 1;
+      consider(node.memoizedProps);
+      consider(node.pendingProps);
+      let hook = node.memoizedState;
+      let hops = 0;
+      while (hook && hops < 40) {
+        consider(hook.memoizedState);
+        if (Array.isArray(hook.memoizedState)) hook.memoizedState.forEach(consider);
+        hook = hook.next;
+        hops += 1;
+      }
+      if (node.child) stack.push(node.child);
+      if (node.sibling) stack.push(node.sibling);
+    }
+    return best ? cloneChat(best) : null;
+  }
+
   async function readOpenChat() {
     const m = location.hash.match(/chat=([^&]+)/);
-    if (!m) throw new Error("Open a chat first (no #chat= in URL).");
-    const key = "CHAT_" + m[1];
-    let raw = await idbGet(key);
-    if (raw == null) throw new Error("Chat not found in local storage.");
-    if (typeof raw === "string") {
-      try { raw = JSON.parse(raw); } catch { throw new Error("Chat record is not valid JSON."); }
-    }
-    if (!raw || !Array.isArray(raw.messages)) throw new Error("Chat record has no messages.");
-    return raw;
+    if (!m) throw new Error("Open a chat first.");
+    const hash = decodeURIComponent(m[1]);
+    const stored = await findStoredChat(hash);
+    if (stored && stored.messages.length) return cloneChat(stored);
+    const rendered = findRenderedChat(hash);
+    if (rendered && rendered.messages.length) return rendered;
+    throw new Error("This chat is not available to export yet. Open it from the sidebar and try again.");
   }
 
   async function retrieveBlob(localId) {
