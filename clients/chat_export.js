@@ -1,11 +1,11 @@
 (() => {
   /******************************************************************
-   * TypingMind Exporter v17 — one-shot Custom Export
+   * TypingMind Exporter v19 — one-shot Custom Export
    * Interactive HTML, Nice PDF (file), Archival Export (import zip + PDF)
    * Reads open chat from IndexedDB; no sidebar export listener.
    ******************************************************************/
 
-  const TAG = "[TMX v17]";
+  const TAG = "[TMX v19]";
   const log = (...a) => console.log(TAG, ...a);
 
   const SEL = {
@@ -36,6 +36,13 @@
     .tmx-dl-panel strong{color:#fff;font-weight:800;word-break:break-all}
     .tmx-dl-btn{display:block;width:100%;padding:12px;border-radius:10px;background:#00a884;color:#111b21;font-weight:800;text-align:center;text-decoration:none;margin-bottom:8px}
     .tmx-dl-dismiss{display:block;width:100%;padding:10px;border:none;border-radius:10px;background:rgba(255,255,255,.12);color:#fff;font-weight:700;cursor:pointer}
+    .tmx-fail{position:fixed;left:12px;right:12px;bottom:12px;z-index:2147483647;display:flex;justify-content:center}
+    .tmx-fail-panel{background:#1f2c34;color:#e9edef;border-radius:14px;padding:14px;width:min(460px,100%);max-height:min(62vh,440px);overflow:auto;box-shadow:0 8px 32px rgba(0,0,0,.45);font:13px/1.45 system-ui,-apple-system,sans-serif}
+    .tmx-fail-panel h3{margin:0 0 8px;font-size:14px}
+    .tmx-fail-panel ul{margin:0 0 10px;padding-left:18px}
+    .tmx-fail-panel li{margin:3px 0;word-break:break-word}
+    .tmx-fail-panel p{margin:0 0 10px;color:#c8d1d6;font-size:12px}
+    .tmx-fail-panel button{width:100%;padding:10px;border:none;border-radius:10px;background:rgba(255,255,255,.12);color:#fff;font-weight:700;cursor:pointer}
   `;
   document.documentElement.appendChild(sEl);
 
@@ -49,6 +56,32 @@
     document.body.appendChild(d);
     if (durationMs) setTimeout(() => { d.style.opacity = "0"; setTimeout(() => { try { d.remove(); } catch {} }, 400); }, durationMs);
     return d;
+  }
+
+  function showFailedFetchToast(names, detail) {
+    try { document.querySelectorAll(".tmx-fail").forEach((n) => n.remove()); } catch {}
+    if (!names || !names.length) return;
+    const wrap = document.createElement("div");
+    wrap.className = "tmx-fail";
+    const panel = document.createElement("div");
+    panel.className = "tmx-fail-panel";
+    const h = document.createElement("h3");
+    h.textContent = "Export saved. These attachments could not be fetched:";
+    const ul = document.createElement("ul");
+    for (const name of names) {
+      const li = document.createElement("li");
+      li.textContent = name;
+      ul.appendChild(li);
+    }
+    const p = document.createElement("p");
+    p.textContent = detail;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Dismiss";
+    btn.addEventListener("click", () => wrap.remove());
+    panel.append(h, ul, p, btn);
+    wrap.appendChild(panel);
+    document.body.appendChild(wrap);
   }
 
   function getTitle() {
@@ -342,18 +375,41 @@
     return String(c);
   }
 
-  function attachmentLabel(record) {
-    if (!record || typeof record !== "object") return "";
-    const stored = typeof record.text === "string" ? record.text.trim() : "";
-    if (stored.startsWith("[File Attachment:")) return stored;
-    const meta = record.metadata || {};
-    const name = meta.name || record.name;
-    if (!name) return "";
-    const mime = meta.type || "";
-    return mime ? `[File Attachment: ${name} (${mime})]` : `[File Attachment: ${name}]`;
+  const MISSING_MARK = "[Missing Captured Download]";
+
+  function attachmentKeys(part) {
+    const keys = [];
+    if (part?.id) keys.push("id:" + part.id);
+    if (part?.sync?.blobID) keys.push("blob:" + part.sync.blobID);
+    if (part?.metadata?.localBlobID) keys.push("local:" + part.metadata.localBlobID);
+    return keys;
   }
 
-  function viewText(content, registry) {
+  function isMissingRecord(record, missingKeys) {
+    if (!missingKeys || !record) return false;
+    return attachmentKeys(record).some((key) => missingKeys.has(key));
+  }
+
+  function attachmentLabel(record, missingKeys) {
+    if (!record || typeof record !== "object") return "";
+    const stored = typeof record.text === "string" ? record.text.trim() : "";
+    let label = "";
+    if (stored.startsWith("[File Attachment:") || stored.startsWith(MISSING_MARK)) label = stored;
+    else {
+      const meta = record.metadata || {};
+      const name = meta.name || record.name;
+      if (name) {
+        const mime = meta.type || "";
+        label = mime ? `[File Attachment: ${name} (${mime})]` : `[File Attachment: ${name}]`;
+      }
+    }
+    if (!isMissingRecord(record, missingKeys)) return label;
+    if (!label) return MISSING_MARK;
+    if (label.includes(MISSING_MARK)) return label;
+    return MISSING_MARK + " " + label;
+  }
+
+  function viewText(content, registry, missingKeys) {
     if (content == null) return "";
     if (typeof content === "string") return content;
     if (!Array.isArray(content)) return S(content);
@@ -364,13 +420,13 @@
       if (typeof part !== "object") continue;
       if (part.type === "thinking") continue;
       if (part.type === "tm_blob_file") {
-        const label = attachmentLabel(part);
+        const label = attachmentLabel(part, missingKeys);
         if (label) pieces.push(label);
         continue;
       }
       if (part.type === "tm_attachment_ref") {
         const rec = registry && part.id ? registry[part.id] : null;
-        const label = attachmentLabel(rec) || attachmentLabel(part);
+        const label = attachmentLabel(rec, missingKeys) || attachmentLabel(part, missingKeys);
         if (label) pieces.push(label);
         continue;
       }
@@ -723,14 +779,14 @@
     return `<details class="tc"><summary><b>${E(tn)}</b> \u2014 ${E(pv)}${b.length > 100 ? "\u2026" : ""}</summary><div class="tb">${argsBlock}<div class="tc-sec"><span class="tc-lbl">Output</span><pre class="tc-pre">${E(b || "(empty)")}</pre></div></div></details>`;
   }
 
-  function buildChatHTML(ms, registry) {
+  function buildChatHTML(ms, registry, missingKeys) {
     const maps = buildMaps(ms);
     const tcById = buildToolCallArgsById(ms);
     let out = "";
     for (let i = 0; i < ms.length; i++) {
       const m = ms[i];
       if (m.role !== "user") continue;
-      out += `<div class="turn"><div class="msg u"><span class="rl">You</span><div class="bd">${Mblock(viewText(m.content, registry))}</div></div>`;
+      out += `<div class="turn"><div class="msg u"><span class="rl">You</span><div class="bd">${Mblock(viewText(m.content, registry, missingKeys))}</div></div>`;
       let j = i + 1;
       while (j < ms.length && ms[j].role !== "user") {
         const n = ms[j];
@@ -743,7 +799,7 @@
               if (pending.includes(tc.id)) out += renderToolCallPending(tc);
             }
           }
-          const ac = viewText(n.content, registry);
+          const ac = viewText(n.content, registry, missingKeys);
           if (ac.trim().length > 2) {
             out += `<div class="msg a"><span class="rl">Assistant</span><div class="bd">${Mblock(ac)}</div></div>`;
           }
@@ -758,9 +814,9 @@
     return out || `<div style="text-align:center;color:var(--c2);padding:40px">No messages.</div>`;
   }
 
-  function buildHTML(title, messages, registry) {
+  function buildHTML(title, messages, registry, missingKeys) {
     const dt = new Date().toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
-    return `<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${E(title)}</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><style>${OCSS}</style></head><body><div class="w"><div class="hd"><h1>${E(title)}</h1><p>${E("Exported " + dt)}</p><button class="tt" onclick="TT()" title="Toggle theme"><span class="td">&#x2600;&#xFE0F;</span><span class="tl">&#x1F319;</span></button></div>${buildChatHTML(messages, registry)}</div><script>function TT(){var h=document.documentElement,c=h.getAttribute("data-theme")||"dark";h.setAttribute("data-theme",c==="dark"?"light":"dark")}<\/script></body></html>`;
+    return `<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${E(title)}</title><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"><style>${OCSS}</style></head><body><div class="w"><div class="hd"><h1>${E(title)}</h1><p>${E("Exported " + dt)}</p><button class="tt" onclick="TT()" title="Toggle theme"><span class="td">&#x2600;&#xFE0F;</span><span class="tl">&#x1F319;</span></button></div>${buildChatHTML(messages, registry, missingKeys)}</div><script>function TT(){var h=document.documentElement,c=h.getAttribute("data-theme")||"dark";h.setAttribute("data-theme",c==="dark"?"light":"dark")}<\/script></body></html>`;
   }
 
 
@@ -768,10 +824,20 @@
     deliverFile(new Blob([content], { type: mime }), name);
   }
 
-  async function htmlFromChat(chat) {
+  async function htmlFromChat(chat, missingKeys) {
     await ensureKaTeX().catch(() => {});
     const { title, messages } = chatExportPayload(chat);
-    return buildHTML(title, messages, chat.attachmentRegistry || {});
+    let missing = missingKeys;
+    let failedNames = [];
+    if (!missing) {
+      const found = await findMissingAttachmentKeys(chat);
+      missing = found.keys;
+      failedNames = found.names;
+    }
+    return {
+      html: buildHTML(title, messages, chat.attachmentRegistry || {}, missing),
+      failedNames,
+    };
   }
 
   function openPrintView(html) {
@@ -783,18 +849,122 @@
     setTimeout(() => { try { w.focus(); w.print(); } catch {} }, 900);
   }
 
-  async function validateBlob(blob, metadata) {
-    if (!blob || blob.size <= 32) throw new Error("Attachment empty or unreadable.");
-    const expected = Number(metadata?.size || 0);
-    if (expected > 0 && blob.size !== expected) {
-      throw new Error("Attachment size mismatch (expected " + expected + ", got " + blob.size + ").");
-    }
+  async function blobIsCapturable(blob, metadata) {
+    if (!blob || blob.size <= 32) return false;
     const mime = String(metadata?.type || blob.type || "");
-    if (mime === "application/pdf" || (metadata?.fileFormat === "pdf")) {
+    const format = String(metadata?.fileFormat || "");
+    if (mime === "application/pdf" || format === "pdf") {
       const head = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
-      const magic = String.fromCharCode(...head);
-      if (magic !== "%PDF-") throw new Error("Downloaded file is not a valid PDF.");
+      if (String.fromCharCode(...head) !== "%PDF-") return false;
     }
+    const got = String(blob.type || "");
+    const expectsJson = mime.includes("json") || format === "json";
+    const expectsHtml = mime.includes("html") || format === "html";
+    if (!expectsJson && got.includes("application/json")) return false;
+    if (!expectsHtml && got.includes("text/html")) return false;
+    return true;
+  }
+
+  function attachmentUrlCandidates(url) {
+    const urls = [];
+    const raw = String(url || "");
+    if (raw) urls.push(raw);
+    const stripped = attachmentFetchUrl(raw);
+    if (stripped && !urls.includes(stripped)) urls.push(stripped);
+    return urls;
+  }
+
+  async function tryCaptureBlob(url, metadata) {
+    for (const u of attachmentUrlCandidates(url)) {
+      try {
+        const res = await fetch(u, { credentials: "include", cache: "no-store" });
+        if (!res.ok) continue;
+        const blob = await res.blob();
+        if (await blobIsCapturable(blob, metadata)) return blob;
+      } catch {}
+    }
+    return null;
+  }
+
+  async function remoteAttachmentExists(url) {
+    for (const u of attachmentUrlCandidates(url)) {
+      try {
+        const res = await fetch(u, { credentials: "include", cache: "no-store" });
+        const ok = res.ok;
+        try { await res.body?.cancel(); } catch {}
+        if (ok) return true;
+      } catch {}
+    }
+    return false;
+  }
+
+  async function findMissingAttachmentKeys(chat) {
+    const missing = new Set();
+    const names = [];
+    const groups = new Map();
+    forEachContentPart(chat, (part) => {
+      const lid = part?.metadata?.localBlobID ? "local:" + part.metadata.localBlobID : "";
+      const url = part?.sync?.url ? "url:" + part.sync.url : "";
+      const gk = lid || url;
+      if (!gk) return;
+      if (!groups.has(gk)) groups.set(gk, { part, keys: [] });
+      for (const key of attachmentKeys(part)) groups.get(gk).keys.push(key);
+    });
+    for (const [, group] of groups) {
+      let ok = false;
+      const lid = group.part?.metadata?.localBlobID;
+      if (lid) {
+        const blob = await retrieveBlob(lid);
+        ok = await blobIsCapturable(blob, group.part.metadata);
+      }
+      if (!ok && group.part?.sync?.url) ok = await remoteAttachmentExists(group.part.sync.url);
+      if (!ok) {
+        for (const key of group.keys) missing.add(key);
+        const name = attachmentFileName(group.part);
+        if (!names.includes(name)) names.push(name);
+      }
+    }
+    return { keys: missing, names };
+  }
+
+  function attachmentFileName(part) {
+    const meta = part?.metadata || {};
+    const named = meta.name || part?.name;
+    if (named) return String(named);
+    const stored = typeof part?.text === "string" ? part.text : "";
+    const match = stored.match(/\[File Attachment:\s*([^\](]+)/);
+    if (match && match[1].trim()) return match[1].trim();
+    return "Unnamed attachment";
+  }
+
+  function rememberFailure(list, part) {
+    const name = attachmentFileName(part);
+    const bytes = Number(part?.metadata?.size || 0);
+    if (!list.some((item) => item.name === name && item.bytes === bytes)) list.push({ name, bytes });
+  }
+
+  function formatByteSize(bytes) {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return "size unknown";
+    return n + " bytes";
+  }
+
+  function attachmentReportText(recovered, failed) {
+    const lines = [
+      "Attachment capture report",
+      "Recovered: " + recovered.length,
+      "Failed to fetch: " + failed.length,
+      "Recovered sizes are the saved file sizes. Failed sizes are the sizes recorded on the attachment.",
+      "",
+      "Recovered",
+    ];
+    if (!recovered.length) lines.push("(none)");
+    else recovered.forEach((item) => lines.push("- " + item.name + " — " + formatByteSize(item.bytes)));
+    lines.push("", "Failed to fetch");
+    if (!failed.length) lines.push("(none)");
+    else failed.forEach((item) => lines.push("- " + item.name + " — " + formatByteSize(item.bytes)));
+    lines.push("");
+    return lines.join("\n");
   }
 
   function attachmentFetchUrl(url) {
@@ -805,26 +975,6 @@
     } catch {
       return String(url || "");
     }
-  }
-
-  async function fetchAttachmentBlob(url, metadata) {
-    const u = attachmentFetchUrl(url);
-    if (!u) throw new Error("Missing attachment URL.");
-    let res;
-    try {
-      res = await fetch(u, { credentials: "include", cache: "no-store" });
-    } catch (e) {
-      throw new Error("Could not download an attachment. Stay signed in and try again.");
-    }
-    if (res.status === 404) {
-      const missing = new Error("Attachment is no longer stored.");
-      missing.code = "TMX_ATTACHMENT_MISSING";
-      throw missing;
-    }
-    if (!res.ok) throw new Error("Attachment download failed (HTTP " + res.status + ").");
-    const blob = await res.blob();
-    await validateBlob(blob, metadata);
-    return blob;
   }
 
   function getAtPath(root, path) {
@@ -918,60 +1068,85 @@
     for (const path of paths) clearCloudSync(getAtPath(chat, path));
   }
 
-  function isMissingAttachment(err) {
-    return err && err.code === "TMX_ATTACHMENT_MISSING";
+  function markMissingPart(part, missingKeys) {
+    if (!part || typeof part !== "object") return;
+    for (const key of attachmentKeys(part)) missingKeys.add(key);
+    part.sync = null;
+    const stored = typeof part.text === "string" ? part.text.trim() : "";
+    let nameLabel = stored.startsWith("[File Attachment:") ? stored : "";
+    if (!nameLabel) {
+      const meta = part.metadata || {};
+      const name = meta.name || part.name || "";
+      if (name) {
+        const mime = meta.type || "";
+        nameLabel = mime ? `[File Attachment: ${name} (${mime})]` : `[File Attachment: ${name}]`;
+      }
+    }
+    if (!nameLabel) part.text = MISSING_MARK;
+    else if (nameLabel.includes(MISSING_MARK)) part.text = nameLabel;
+    else part.text = MISSING_MARK + " " + nameLabel;
+  }
+
+  function markMissingAtPaths(chat, paths, missingKeys) {
+    for (const path of paths) markMissingPart(getAtPath(chat, path), missingKeys);
   }
 
   async function buildTypingMindImportZip(chat, onProgress) {
     await ensureJsZip();
     const clone = JSON.parse(JSON.stringify(chat));
     const blobEntries = new Map();
+    const missingKeys = new Set();
+    const failed = [];
+    const recovered = [];
     const say = (m) => { if (onProgress) onProgress(m); };
     let skipped = 0;
+
+    async function storeCaptured(blob, metadata, localId, paths, part) {
+      if (!(await blobIsCapturable(blob, metadata))) return false;
+      blobEntries.set(localId, {
+        blob,
+        mime: blob.type || metadata?.type || "application/octet-stream",
+      });
+      applyLocalIdAtPaths(clone, paths, localId);
+      const name = attachmentFileName(part);
+      if (!recovered.some((item) => item.name === name && item.bytes === blob.size)) {
+        recovered.push({ name, bytes: blob.size });
+      }
+      return true;
+    }
 
     const localIds = collectLocalBlobIds(clone);
     for (const [localId, paths] of localIds) {
       say("Reading local attachment…");
+      const sample = getAtPath(clone, paths[0]);
+      const meta = sample?.metadata;
       let blob = await retrieveBlob(localId);
-      if (!blob) {
-        const sample = getAtPath(clone, paths[0]);
-        const url = sample?.sync?.url;
-        if (url) {
-          try {
-            blob = await fetchAttachmentBlob(url, sample?.metadata);
-          } catch (err) {
-            if (!isMissingAttachment(err)) throw err;
-            clearCloudSyncAtPaths(clone, paths);
-            skipped += 1;
-            continue;
-          }
-        }
+      if (!(await blobIsCapturable(blob, meta)) && sample?.sync?.url) {
+        say("Downloading attachment for archive…");
+        blob = await tryCaptureBlob(sample.sync.url, meta);
       }
-      if (!blob) throw new Error("Local attachment missing from device storage.");
-      await validateBlob(blob, getAtPath(clone, paths[0])?.metadata);
-      blobEntries.set(localId, { blob, mime: blob.type || getAtPath(clone, paths[0])?.metadata?.type || "application/octet-stream" });
-      applyLocalIdAtPaths(clone, paths, localId);
+      if (await storeCaptured(blob, meta, localId, paths, sample)) continue;
+      markMissingAtPaths(clone, paths, missingKeys);
+      rememberFailure(failed, sample);
+      skipped += 1;
     }
 
     const syncGroups = collectSyncGroups(clone);
     for (const [, group] of syncGroups) {
       say("Downloading attachment for archive…");
-      let blob;
-      try {
-        blob = await fetchAttachmentBlob(group.url, group.metadata);
-      } catch (err) {
-        if (!isMissingAttachment(err)) throw err;
-        clearCloudSyncAtPaths(clone, group.paths);
-        skipped += 1;
-        continue;
-      }
+      const blob = await tryCaptureBlob(group.url, group.metadata);
       const localId = newId();
-      blobEntries.set(localId, { blob, mime: blob.type || group.metadata?.type || "application/octet-stream" });
-      applyLocalIdAtPaths(clone, group.paths, localId);
+      const sample = getAtPath(clone, group.paths[0]);
+      if (await storeCaptured(blob, group.metadata, localId, group.paths, sample)) continue;
+      markMissingAtPaths(clone, group.paths, missingKeys);
+      rememberFailure(failed, sample);
+      skipped += 1;
     }
 
-    forEachContentPart(clone, (part) => {
-      if (part.sync?.url) throw new Error("Archive still contains cloud attachment URLs.");
+    forEachContentPart(clone, (part, path) => {
+      if (!part?.sync?.url) return;
+      rememberFailure(failed, part);
+      markMissingAtPaths(clone, [path], missingKeys);
     });
 
     const zip = new window.JSZip();
@@ -984,26 +1159,28 @@
     zip.file("data.json", JSON.stringify({ data: { chats: [clone] } }));
     zip.file("metadata.json", JSON.stringify(metadata));
     const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } });
-    return { blob, skipped };
+    return { blob, skipped, missingKeys, failedNames: failed.map((item) => item.name), failed, recovered };
   }
 
   async function exportInteractiveHtml() {
     closeModal();
     showStatus("Building HTML…");
     const chat = await readOpenChat();
-    const html = await htmlFromChat(chat);
+    const made = await htmlFromChat(chat);
     const base = safeName(chat.chatTitle || getTitle());
-    await deliverFile(new Blob([html], { type: "text/html;charset=utf-8" }), `${base}-${Date.now()}.html`);
+    await deliverFile(new Blob([made.html], { type: "text/html;charset=utf-8" }), `${base}-${Date.now()}.html`);
     showStatus("HTML exported.", 2500);
+    showFailedFetchToast(made.failedNames, "The HTML file was still saved. Missing files are marked " + MISSING_MARK + ".");
   }
 
   async function exportNicePdf() {
     closeModal();
     showStatus("Opening print view…");
     const chat = await readOpenChat();
-    const html = await htmlFromChat(chat);
-    openPrintView(html);
+    const made = await htmlFromChat(chat);
+    openPrintView(made.html);
     showStatus("Choose Save as PDF in the print dialog.", 4000);
+    showFailedFetchToast(made.failedNames, "The print view was still opened. Missing files are marked " + MISSING_MARK + ".");
   }
 
   async function exportArchival() {
@@ -1012,14 +1189,15 @@
     const base = safeName(chat.chatTitle || getTitle());
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     showStatus("Preparing archival export…");
-    const html = await htmlFromChat(chat);
     showStatus("Building import package…");
     const packed = await buildTypingMindImportZip(chat, (m) => showStatus(m));
+    const made = await htmlFromChat(chat, packed.missingKeys);
     const importZipBlob = packed.blob;
     await ensureJsZip();
     const outer = new window.JSZip();
     outer.file("typingmind-import.zip", importZipBlob);
-    outer.file("chat.html", html);
+    outer.file("chat.html", made.html);
+    outer.file("attachments.txt", attachmentReportText(packed.recovered, packed.failed));
     showStatus("Creating zip…");
     const outerBlob = await outer.generateAsync({
       type: "blob",
@@ -1027,8 +1205,9 @@
       compression: "DEFLATE",
     });
     await deliverFile(outerBlob, `${base}-archival-${stamp}.zip`);
-    const skipped = packed.skipped || 0;
-    showStatus(skipped ? "Archival export complete. Skipped " + skipped + " attachments that are no longer stored." : "Archival export complete.", 4000);
+    const failedNames = packed.failedNames || [];
+    showStatus(failedNames.length ? "Archival export complete. Some attachments could not be fetched." : "Archival export complete.", 4000);
+    showFailedFetchToast(failedNames, "The archive was still saved. Recovered and failed files are listed in attachments.txt.");
   }
 
   function openCustomExportMenu() {
@@ -1070,7 +1249,7 @@
   }
 
   function inject(modal) {
-    if (!modal || modal.querySelector("[data-tmx='v17']")) return;
+    if (!modal || modal.querySelector("[data-tmx='v19']")) return;
     const grid = modal.querySelector(".grid.grid-cols-2");
     if (!grid) return;
 
@@ -1089,7 +1268,7 @@
     grid.appendChild(r);
 
     const m = document.createElement("div");
-    m.setAttribute("data-tmx", "v17");
+    m.setAttribute("data-tmx", "v19");
     m.style.display = "none";
     modal.appendChild(m);
     log("Custom Export injected.");
@@ -1100,5 +1279,5 @@
     if (modal) inject(modal);
   }).observe(document.documentElement, { childList: true, subtree: true });
 
-  log("v17 loaded.");
+  log("v19 loaded.");
 })();
