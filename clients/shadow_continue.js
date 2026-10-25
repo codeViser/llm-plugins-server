@@ -276,7 +276,44 @@
     return Number(flowCount) > 0;
   }
 
-  const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask, blobIsUsable, formatStartSummary, runsReady };
+  function parse(value) {
+    if (typeof value !== "string") return value;
+    try { return JSON.parse(value); } catch (err) { return value; }
+  }
+
+  function chatIdFromLocation(href) {
+    const match = String(href || "").match(/[#?&/]chat=([^&#/]+)/);
+    if (!match) return "";
+    try { return decodeURIComponent(match[1]); } catch (err) { return match[1]; }
+  }
+
+  function newestChat(list) {
+    return list.slice().sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")))[0];
+  }
+
+  function findOpenChat(rows, title, chatId) {
+    const chats = [];
+    for (const raw of rows || []) {
+      const chat = parse(raw);
+      if (!chat || typeof chat !== "object" || Array.isArray(chat)) continue;
+      if (!chat.chatID && !chat.messages && chat.chatTitle == null) continue;
+      chats.push(chat);
+    }
+    const wanted = String(chatId || "");
+    if (wanted) {
+      const byChatId = chats.filter((chat) => String(chat.chatID || "") === wanted && !chat.deletedAt);
+      if (byChatId.length) return newestChat(byChatId);
+      const byId = chats.filter((chat) => String(chat.id || "") === wanted && !chat.deletedAt);
+      if (byId.length) return newestChat(byId);
+    }
+    const stripped = String(title || "").replace(/ - TypingMind\.com$/, "").trim();
+    if (!stripped || stripped === "TypingMind" || stripped.startsWith("TypingMind —") || stripped.startsWith("TypingMind - Advanced")) {
+      return null;
+    }
+    return chats.find((chat) => chat.chatTitle === stripped && !chat.deletedAt) || null;
+  }
+
+  const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask, blobIsUsable, formatStartSummary, runsReady, chatIdFromLocation, findOpenChat };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 
   if (typeof document === "undefined") return;
@@ -305,19 +342,11 @@
     });
   }
 
-  function parse(value) {
-    if (typeof value !== "string") return value;
-    try { return JSON.parse(value); } catch (err) { return value; }
-  }
-
   async function openChat() {
-    const title = document.title.replace(/ - TypingMind\.com$/, "");
     const rows = await idbAll();
-    for (const raw of rows) {
-      const chat = parse(raw);
-      if (chat && chat.chatTitle === title) return chat;
-    }
-    throw new Error("open chat was not found");
+    const chat = findOpenChat(rows, document.title, chatIdFromLocation(location.href));
+    if (!chat) throw new Error("open chat was not found");
+    return chat;
   }
 
   function folders() {

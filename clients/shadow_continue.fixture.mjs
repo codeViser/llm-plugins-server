@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const require = createRequire(import.meta.url);
-const { folderPath, scrapeChat, continuationTask, blobIsUsable } = require("./shadow_continue.js");
+const { folderPath, scrapeChat, continuationTask, blobIsUsable, chatIdFromLocation, findOpenChat } = require("./shadow_continue.js");
 
 const folders = [
   { id: "root-a", title: "AdHocPlans", parentID: null, depth: 0, children: [] },
@@ -245,5 +245,18 @@ assert.equal(source.includes("onViewAttachment"), true);
 assert.equal(source.includes("text/html"), true);
 assert.equal(source.includes("tm_attachment_ref"), true);
 assert.equal(source.includes("sync-v2"), false);
+assert.equal(source.includes("chatIdFromLocation"), true);
+
+const productTitle = "TypingMind — Advanced chat UI for AI models";
+const stored = [
+  { chatID: "other", id: "row-other", chatTitle: "RegularChat", messages: [], updatedAt: "2020-01-01T00:00:00.000Z" },
+  { chatID: "chat-untitled", id: "row-new", chatTitle: "", messages: [{ role: "user" }], updatedAt: "2026-10-25T11:01:52.850Z" },
+  { chatID: "chat-untitled", id: "row-old", chatTitle: "Old copy", messages: [{ role: "user" }], deletedAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-24T00:00:00.000Z" }
+];
+assert.equal(chatIdFromLocation("https://www.typingmind.com/#chat=chat-untitled"), "chat-untitled");
+assert.equal(chatIdFromLocation("https://www.typingmind.com/"), "");
+assert.equal(findOpenChat(stored, productTitle, "chat-untitled").id, "row-new");
+assert.equal(findOpenChat(stored, productTitle, ""), null);
+assert.equal(findOpenChat(stored, "RegularChat - TypingMind.com", "").chatID, "other");
 
 console.log("shadow_continue scrape fixtures passed");
