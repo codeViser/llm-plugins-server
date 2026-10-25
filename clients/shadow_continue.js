@@ -307,10 +307,12 @@
       if (byId.length) return newestChat(byId);
     }
     const stripped = String(title || "").replace(/ - TypingMind\.com$/, "").trim();
-    if (!stripped || stripped === "TypingMind" || stripped.startsWith("TypingMind —") || stripped.startsWith("TypingMind - Advanced")) {
+    // "New Chat" is TypingMind's placeholder before title generation. It is not unique.
+    if (!stripped || stripped === "New Chat" || stripped === "Chat" || stripped === "TypingMind" || stripped.startsWith("TypingMind —") || stripped.startsWith("TypingMind - Advanced")) {
       return null;
     }
-    return chats.find((chat) => chat.chatTitle === stripped && !chat.deletedAt) || null;
+    const titled = chats.filter((chat) => chat.chatTitle === stripped && !chat.deletedAt && chat.chatTitle !== "New Chat");
+    return titled.length === 1 ? titled[0] : null;
   }
 
   const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask, blobIsUsable, formatStartSummary, runsReady, chatIdFromLocation, findOpenChat };

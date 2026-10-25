@@ -259,4 +259,13 @@ assert.equal(findOpenChat(stored, productTitle, "chat-untitled").id, "row-new");
 assert.equal(findOpenChat(stored, productTitle, ""), null);
 assert.equal(findOpenChat(stored, "RegularChat - TypingMind.com", "").chatID, "other");
 
+
+const placeholders = [
+  { chatID: "a", id: "row-a", chatTitle: "New Chat", messages: [{ role: "user" }], updatedAt: "2026-01-01T00:00:00.000Z" },
+  { chatID: "b", id: "row-b", chatTitle: "New Chat", messages: [{ role: "user" }], updatedAt: "2026-02-01T00:00:00.000Z" }
+];
+assert.equal(findOpenChat(placeholders, "New Chat - TypingMind.com", ""), null);
+assert.equal(findOpenChat(placeholders, "New Chat", "b").chatID, "b");
+assert.equal(findOpenChat(placeholders, productTitle, "a").chatID, "a");
+
 console.log("shadow_continue scrape fixtures passed");
