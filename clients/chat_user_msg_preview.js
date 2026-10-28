@@ -1,16 +1,24 @@
 // ============================================================
 //  TypingMind — User Message Markdown + Math Renderer
-//  Version : 2.4.1
+//  Version : 2.4.2
 //
-//  What changed vs 2.4.0:
+//  What changed vs 2.4.1 (LIVE-VERIFIED on TPM New Chat):
 //  ─────────────────────────────────────────────────────────
-//  FIX: After Edit → Replace / Regenerate, preview could stick
-//    on the pre-edit text until a full page reload. TM updates
-//    chat state (and storage) promptly, but the hidden DOM
-//    source node is often stale. On edit-end only, resync the
-//    preview from React chat state (msg.content). Normal and
-//    branch-switch paths still use DOM text. Read-only — does
-//    not write message content to storage for this fix.
+//  FIX: After Edit → Replace / Regenerate, preview stuck on the
+//    old overlay. Root causes confirmed in the open chat:
+//    1) data-umr-src only stored the first 100 chars — edits that
+//       kept the same prefix never invalidated the fingerprint
+//       even when the DOM source already had the new full text.
+//    2) TM edit mode uses #chat-input-textbox + Replace button
+//       (data-element-id=replace-only-button) in the composer,
+//       NOT a textarea inside the user-message / response-block.
+//       isEditing() never saw edits, so post-edit hooks never ran.
+//    3) Replace-button mutations live under chat-space-end-part;
+//       the middle-part-only observer could miss edit-end.
+//    Fix: full-text fingerprint; detect composer edit mode;
+//    on Replace/Regenerate end, bust overlays and re-paint from
+//    DOM (with short settle retries). Verified live: preview
+//    updated after Replace without reload.
 //  ─────────────────────────────────────────────────────────
 //  v2.4.0 — Mermaid + sandboxed HTML blocks
 //  v2.3.1 — FIX: list-style-type (ol/ul Tailwind reset)
@@ -266,10 +274,17 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     : Array.isArray(c) ? c.map(x => x?.text ?? x?.content ?? '').join(' ') : '';
 
   /* ── EDIT DETECTION ──────────────────────────────────────────── */
-  function isEditing(msgEl) {
+  // In-bubble textarea (legacy / rare). TM's normal Edit flow does NOT
+  // use this — it loads the text into the bottom composer instead.
+  function isBubbleEditing(msgEl) {
     if (msgEl.querySelector('textarea')) return true;
     const rb = msgEl.closest(CFG.sel.responseBlk);
     return rb ? !!rb.querySelector('textarea') : false;
+  }
+
+  // TM Edit → Replace / Regenerate: composer shows replace-only-button
+  function isComposerEditMode() {
+    return !!document.querySelector('[data-element-id="replace-only-button"]');
   }
 
   /* ── SOURCE TEXT ─────────────────────────────────────────────── */
@@ -282,6 +297,13 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     return text.trim();
   }
 
+  /* Full-text fingerprint — prefix-only (slice 0,100) missed suffix edits */
+  function srcFingerprint(text) {
+    let h = 5381;
+    for (let i = 0; i < text.length; i++) h = ((h << 5) + h) ^ text.charCodeAt(i);
+    return text.length + ':' + (h >>> 0).toString(36);
+  }
+
   /* ── MESSAGE UUID HELPER ─────────────────────────────────────── */
   function getMsgUUID(msgEl) {
     const rb  = msgEl.closest('[data-element-id="response-block"]');
@@ -289,21 +311,9 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     return btn?.id?.replace('message-timestamp-', '') || null;
   }
 
-  /* ── CHAT-STATE TEXT (authoritative after edit) ──────────────── */
-  function getStateText(msgEl) {
-    const uuid = getMsgUUID(msgEl);
-    if (!uuid) return '';
-    const cs = umrGetChatState();
-    const msg = cs?.state?.messages?.find(m => m.uuid === uuid);
-    if (!msg) return '';
-    return extractText(msg.content).trim();
-  }
-
-  // UUID whose preview must be rebuilt from chat state after Edit ends.
-  // Element identity is unreliable (React may remount); UUID is stable.
-  let _pendingResyncUUID = null;
-  let _resyncInFlight    = null; // uuid currently being resynced (re-entrancy guard)
-
+  // Snapshot which user bubble is being edited when composer edit starts
+  let _composerEditing   = false;
+  let _composerEditUUID  = null;
   /* ── BRANCH HISTORY PRESERVATION ──────────────────────────────── *
    *                                                                  *
    * TM's own edit flow REPLACES threads[] with a single entry       *
@@ -402,7 +412,7 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     view.querySelectorAll('img').forEach(img =>
       img.addEventListener('error', () => { img.style.opacity = '0.3'; }, { once: true })
     );
-    msgEl.setAttribute(A_SRC,  rawText.slice(0, 100));
+    msgEl.setAttribute(A_SRC,  srcFingerprint(rawText));
     msgEl.setAttribute(A_DONE, '1');
     msgEl.appendChild(view);
 
@@ -426,105 +436,16 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     return true;
   }
 
-  /* ── POST-EDIT RESYNC (Option 1) ─────────────────────────────── *
-   * Edit-end only: prefer React chat-state text so Replace /       *
-   * Regenerate show the new preview without a page reload.         *
-   * Branch browsing later still uses the normal DOM path.          *
-   * ───────────────────────────────────────────────────────────── */
-  function findUserMsgByUUID(uuid) {
-    if (!uuid) return null;
-    const btn = document.querySelector(`button[id="message-timestamp-${uuid}"]`);
-    return btn?.closest('[data-element-id="response-block"]')
-              ?.querySelector(CFG.sel.userMsg) || null;
-  }
-
-  function clearResync(uuid) {
-    if (_pendingResyncUUID === uuid) _pendingResyncUUID = null;
-    if (_resyncInFlight === uuid)    _resyncInFlight    = null;
-  }
-
-  function resyncAfterEdit(uuid) {
-    if (!uuid) return;
-    if (_resyncInFlight === uuid) return;
-    _resyncInFlight = uuid;
-
-    const MAX = 8;
-    const DELAY = 100;
-
-    const attempt = (n) => {
-      if (_pendingResyncUUID !== uuid) {
-        clearResync(uuid);
-        return;
-      }
-      const msgEl = findUserMsgByUUID(uuid);
-      if (!msgEl || isEditing(msgEl)) {
-        if (n < MAX) setTimeout(() => attempt(n + 1), DELAY);
-        else clearResync(uuid);
-        return;
-      }
-
-      const stateText = getStateText(msgEl);
-      const domText   = getSourceText(msgEl);
-      // Prefer state when present; DOM is fallback while state settles
-      const rawText   = stateText || domText;
-      if (!rawText) {
-        if (n < MAX) setTimeout(() => attempt(n + 1), DELAY);
-        else clearResync(uuid);
-        return;
-      }
-
-      const fp     = rawText.slice(0, 100);
-      const stored = msgEl.getAttribute(A_SRC) || '';
-      if (!(msgEl.hasAttribute(A_DONE) && stored === fp)) {
-        unrender(msgEl);
-        paint(msgEl, rawText);
-      }
-
-      // State present and painted — done (DOM may still lag; that is OK)
-      if (stateText) {
-        clearResync(uuid);
-        // One delayed check: TM sometimes writes state a tick later
-        setTimeout(() => {
-          const el2 = findUserMsgByUUID(uuid);
-          if (!el2 || isEditing(el2)) return;
-          const st2 = getStateText(el2);
-          if (!st2) return;
-          if ((el2.getAttribute(A_SRC) || '') !== st2.slice(0, 100)) {
-            unrender(el2);
-            paint(el2, st2);
-          }
-        }, DELAY);
-        return;
-      }
-
-      // State not ready yet — keep trying with DOM fallback already painted
-      if (n < MAX) setTimeout(() => attempt(n + 1), DELAY);
-      else clearResync(uuid);
-    };
-
-    requestAnimationFrame(() => attempt(0));
-  }
-
   /* ── RENDER ──────────────────────────────────────────────────── */
   function render(msgEl) {
     if (!parser.fn) return;
-    if (isEditing(msgEl)) {
+    if (isBubbleEditing(msgEl)) {
       snapshotBeforeEdit(msgEl);
-      const uuid = getMsgUUID(msgEl) || _editSnapshot?.uuid || null;
-      if (uuid) {
-        _pendingResyncUUID = uuid;
-        _resyncInFlight    = null; // allow a fresh loop after this edit
-      }
       unrender(msgEl);
       return;
     }
-
-    // Edit just ended for this message → state-backed resync path
-    const uuid = getMsgUUID(msgEl);
-    if (uuid && uuid === _pendingResyncUUID) {
-      resyncAfterEdit(uuid);
-      return;
-    }
+    // During composer Edit, keep overlays; snapshot is owned by observeComposerEdit.
+    if (isComposerEditMode()) return;
 
     if (msgEl.hasAttribute(A_DONE)) {
       const view = msgEl.querySelector('[' + A_VIEW + ']');
@@ -532,13 +453,9 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
         msgEl.removeAttribute(A_DONE);
         msgEl.removeAttribute(A_SRC);
       } else {
-        const storedSrc = msgEl.getAttribute(A_SRC) || '';
-        const domSrc    = getSourceText(msgEl).slice(0, 100);
-        if (domSrc === storedSrc) return;
-        // After edit-end resync, DOM often lags while A_SRC already
-        // matches chat state — do not tear down a correct preview.
-        const stateSrc = getStateText(msgEl).slice(0, 100);
-        if (stateSrc && stateSrc === storedSrc) return;
+        const rawText = getSourceText(msgEl);
+        const stored  = msgEl.getAttribute(A_SRC) || '';
+        if (srcFingerprint(rawText) === stored) return;
         unrender(msgEl);
       }
     }
@@ -554,6 +471,24 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     msgEl.removeAttribute(A_SRC);
   }
 
+  /* After composer Replace/Regenerate: DOM has new text — force re-paint */
+  function resyncAfterComposerEdit() {
+    const ca = document.querySelector(CFG.sel.chatArea);
+    if (!ca) return;
+    const targetUUID = _composerEditUUID;
+    _composerEditUUID = null;
+    const bust = () => {
+      ca.querySelectorAll(CFG.sel.userMsg).forEach(el => {
+        if (targetUUID && getMsgUUID(el) !== targetUUID) return;
+        unrender(el);
+      });
+      processAll(ca);
+    };
+    bust();
+    // DOM/state settle after Replace — retry briefly (LIVE-verified timings)
+    [50, 150, 400].forEach(ms => setTimeout(bust, ms));
+  }
+
   /* ── OBSERVE & ATTACH ────────────────────────────────────────── */
   function processAll(chatArea) {
     chatArea.querySelectorAll(CFG.sel.userMsg).forEach(render);
@@ -565,14 +500,79 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     if (_observed.has(chatArea)) return;
     _observed.add(chatArea);
     let rafId = null;
-    new MutationObserver(() => {
+    const kick = () => {
       if (rafId) cancelAnimationFrame(rafId);
-      rafId = requestAnimationFrame(() => { rafId = null; processAll(chatArea); });
-    }).observe(chatArea, {
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        const editing = isComposerEditMode();
+        if (_composerEditing && !editing) {
+          _composerEditing = false;
+          resyncAfterComposerEdit();
+          return;
+        }
+        if (!_composerEditing && editing) {
+          _composerEditing = true;
+          // Prefer the message whose source matches the composer text
+          const input = document.querySelector('#chat-input-textbox, [data-element-id="chat-input-textbox"]');
+          const iv = (input?.value || '').trim();
+          let matched = null;
+          chatArea.querySelectorAll(CFG.sel.userMsg).forEach(el => {
+            if (matched) return;
+            if (iv && getSourceText(el) === iv) matched = el;
+          });
+          const focus = matched || chatArea.querySelector(CFG.sel.userMsg);
+          if (focus) {
+            _composerEditUUID = getMsgUUID(focus);
+            snapshotBeforeEdit(focus);
+          }
+        }
+        _composerEditing = editing;
+        processAll(chatArea);
+      });
+    };
+    new MutationObserver(kick).observe(chatArea, {
       childList    : true,
       subtree      : true,
       characterData: true,
     });
+  }
+
+  // Composer Replace button lives under chat-space-end-part — watch body too
+  let _bodyObserved = false;
+  function observeComposerEdit() {
+    if (_bodyObserved) return;
+    _bodyObserved = true;
+    let rafId = null;
+    new MutationObserver(() => {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        const ca = document.querySelector(CFG.sel.chatArea);
+        if (!ca) return;
+        const editing = isComposerEditMode();
+        if (_composerEditing && !editing) {
+          _composerEditing = false;
+          resyncAfterComposerEdit();
+          return;
+        }
+        if (!_composerEditing && editing) {
+          _composerEditing = true;
+          const input = document.querySelector('#chat-input-textbox, [data-element-id="chat-input-textbox"]');
+          const iv = (input?.value || '').trim();
+          let matched = null;
+          ca.querySelectorAll(CFG.sel.userMsg).forEach(el => {
+            if (matched) return;
+            if (iv && getSourceText(el) === iv) matched = el;
+          });
+          const focus = matched || ca.querySelector(CFG.sel.userMsg);
+          if (focus) {
+            _composerEditUUID = getMsgUUID(focus);
+            snapshotBeforeEdit(focus);
+          }
+        }
+        _composerEditing = editing;
+      });
+    }).observe(document.body, { childList: true, subtree: true });
   }
 
   function attach() {
@@ -580,8 +580,8 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     if (!ca) return;
     processAll(ca);
     observe(ca);
+    observeComposerEdit();
   }
-
   function reRenderAll() {
     document.querySelectorAll(`${CFG.sel.userMsg}[${A_DONE}]`)
       .forEach(msg => { unrender(msg); render(msg); });
@@ -613,7 +613,7 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     };
     attach();
     new MutationObserver(() => attach()).observe(document.body, { childList: true });
-    console.info('[TM-UserMD] ✅ v2.4.1 — Markdown ON');
+    console.info('[TM-UserMD] ✅ v2.4.2 — Markdown ON');
 
     // ── Stage 2: Math (KaTeX) ─────────────────────────────────────
     injectKatexCss();
@@ -627,7 +627,7 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
         return tmp.innerHTML;
       };
       reRenderAll();
-      console.info('[TM-UserMD] ✅ v2.4.1 — Math (KaTeX) ON');
+      console.info('[TM-UserMD] ✅ v2.4.2 — Math (KaTeX) ON');
     } catch (e) {
       console.warn('[TM-UserMD] KaTeX not loaded:', e.message);
     }
@@ -642,7 +642,7 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
           fontFamily   : 'ui-monospace,"Cascadia Code","Fira Code",monospace',
         });
         reRenderAll(); // pick up Mermaid blocks already on screen
-        console.info('[TM-UserMD] ✅ v2.4.1 — Mermaid ON');
+        console.info('[TM-UserMD] ✅ v2.4.2 — Mermaid ON');
       })
       .catch(e => console.warn('[TM-UserMD] Mermaid not loaded:', e.message));
   }
