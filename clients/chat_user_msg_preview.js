@@ -1,33 +1,18 @@
 // ============================================================
 //  TypingMind — User Message Markdown + Math Renderer
-//  Version : 2.4.0
+//  Version : 2.4.1
 //
-//  What changed vs 2.3.1:
+//  What changed vs 2.4.0:
 //  ─────────────────────────────────────────────────────────
-//  NEW: Mermaid.js diagram rendering
-//    • Loads mermaid@11 from CDN (Stage 3, non-blocking)
-//    • renderMermaidBlocks() fires asynchronously AFTER the
-//      view div is in the live DOM — required for mermaid
-//      v10+ render() API
-//    • Targets <pre><code.language-mermaid|mmd>
-//    • Falls back to the code block on render error
-//    • theme:'dark', securityLevel:'antiscript'
-//    • reRenderAll() called after load to catch already-
-//      visible messages
-//
-//  NEW: Sandboxed HTML block rendering
-//    • postProcessDom() converts <pre><code.language-html>
-//      into an <iframe srcdoc sandbox="allow-scripts"> embed
-//    • Injects base dark-theme styles for bare snippets
-//    • Supports Chart.js, Plotly, D3, canvas, Three.js and
-//      any self-contained HTML/JS visual
-//
-//  All v2.3.1 behaviour (LaTeX, Markdown, branch history,
-//  edit detection, fingerprinting, list rendering, table
-//  wrapping, characterData observer, tmg:branchSwitched)
-//  is preserved without structural change.
-//  parseMixedContent() is NOT modified.
+//  FIX: After Edit → Replace / Regenerate, preview could stick
+//    on the pre-edit text until a full page reload. TM updates
+//    chat state (and storage) promptly, but the hidden DOM
+//    source node is often stale. On edit-end only, resync the
+//    preview from React chat state (msg.content). Normal and
+//    branch-switch paths still use DOM text. Read-only — does
+//    not write message content to storage for this fix.
 //  ─────────────────────────────────────────────────────────
+//  v2.4.0 — Mermaid + sandboxed HTML blocks
 //  v2.3.1 — FIX: list-style-type (ol/ul Tailwind reset)
 //  v2.3.0 — Branch history preservation, getSourceText()
 //           A_VIEW exclusion, data-umr-src fingerprint,
@@ -304,6 +289,21 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     return btn?.id?.replace('message-timestamp-', '') || null;
   }
 
+  /* ── CHAT-STATE TEXT (authoritative after edit) ──────────────── */
+  function getStateText(msgEl) {
+    const uuid = getMsgUUID(msgEl);
+    if (!uuid) return '';
+    const cs = umrGetChatState();
+    const msg = cs?.state?.messages?.find(m => m.uuid === uuid);
+    if (!msg) return '';
+    return extractText(msg.content).trim();
+  }
+
+  // UUID whose preview must be rebuilt from chat state after Edit ends.
+  // Element identity is unreliable (React may remount); UUID is stable.
+  let _pendingResyncUUID = null;
+  let _resyncInFlight    = null; // uuid currently being resynced (re-entrancy guard)
+
   /* ── BRANCH HISTORY PRESERVATION ──────────────────────────────── *
    *                                                                  *
    * TM's own edit flow REPLACES threads[] with a single entry       *
@@ -386,34 +386,15 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     }
   }
 
-  /* ── RENDER ──────────────────────────────────────────────────── */
-  function render(msgEl) {
-    if (!parser.fn) return;
-    if (isEditing(msgEl)) {
-      snapshotBeforeEdit(msgEl);
-      unrender(msgEl);
-      return;
-    }
-    if (msgEl.hasAttribute(A_DONE)) {
-      const view = msgEl.querySelector('[' + A_VIEW + ']');
-      if (!view) {
-        msgEl.removeAttribute(A_DONE);
-        msgEl.removeAttribute(A_SRC);
-      } else {
-        const currentSrc = getSourceText(msgEl).slice(0, 100);
-        const storedSrc  = msgEl.getAttribute(A_SRC) || '';
-        if (currentSrc === storedSrc) return;
-        unrender(msgEl);
-      }
-    }
-    const rawText = getSourceText(msgEl);
-    if (!rawText) return;
+  /* ── PAINT (shared by normal + post-edit paths) ──────────────── */
+  function paint(msgEl, rawText) {
+    if (!rawText || !parser.fn) return false;
     let html;
     try {
       html = parser.fn(rawText);
     } catch (err) {
       console.warn('[TM-UserMD] parse error:', err.message);
-      return;
+      return false;
     }
     const view = document.createElement('div');
     view.setAttribute(A_VIEW, '1');
@@ -425,7 +406,7 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     msgEl.setAttribute(A_DONE, '1');
     msgEl.appendChild(view);
 
-    // ── NEW v2.4.0: async Mermaid rendering (must be post-DOM-insert)
+    // ── Mermaid (must be post-DOM-insert)
     if (window.mermaid) {
       renderMermaidBlocks(view)
         .catch(e => console.warn('[TM-UserMD] Mermaid:', e.message));
@@ -442,6 +423,126 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
         120
       );
     }
+    return true;
+  }
+
+  /* ── POST-EDIT RESYNC (Option 1) ─────────────────────────────── *
+   * Edit-end only: prefer React chat-state text so Replace /       *
+   * Regenerate show the new preview without a page reload.         *
+   * Branch browsing later still uses the normal DOM path.          *
+   * ───────────────────────────────────────────────────────────── */
+  function findUserMsgByUUID(uuid) {
+    if (!uuid) return null;
+    const btn = document.querySelector(`button[id="message-timestamp-${uuid}"]`);
+    return btn?.closest('[data-element-id="response-block"]')
+              ?.querySelector(CFG.sel.userMsg) || null;
+  }
+
+  function clearResync(uuid) {
+    if (_pendingResyncUUID === uuid) _pendingResyncUUID = null;
+    if (_resyncInFlight === uuid)    _resyncInFlight    = null;
+  }
+
+  function resyncAfterEdit(uuid) {
+    if (!uuid) return;
+    if (_resyncInFlight === uuid) return;
+    _resyncInFlight = uuid;
+
+    const MAX = 8;
+    const DELAY = 100;
+
+    const attempt = (n) => {
+      if (_pendingResyncUUID !== uuid) {
+        clearResync(uuid);
+        return;
+      }
+      const msgEl = findUserMsgByUUID(uuid);
+      if (!msgEl || isEditing(msgEl)) {
+        if (n < MAX) setTimeout(() => attempt(n + 1), DELAY);
+        else clearResync(uuid);
+        return;
+      }
+
+      const stateText = getStateText(msgEl);
+      const domText   = getSourceText(msgEl);
+      // Prefer state when present; DOM is fallback while state settles
+      const rawText   = stateText || domText;
+      if (!rawText) {
+        if (n < MAX) setTimeout(() => attempt(n + 1), DELAY);
+        else clearResync(uuid);
+        return;
+      }
+
+      const fp     = rawText.slice(0, 100);
+      const stored = msgEl.getAttribute(A_SRC) || '';
+      if (!(msgEl.hasAttribute(A_DONE) && stored === fp)) {
+        unrender(msgEl);
+        paint(msgEl, rawText);
+      }
+
+      // State present and painted — done (DOM may still lag; that is OK)
+      if (stateText) {
+        clearResync(uuid);
+        // One delayed check: TM sometimes writes state a tick later
+        setTimeout(() => {
+          const el2 = findUserMsgByUUID(uuid);
+          if (!el2 || isEditing(el2)) return;
+          const st2 = getStateText(el2);
+          if (!st2) return;
+          if ((el2.getAttribute(A_SRC) || '') !== st2.slice(0, 100)) {
+            unrender(el2);
+            paint(el2, st2);
+          }
+        }, DELAY);
+        return;
+      }
+
+      // State not ready yet — keep trying with DOM fallback already painted
+      if (n < MAX) setTimeout(() => attempt(n + 1), DELAY);
+      else clearResync(uuid);
+    };
+
+    requestAnimationFrame(() => attempt(0));
+  }
+
+  /* ── RENDER ──────────────────────────────────────────────────── */
+  function render(msgEl) {
+    if (!parser.fn) return;
+    if (isEditing(msgEl)) {
+      snapshotBeforeEdit(msgEl);
+      const uuid = getMsgUUID(msgEl) || _editSnapshot?.uuid || null;
+      if (uuid) {
+        _pendingResyncUUID = uuid;
+        _resyncInFlight    = null; // allow a fresh loop after this edit
+      }
+      unrender(msgEl);
+      return;
+    }
+
+    // Edit just ended for this message → state-backed resync path
+    const uuid = getMsgUUID(msgEl);
+    if (uuid && uuid === _pendingResyncUUID) {
+      resyncAfterEdit(uuid);
+      return;
+    }
+
+    if (msgEl.hasAttribute(A_DONE)) {
+      const view = msgEl.querySelector('[' + A_VIEW + ']');
+      if (!view) {
+        msgEl.removeAttribute(A_DONE);
+        msgEl.removeAttribute(A_SRC);
+      } else {
+        const storedSrc = msgEl.getAttribute(A_SRC) || '';
+        const domSrc    = getSourceText(msgEl).slice(0, 100);
+        if (domSrc === storedSrc) return;
+        // After edit-end resync, DOM often lags while A_SRC already
+        // matches chat state — do not tear down a correct preview.
+        const stateSrc = getStateText(msgEl).slice(0, 100);
+        if (stateSrc && stateSrc === storedSrc) return;
+        unrender(msgEl);
+      }
+    }
+    paint(msgEl, getSourceText(msgEl));
   }
 
   /* ── UNRENDER ────────────────────────────────────────────────── */
@@ -512,7 +613,7 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
     };
     attach();
     new MutationObserver(() => attach()).observe(document.body, { childList: true });
-    console.info('[TM-UserMD] ✅ v2.4.0 — Markdown ON');
+    console.info('[TM-UserMD] ✅ v2.4.1 — Markdown ON');
 
     // ── Stage 2: Math (KaTeX) ─────────────────────────────────────
     injectKatexCss();
@@ -526,7 +627,7 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
         return tmp.innerHTML;
       };
       reRenderAll();
-      console.info('[TM-UserMD] ✅ v2.4.0 — Math (KaTeX) ON');
+      console.info('[TM-UserMD] ✅ v2.4.1 — Math (KaTeX) ON');
     } catch (e) {
       console.warn('[TM-UserMD] KaTeX not loaded:', e.message);
     }
@@ -541,7 +642,7 @@ ${VIEW} .umr-math-err{opacity:.7;font-style:italic;border:1px dashed rgba(255,25
           fontFamily   : 'ui-monospace,"Cascadia Code","Fira Code",monospace',
         });
         reRenderAll(); // pick up Mermaid blocks already on screen
-        console.info('[TM-UserMD] ✅ v2.4.0 — Mermaid ON');
+        console.info('[TM-UserMD] ✅ v2.4.1 — Mermaid ON');
       })
       .catch(e => console.warn('[TM-UserMD] Mermaid not loaded:', e.message));
   }
