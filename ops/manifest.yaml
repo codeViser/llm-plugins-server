@@ -1,0 +1,99 @@
+# Ops ownership manifest — one supervisor per service. No secrets.
+# Source of truth for health contracts and allowlisted remediations.
+version: 1
+paths:
+  pm2_bin: /home/codeviser/.nvm/versions/node/v22.17.0/bin/pm2
+  restart_production: /home/codeviser/Documents/servers/llm-plugins-server/scripts/restart-production.sh
+  cloudflared_ecosystem: /home/codeviser/.cloudflared/ecosystem.config.js
+  evidence_dir: /home/codeviser/Documents/servers/llm-plugins-server/logs/evidence
+  state_dir: /home/codeviser/Documents/servers/llm-plugins-server/logs/ops-state
+  escalate_log: /home/codeviser/Documents/servers/llm-plugins-server/logs/ops-escalate.log
+cooldown_sec: 900
+probe_timeout_sec: 5
+tunnel_flap_restarts_window: 20
+tunnel_flap_threshold: 10
+
+services:
+  - id: cloudflared-tunnel
+    supervisor: pm2
+    pm2_name: cloudflared-tunnel
+    forbid_systemd_unit: /etc/systemd/system/cloudflared.service
+    health:
+      type: cloudflared_ready
+      url: http://127.0.0.1:20241/ready
+      min_ready_connections: 1
+    remediation:
+      class: tunnel_unready
+      action: pm2_restart
+      target: cloudflared-tunnel
+
+  - id: typingmind-proxy
+    supervisor: pm2
+    pm2_name: typingmind-proxy
+    health:
+      type: http_listen
+      port: 3000
+      url: http://127.0.0.1:3000/ping
+      expect_status: 401
+      require_mcp_token_env: true
+    remediation:
+      classes: [origin_hang, origin_down]
+      action: restart_production
+
+  - id: shadow-hub
+    supervisor: pm2
+    pm2_name: shadow-hub
+    health:
+      type: http
+      url: http://127.0.0.1:8790/shadow/healthz
+      expect_status: 200
+    remediation:
+      class: shadow_hub_down
+      action: shadow_stack_reload
+      target: core
+      note: Always joint with shadow-engine + shadow-playwright via llm-shadow-service/deploy/stack.sh
+
+  - id: shadow-engine
+    supervisor: pm2
+    pm2_name: shadow-engine
+    health:
+      type: http
+      url: http://127.0.0.1:8791/healthz
+      expect_status: 200
+    remediation:
+      class: shadow_engine_down
+      action: shadow_stack_reload
+      target: core
+      note: Always joint with shadow-hub + shadow-playwright via llm-shadow-service/deploy/stack.sh
+
+  - id: shadow-playwright
+    supervisor: pm2
+    pm2_name: shadow-playwright
+    health:
+      type: pm2_online_only
+    remediation: null
+
+  - id: openclaw-gateway
+    supervisor: systemd-user
+    systemd_unit: openclaw-gateway.service
+    health:
+      type: systemd_http
+      url: http://127.0.0.1:18789/
+      accept_status_any: true
+    remediation:
+      class: openclaw_inactive
+      action: systemd_user_restart
+      target: openclaw-gateway.service
+
+actions_allowlist:
+  - pm2_restart
+  - shadow_stack_reload
+  - restart_production
+  - systemd_user_restart
+  - none
+
+classes_no_restart:
+  - ok
+  - supervisor_conflict
+  - unknown
+  - tunnel_flapping
