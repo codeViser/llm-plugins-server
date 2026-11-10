@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 const require = createRequire(import.meta.url);
-const { folderPath, scrapeChat, continuationTask, blobIsUsable, chatIdFromLocation, findOpenChat } = require("./shadow_continue.js");
+const { folderPath, scrapeChat, continuationTask, blobIsUsable, blobFromLocalValue, blobFromStoredRecord, localCacheKeys, chatIdFromLocation, findOpenChat } = require("./shadow_continue.js");
 
 const folders = [
   { id: "root-a", title: "AdHocPlans", parentID: null, depth: 0, children: [] },
@@ -235,6 +235,51 @@ assert.equal(blobIsUsable("application/pdf", 241219, 241219, "%PDF-"), true);
 assert.equal(blobIsUsable("text/html", 1752298, 241219, ""), false);
 assert.equal(blobIsUsable("application/pdf", 97, 241219, "%PDF-"), false);
 assert.equal(blobIsUsable("application/pdf", 241219, 241219, "XXXXX"), false);
+assert.equal(blobIsUsable("text/markdown", 31557, 31557, ""), true);
+assert.equal(blobIsUsable("text/html;charset=utf-8", 31557, 31557, ""), false);
+assert.equal(blobIsUsable("application/json", 31557, 31557, ""), false);
+assert.equal(blobIsUsable("application/octet-stream", 241219, 241219, "XXXXX", "application/pdf"), false);
+assert.equal(blobIsUsable("application/octet-stream", 241219, 241219, "%PDF-", "application/pdf"), true);
+
+const cloudRegistry = {
+  "ref-md": {
+    type: "tm_blob_file",
+    text: "[File Attachment: notes.md]",
+    metadata: { name: "notes.md", type: "text/markdown", size: 1200, localBlobID: null }
+  }
+};
+const clearedTail = scrapeChat({
+  attachmentRegistry: cloudRegistry,
+  messages: [
+    { role: "assistant", uuid: "a", content: "hidden", contextClearedAt: "2026-01-01T00:00:00.000Z", tool_calls: [{ id: "c1", function: { name: "search", arguments: "{}" } }] },
+    { role: "tool", uuid: "t", type: "tool-response", content: "result", contextClearedAt: "2026-01-01T00:00:00.000Z", tool_call_id: "c1" },
+    { role: "user", uuid: "u1", content: "one" },
+    { role: "user", uuid: "u2", content: [{ type: "text", text: "two" }, { type: "tm_attachment_ref", id: "ref-md" }] },
+    { role: "user", uuid: "u3", content: "three", contextClearedAt: "2026-01-02T00:00:00.000Z" },
+    { role: "user", uuid: "u4", content: "four" }
+  ]
+}, []);
+assert.equal(clearedTail.messages.filter((message) => message.role === "user").length, 3);
+assert.equal(clearedTail.messages.filter((message) => message.role === "assistant").length, 0);
+assert.equal(clearedTail.messages.filter((message) => message.role === "tool").length, 0);
+assert.equal(clearedTail.query, "four");
+assert.equal(clearedTail.attachments.map((file) => file.name).join(","), "notes.md");
+assert.equal(clearedTail.attachments[0].onQuery, false);
+assert.equal(clearedTail.attachments[0].mime, "text/markdown");
+assert.equal(clearedTail.attachments[0].blobId, "ref-md");
+
+const blocked = scrapeChat({
+  attachmentRegistry: cloudRegistry,
+  messages: [
+    { role: "user", uuid: "old", content: [{ type: "text", text: "before" }, { type: "tm_attachment_ref", id: "ref-md" }] },
+    { type: "clear-context", uuid: "cut" },
+    { role: "assistant", uuid: "kept-a", content: "after" },
+    { role: "user", uuid: "kept-u", content: "continue" }
+  ]
+}, []);
+assert.equal(blocked.messages.map((message) => message.role).join(","), "assistant,user");
+assert.equal(blocked.attachments.length, 0);
+assert.equal(blocked.query, "continue");
 
 const source = readFileSync(new URL("./shadow_continue.js", import.meta.url), "utf8");
 assert.equal(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(source), false);
@@ -245,6 +290,38 @@ assert.equal(source.includes("onViewAttachment"), true);
 assert.equal(source.includes("text/html"), true);
 assert.equal(source.includes("tm_attachment_ref"), true);
 assert.equal(source.includes("sync-v2"), false);
+assert.equal(/attachment\s*\.\s*sync/.test(source), false);
+assert.equal(source.includes("presign"), false);
+assert.equal(source.includes("Download attachment"), true);
+assert.equal(source.includes("Close attachment panel"), true);
+assert.equal(source.includes("response.clone"), false);
+assert.equal(source.includes("window.fetch ="), false);
+assert.equal(source.includes("CLIENT_CACHE_attachment-"), true);
+assert.equal(source.includes("shadow-continue-local"), true);
+assert.equal(source.includes("navigator.share"), true);
+assert.equal(source.includes("webkitIndexedDB"), true);
+assert.equal(source.includes("oncomplete"), true);
+
+const payload = "markdown-local-copy-0123456789-abcdef";
+const rebuilt = blobFromStoredRecord({ mime: "text/markdown", bytes: new TextEncoder().encode(payload) }, "text/plain");
+assert.equal(rebuilt.size, Buffer.byteLength(payload));
+assert.equal(rebuilt.type, "text/markdown");
+const dataUrl = "data:text/markdown;base64," + Buffer.from(payload).toString("base64");
+const cached = blobFromLocalValue({
+  expireAt: 1,
+  cacheGroup: "attachment_preview",
+  value: { base64: dataUrl, rawText: "short", text: "wrapped" }
+}, "text/markdown");
+assert.equal(cached.size, Buffer.byteLength(payload));
+assert.equal(cached.type, "text/markdown");
+const raw = blobFromLocalValue({ rawText: payload }, "text/markdown");
+assert.equal(raw.size, Buffer.byteLength(payload));
+const keys = localCacheKeys({ blobId: "id-1", record: { id: "id-1", metadata: { localBlobID: null } } });
+assert.equal(keys.includes("BLOB_id-1"), true);
+assert.equal(keys.includes("CLIENT_CACHE_attachment-id-1"), true);
+assert.equal(keys.includes("CLIENT_CACHE_attachment-id-1-full-text"), true);
+assert.equal(keys.some((key) => key.includes("sync")), false);
+assert.equal(source.includes("clear-context"), true);
 assert.equal(source.includes("chatIdFromLocation"), true);
 
 const productTitle = "TypingMind — Advanced chat UI for AI models";

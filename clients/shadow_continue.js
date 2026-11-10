@@ -49,12 +49,82 @@
     };
   }
 
-  function blobIsUsable(type, size, expectedSize, magic) {
+  function mimeOf(type) {
+    return String(type || "").split(";")[0].trim().toLowerCase();
+  }
+
+  function blobIsUsable(type, size, expectedSize, magic, expectedType) {
+    const mime = mimeOf(type);
+    const expected = mimeOf(expectedType);
     if (!size || size <= 32) return false;
-    if (type === "text/html") return false;
+    if (mime === "text/html" || mime === "application/json") return false;
     if (expectedSize && size !== expectedSize) return false;
-    if (type === "application/pdf" && magic !== "%PDF-") return false;
+    if ((mime === "application/pdf" || expected === "application/pdf") && magic !== "%PDF-") return false;
     return true;
+  }
+
+  function blobFromDataUrl(value) {
+    if (typeof value !== "string") return null;
+    const comma = value.indexOf(",");
+    if (!value.startsWith("data:") || comma < 0) return null;
+    const meta = value.slice(5, comma);
+    const body = value.slice(comma + 1);
+    const mime = meta.split(";")[0] || "application/octet-stream";
+    let binary = "";
+    try {
+      binary = meta.includes("base64") ? atob(body) : decodeURIComponent(body);
+    } catch (err) {
+      return null;
+    }
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i) & 255;
+    return new Blob([bytes], { type: mime || "application/octet-stream" });
+  }
+
+  function blobFromLocalValue(value, mime) {
+    if (value == null) return null;
+    if (typeof Blob === "function" && value instanceof Blob) return value;
+    if (typeof value === "string") {
+      if (value.startsWith("data:")) return blobFromDataUrl(value);
+      return new Blob([value], { type: mime || "text/plain" });
+    }
+    if (typeof value !== "object") return null;
+    if (value.value !== undefined && (Object.prototype.hasOwnProperty.call(value, "expireAt") || Object.prototype.hasOwnProperty.call(value, "cacheGroup"))) {
+      return blobFromLocalValue(value.value, mime);
+    }
+    if (typeof value.base64 === "string") {
+      const decoded = blobFromDataUrl(value.base64);
+      if (decoded) return decoded;
+    }
+    if (typeof value.rawText === "string" && value.rawText) return new Blob([value.rawText], { type: mime || "text/plain" });
+    return null;
+  }
+
+  function blobFromStoredRecord(stored, mime) {
+    if (stored == null) return null;
+    if (typeof Blob === "function" && stored instanceof Blob) return stored;
+    const bytes = stored && stored.bytes !== undefined ? stored.bytes : null;
+    const type = (stored && stored.mime) || mime || "application/octet-stream";
+    if (bytes instanceof ArrayBuffer || ArrayBuffer.isView(bytes)) return new Blob([bytes], { type });
+    return null;
+  }
+
+  function localCacheKeys(file) {
+    const ids = [];
+    const add = (id) => {
+      const text = id == null ? "" : String(id);
+      if (text && !ids.includes(text)) ids.push(text);
+    };
+    add(file && file.blobId);
+    add(file && file.record && file.record.id);
+    add(file && file.record && file.record.metadata && file.record.metadata.localBlobID);
+    const keys = [];
+    ids.forEach((id) => {
+      keys.push("BLOB_" + id);
+      keys.push("CLIENT_CACHE_attachment-" + id);
+      keys.push("CLIENT_CACHE_attachment-" + id + "-full-text");
+    });
+    return keys;
   }
 
   function attachmentPlaceholder(file) {
@@ -165,12 +235,22 @@
     };
   }
 
+  function lastClearContextIndex(messages) {
+    let index = -1;
+    messages.forEach((message, i) => {
+      if (message && message.type === "clear-context") index = i;
+    });
+    return index;
+  }
+
   function scrapeChat(chat, folders) {
     const messages = (chat && chat.messages) || [];
     const registry = chat && chat.attachmentRegistry;
     const summary = lastUsableSummary(messages);
+    const clearIndex = lastClearContextIndex(messages);
     const kept = [];
     const summarizedFiles = [];
+    const blocked = (index) => clearIndex >= 0 && index <= clearIndex;
     if (summary && summary.contextSummary && summary.contextSummary.content) {
       kept.push({
         role: "summary",
@@ -181,8 +261,12 @@
       });
       const cutoff = summary.contextSummary.contextCutOffAtUUID;
       let passed = !cutoff;
-      messages.forEach((message) => {
-        if (!message || message.type === "tm_context_summary") return;
+      messages.forEach((message, index) => {
+        if (!message || message.type === "tm_context_summary" || message.type === "clear-context") return;
+        if (blocked(index)) {
+          if (message.uuid === cutoff || message.id === cutoff) passed = true;
+          return;
+        }
         if (!passed) {
           summarizedFiles.push(...composeMessage(message, registry).files);
           if (message.uuid === cutoff || message.id === cutoff) passed = true;
@@ -192,8 +276,9 @@
         pushMessage(kept, message, registry);
       });
     } else {
-      messages.forEach((message) => {
-        if (!message || message.type === "tm_context_summary" || message.contextClearedAt) return;
+      messages.forEach((message, index) => {
+        if (!message || message.type === "tm_context_summary" || message.type === "clear-context") return;
+        if (blocked(index) || message.contextClearedAt) return;
         pushMessage(kept, message, registry);
       });
     }
@@ -315,14 +400,20 @@
     return titled.length === 1 ? titled[0] : null;
   }
 
-  const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask, blobIsUsable, formatStartSummary, runsReady, chatIdFromLocation, findOpenChat };
+  const api = { folderPath, scrapeChat, readContent, splitUnanswered, continuationTask, blobIsUsable, blobFromLocalValue, blobFromStoredRecord, localCacheKeys, formatStartSummary, runsReady, chatIdFromLocation, findOpenChat };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 
   if (typeof document === "undefined") return;
 
+  function idbFactory() {
+    return indexedDB || window.webkitIndexedDB || window.mozIndexedDB || null;
+  }
+
   function idbGet(key) {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open("keyval-store");
+      const factory = idbFactory();
+      if (!factory) { reject(new Error("indexedDB unavailable")); return; }
+      const request = factory.open("keyval-store");
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
         const get = request.result.transaction("keyval", "readonly").objectStore("keyval").get(key);
@@ -334,7 +425,9 @@
 
   function idbAll() {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open("keyval-store");
+      const factory = idbFactory();
+      if (!factory) { reject(new Error("indexedDB unavailable")); return; }
+      const request = factory.open("keyval-store");
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
         const get = request.result.transaction("keyval", "readonly").objectStore("keyval").getAll();
@@ -364,26 +457,41 @@
     return localStorage.getItem(TOKEN_KEY) || "";
   }
 
+  function labeled(label) {
+    const nodes = document.querySelectorAll("[aria-label]");
+    for (let i = 0; i < nodes.length; i += 1) {
+      if ((nodes[i].getAttribute("aria-label") || "") === label) return nodes[i];
+    }
+    return null;
+  }
+
   function viewButton(name) {
-    const label = "View " + name;
-    return [...document.querySelectorAll("button")].find((el) => (el.getAttribute("aria-label") || "") === label);
+    return labeled("View " + name);
+  }
+
+  function downloadButton() {
+    return labeled("Download attachment") || labeled("Download file") || labeled("Save attachment");
   }
 
   function closeViewer() {
-    const button = [...document.querySelectorAll("button")].find((el) => (el.getAttribute("aria-label") || "") === "Close");
-    if (button) button.click();
+    const panel = labeled("Close attachment panel");
+    if (panel && typeof panel.click === "function") panel.click();
+    const button = labeled("Close");
+    if (button && !button.closest("#shadowContinue-panel") && typeof button.click === "function") button.click();
   }
 
   function viewerOpener() {
-    const button = [...document.querySelectorAll("button")].find((el) => {
-      const label = el.getAttribute("aria-label") || "";
-      return label.startsWith("View ") && label !== "View assistant";
-    });
+    const nodes = document.querySelectorAll("[aria-label]");
+    let button = null;
+    for (let i = 0; i < nodes.length; i += 1) {
+      const label = nodes[i].getAttribute("aria-label") || "";
+      if (label.startsWith("View ") && label !== "View assistant") { button = nodes[i]; break; }
+    }
     if (!button) return null;
     const fiberKey = Object.keys(button).find((key) => key.startsWith("__reactFiber"));
     let node = fiberKey ? button[fiberKey] : null;
     let guard = 0;
-    while (node && guard < 40) {
+    while (node && guard < 80) {
       const props = node.memoizedProps;
       if (props && typeof props.onViewAttachment === "function") return props.onViewAttachment;
       node = node.return;
@@ -397,36 +505,81 @@
     return String.fromCharCode(...head);
   }
 
-  async function blobsFrom(action) {
+  // Public file. No cloud key, host, or file URL belongs here.
+  // Each device keeps its own copy. Nothing here syncs bytes to another device.
+  async function observeBlobs(action, file) {
     const seen = [];
+    const named = [];
+    let last = null;
     const originalCreate = URL.createObjectURL;
+    const webkit = window.webkitURL;
+    const originalWebkit = webkit && webkit.createObjectURL !== URL.createObjectURL ? webkit.createObjectURL : null;
     const originalClick = HTMLAnchorElement.prototype.click;
-    URL.createObjectURL = function (blob) {
+    const originalShare = navigator.share;
+    const note = (blob, name) => {
+      if (!blob) return;
+      last = blob;
       seen.push(blob);
+      if (name) named.push({ name: String(name), blob });
+    };
+    URL.createObjectURL = function (blob) {
+      note(blob, "");
       return originalCreate.call(URL, blob);
     };
+    if (originalWebkit) {
+      webkit.createObjectURL = function (blob) {
+        note(blob, "");
+        return originalWebkit.call(webkit, blob);
+      };
+    }
     HTMLAnchorElement.prototype.click = function () {
-      if (String(this.href || "").startsWith("blob:")) return undefined;
+      if (last) named.push({ name: this.download || "", blob: last });
+      const href = String(this.href || "");
+      if (href.startsWith("blob:") || href.startsWith("data:")) return undefined;
       return originalClick.call(this);
     };
+    if (typeof originalShare === "function") {
+      const wrapped = function (data) {
+        const files = data && data.files;
+        if (files && typeof files.length === "number") {
+          for (let i = 0; i < files.length; i += 1) note(files[i], files[i] && files[i].name);
+        }
+        return Promise.resolve();
+      };
+      try { navigator.share = wrapped; } catch (err) { /* leave the page share intact */ }
+    }
     try {
       action();
-      await new Promise((resolve) => setTimeout(resolve, 1600));
-      return seen;
+      const started = Date.now();
+      while (Date.now() - started < 1600) {
+        if (file && (await namedDownload(file, named) || await firstUsable(file, seen))) break;
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      return { seen, named };
     } finally {
       URL.createObjectURL = originalCreate;
+      if (originalWebkit) webkit.createObjectURL = originalWebkit;
       HTMLAnchorElement.prototype.click = originalClick;
-      closeViewer();
+      if (typeof originalShare === "function") {
+        try { navigator.share = originalShare; } catch (err) { /* already restored */ }
+      }
     }
   }
 
   async function firstUsable(file, blobs) {
+    let fallback = null;
     for (const blob of blobs) {
       if (!blob) continue;
-      const magic = blob.type === "application/pdf" ? await blobMagic(blob) : "";
-      if (blobIsUsable(blob.type, blob.size, file.size, magic)) return blob;
+      const magic = wantsPdf(blob, file) ? await blobMagic(blob) : "";
+      if (!blobIsUsable(blob.type, blob.size, file.size, magic, file.mime)) continue;
+      if (mimeOf(blob.type) && mimeOf(blob.type) === mimeOf(file.mime)) return blob;
+      if (!fallback) fallback = blob;
     }
-    return null;
+    return fallback;
+  }
+
+  function wantsPdf(blob, file) {
+    return mimeOf(blob && blob.type) === "application/pdf" || mimeOf(file && file.mime) === "application/pdf";
   }
 
   async function ensureViewerOpener() {
@@ -452,25 +605,122 @@
     return null;
   }
 
+  async function namedDownload(file, named) {
+    const match = (named || []).find((item) => item && item.name === file.name && item.blob);
+    if (!match) return null;
+    const magic = wantsPdf(match.blob, file) ? await blobMagic(match.blob) : "";
+    return blobIsUsable(match.blob.type, match.blob.size, file.size, magic, file.mime) ? match.blob : null;
+  }
+
   async function captureByView(file) {
+    let found = null;
     const button = viewButton(file.name);
     if (button) {
-      const blobs = await blobsFrom(() => button.click());
-      const usable = await firstUsable(file, blobs);
-      if (usable) return usable;
+      const viewed = await observeBlobs(() => button.click(), file);
+      found = await firstUsable(file, viewed.seen);
+      if (!found) {
+        const download = downloadButton();
+        if (download) {
+          const saved = await observeBlobs(() => download.click(), file);
+          found = await namedDownload(file, saved.named);
+          if (!found && !saved.named.length) found = await firstUsable(file, saved.seen);
+        }
+      }
     }
-    const open = await ensureViewerOpener();
-    if (!open || !file.record) return null;
-    const blobs = await blobsFrom(() => open({ attachment: file.record }));
-    return firstUsable(file, blobs);
+    if (!found) {
+      const open = await ensureViewerOpener();
+      if (open && file.record) {
+        const opened = await observeBlobs(() => open({ attachment: file.record }), file);
+        found = await firstUsable(file, opened.seen);
+      }
+    }
+    closeViewer();
+    return found;
+  }
+
+  function localDb() {
+    return new Promise((resolve, reject) => {
+      const factory = idbFactory();
+      if (!factory) { reject(new Error("indexedDB unavailable")); return; }
+      const request = factory.open("shadow-continue-local", 1);
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains("files")) request.result.createObjectStore("files");
+      };
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+    });
+  }
+
+  function localId(file) {
+    return String((file && file.record && file.record.id) || (file && file.blobId) || "");
+  }
+
+  async function usableBlob(file, blob) {
+    if (!blob || typeof blob.arrayBuffer !== "function") return null;
+    const magic = wantsPdf(blob, file) ? await blobMagic(blob) : "";
+    return blobIsUsable(blob.type, blob.size, file.size, magic, file.mime) ? blob : null;
+  }
+
+  async function rememberedBlob(file) {
+    const id = localId(file);
+    if (!id) return null;
+    try {
+      const db = await localDb();
+      const stored = await new Promise((resolve, reject) => {
+        const get = db.transaction("files", "readonly").objectStore("files").get(id);
+        get.onsuccess = () => resolve(get.result || null);
+        get.onerror = () => reject(get.error);
+      });
+      db.close();
+      return usableBlob(file, blobFromStoredRecord(stored, file.mime) || stored);
+    } catch (err) {
+      return null;
+    }
+  }
+
+  async function bytesOf(blob) {
+    try {
+      if (typeof blob.arrayBuffer === "function") return await blob.arrayBuffer();
+    } catch (err) { /* FileReader below */ }
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(blob);
+    });
+  }
+
+  async function rememberLocal(file, blob) {
+    const id = localId(file);
+    if (!id || !blob) return;
+    const bytes = await bytesOf(blob);
+    const record = { mime: blob.type || file.mime || "application/octet-stream", bytes };
+    const db = await localDb();
+    try {
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction("files", "readwrite");
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error("aborted"));
+        tx.objectStore("files").put(record, id);
+      });
+    } finally {
+      db.close();
+    }
   }
 
   async function storedBlob(file) {
-    if (!file.blobId) return null;
-    const stored = await idbGet("BLOB_" + file.blobId);
-    if (!stored || typeof stored.arrayBuffer !== "function") return null;
-    const magic = stored.type === "application/pdf" ? await blobMagic(stored) : "";
-    return blobIsUsable(stored.type || file.mime, stored.size, file.size, magic) ? stored : null;
+    const remembered = await rememberedBlob(file);
+    if (remembered) return remembered;
+    for (const key of localCacheKeys(file)) {
+      let stored = null;
+      try { stored = await idbGet(key); } catch (err) { stored = null; }
+      if (!stored) continue;
+      const blob = typeof stored.arrayBuffer === "function" ? stored : blobFromLocalValue(stored, file.mime);
+      const usable = await usableBlob(file, blob);
+      if (usable) return usable;
+    }
+    return null;
   }
 
   function blobToBase64(blob) {
@@ -486,7 +736,13 @@
   }
 
   async function withBytes(file) {
-    const blob = (await captureByView(file)) || (await storedBlob(file));
+    let blob = await storedBlob(file);
+    if (!blob) {
+      blob = await captureByView(file);
+      if (blob) {
+        try { await rememberLocal(file, blob); } catch (err) { /* the send can still use this copy */ }
+      }
+    }
     const data = blob ? await blobToBase64(blob) : "";
     return {
       name: file.name,
