@@ -542,18 +542,22 @@
     return String.fromCharCode(...head);
   }
 
-  // Public file. No cloud key, host, or file URL belongs here.
-  // Each device keeps its own copy. Nothing here syncs bytes to another device.
+  // Public file. No cloud key, host, or file URL is read or stored.
+  // A click lets this page load the attachment. The body that arrives is copied
+  // into a local Blob and kept on this device. The request address is ignored.
   async function observeBlobs(action, file) {
     const seen = [];
     const named = [];
+    const pending = [];
     let last = null;
     const originalCreate = URL.createObjectURL;
+    const originalFetch = window.fetch;
     const webkit = window.webkitURL;
     const originalWebkit = webkit && webkit.createObjectURL !== URL.createObjectURL ? webkit.createObjectURL : null;
     const originalClick = HTMLAnchorElement.prototype.click;
     const originalShare = navigator.share;
     const originalOpen = window.open;
+    const originalSend = XMLHttpRequest.prototype.send;
     const note = (blob, name) => {
       if (!blob) return;
       last = blob;
@@ -570,13 +574,43 @@
         return originalWebkit.call(webkit, blob);
       };
     }
+    window.fetch = function () {
+      return Promise.resolve(originalFetch.apply(this, arguments)).then((response) => {
+        try {
+          if (response && response.type !== "opaque" && typeof response.clone === "function") {
+            pending.push(response.clone().blob().then((blob) => {
+              if (blob && blob.size) note(blob, "");
+            }).catch(() => {}));
+          }
+        } catch (err) { /* the page still receives its response */ }
+        return response;
+      });
+    };
+    XMLHttpRequest.prototype.send = function () {
+      this.addEventListener("load", () => {
+        try {
+          const body = this.response;
+          if (typeof Blob === "function" && body instanceof Blob) note(body, "");
+          else if (body instanceof ArrayBuffer) note(new Blob([body]), "");
+        } catch (err) { /* ignore a body the page did not expose */ }
+      });
+      return originalSend.apply(this, arguments);
+    };
     HTMLAnchorElement.prototype.click = function () {
       if (last) named.push({ name: this.download || "", blob: last });
       const href = String(this.href || "");
       if (href.startsWith("blob:") || href.startsWith("data:") || this.download) return undefined;
       return originalClick.call(this);
     };
-    window.open = function () { return null; };
+    window.open = function (url) {
+      const text = typeof url === "string" ? url : "";
+      if (text.indexOf("blob:") === 0 || text.indexOf("data:") === 0) {
+        pending.push(originalFetch(text).then((response) => response.blob()).then((blob) => {
+          if (blob) note(blob, "");
+        }).catch(() => {}));
+      }
+      return null;
+    };
     if (typeof originalShare === "function") {
       const wrapped = function (data) {
         const files = data && data.files;
@@ -587,16 +621,39 @@
       };
       try { navigator.share = wrapped; } catch (err) { /* leave the page share intact */ }
     }
+    async function displayedLocalBlobs() {
+      const nodes = document.querySelectorAll("img, video, audio, source");
+      for (let i = 0; i < nodes.length; i += 1) {
+        const src = nodes[i].currentSrc || nodes[i].src || "";
+        if (typeof src !== "string") continue;
+        if (src.indexOf("data:") === 0) {
+          const blob = blobFromDataUrl(src);
+          if (blob) note(blob, "");
+        } else if (src.indexOf("blob:") === 0) {
+          try {
+            const response = await originalFetch(src);
+            const blob = await response.blob();
+            if (blob) note(blob, "");
+          } catch (err) { /* a revoked local object is skipped */ }
+        }
+      }
+    }
     try {
       action();
       const started = Date.now();
-      while (Date.now() - started < 5000) {
+      while (Date.now() - started < 8000) {
+        await Promise.all(pending.splice(0, pending.length));
+        await displayedLocalBlobs();
         if (file && (await namedDownload(file, named) || await firstUsable(file, seen))) break;
+        if (!pending.length && Date.now() - started > 6000) break;
         await new Promise((resolve) => setTimeout(resolve, 80));
       }
+      await Promise.all(pending.splice(0, pending.length));
       return { seen, named };
     } finally {
       URL.createObjectURL = originalCreate;
+      window.fetch = originalFetch;
+      XMLHttpRequest.prototype.send = originalSend;
       if (originalWebkit) webkit.createObjectURL = originalWebkit;
       HTMLAnchorElement.prototype.click = originalClick;
       window.open = originalOpen;
