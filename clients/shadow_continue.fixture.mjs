@@ -236,8 +236,17 @@ assert.equal(blobIsUsable("text/html", 1752298, 241219, ""), false);
 assert.equal(blobIsUsable("application/pdf", 97, 241219, "%PDF-"), false);
 assert.equal(blobIsUsable("application/pdf", 241219, 241219, "XXXXX"), false);
 assert.equal(blobIsUsable("text/markdown", 31557, 31557, ""), true);
-assert.equal(blobIsUsable("text/html;charset=utf-8", 31557, 31557, ""), false);
-assert.equal(blobIsUsable("application/json", 31557, 31557, ""), false);
+assert.equal(blobIsUsable("text/html;charset=utf-8", 31557, 31557, ""), true);
+assert.equal(blobIsUsable("application/json", 40, 40, ""), true);
+assert.equal(blobIsUsable("text/html", 1752298, 241219, "", "application/pdf"), false);
+assert.equal(blobIsUsable("text/plain", 20, 20, ""), true);
+const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00]).toString("latin1");
+const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d]).toString("latin1");
+assert.equal(blobIsUsable("image/jpeg", 1200, 1200, jpeg, "image/jpeg"), true);
+assert.equal(blobIsUsable("image/jpeg", 1200, 1200, "XXXXX", "image/jpeg"), false);
+assert.equal(blobIsUsable("image/png", 800, 800, png, "image/png"), true);
+assert.equal(blobIsUsable("application/zip", 900, 900, "PK\u0003\u0004\u0000", "application/zip"), true);
+assert.equal(blobFromLocalValue({ rawText: "not-a-pdf" }, "application/pdf"), null);
 assert.equal(blobIsUsable("application/octet-stream", 241219, 241219, "XXXXX", "application/pdf"), false);
 assert.equal(blobIsUsable("application/octet-stream", 241219, 241219, "%PDF-", "application/pdf"), true);
 
@@ -281,18 +290,56 @@ assert.equal(blocked.messages.map((message) => message.role).join(","), "assista
 assert.equal(blocked.attachments.length, 0);
 assert.equal(blocked.query, "continue");
 
+const shot = scrapeChat({
+  messages: [{
+    role: "user",
+    uuid: "img",
+    content: [{
+      type: "tm_image_file",
+      text: "[Image Attachment: shot.jpg]",
+      metadata: { name: "shot.jpg", type: "image/jpeg", size: 1200, thumbnailBase64: "tiny" }
+    }]
+  }]
+}, []);
+assert.equal(shot.attachments.length, 1);
+assert.equal(shot.attachments[0].mime, "image/jpeg");
+assert.equal(shot.attachments[0].size, 1200);
+assert.equal(shot.attachments[0].inline, "");
+assert.equal(shot.query.includes("[Image Attachment: shot.jpg]"), true);
+assert.equal(shot.query.includes("tiny"), false);
+
+const body = "plain-text-attachment-body-0123456789";
+const pasted = scrapeChat({
+  messages: [{
+    role: "user",
+    uuid: "txt",
+    content: [{ type: "tm_text_file", text: body, metadata: { name: "note.txt" } }]
+  }]
+}, []);
+assert.equal(pasted.attachments.length, 1);
+assert.equal(pasted.attachments[0].mime, "text/plain");
+assert.equal(pasted.attachments[0].inline, body);
+assert.equal(pasted.attachments[0].size, Buffer.byteLength(body));
+assert.equal(pasted.query.includes(body), false);
+assert.equal(pasted.query.includes("note.txt"), true);
+
 const source = readFileSync(new URL("./shadow_continue.js", import.meta.url), "utf8");
 assert.equal(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}/i.test(source), false);
 assert.equal(/bearer\s+[A-Za-z0-9]{8,}/i.test(source), false);
 assert.equal(source.includes("BLOB_"), true);
 assert.equal(source.includes('"View "'), true);
 assert.equal(source.includes("onViewAttachment"), true);
-assert.equal(source.includes("text/html"), true);
+assert.equal(source.includes("text/"), true);
+assert.equal(source.includes('mime === "text/html"'), false);
 assert.equal(source.includes("tm_attachment_ref"), true);
+assert.equal(source.includes("tm_image_file"), true);
+assert.equal(source.includes("tm_text_file"), true);
 assert.equal(source.includes("sync-v2"), false);
 assert.equal(/attachment\s*\.\s*sync/.test(source), false);
 assert.equal(source.includes("presign"), false);
 assert.equal(source.includes("Download attachment"), true);
+assert.equal(source.includes("Download image"), true);
+assert.equal(source.includes("Close image viewer"), true);
 assert.equal(source.includes("Close attachment panel"), true);
 assert.equal(source.includes("response.clone"), false);
 assert.equal(source.includes("window.fetch ="), false);

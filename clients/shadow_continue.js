@@ -39,12 +39,17 @@
     const meta = record.metadata || {};
     const name = meta.name || record.name;
     if (!name) return null;
+    const inline = record.type === "tm_text_file" && typeof record.text === "string" && !isPlaceholder(record.text) ? record.text : "";
+    let size = Number(meta.size || 0);
+    if (!size && inline) size = new Blob([inline]).size;
+    const mime = String(meta.type || (record.type === "tm_text_file" ? "text/plain" : record.type === "tm_image_file" ? "image/jpeg" : "application/octet-stream"));
     return {
       name: String(name),
-      mime: String(meta.type || "application/octet-stream"),
-      text: typeof record.text === "string" ? record.text : "",
+      mime,
+      text: isPlaceholder(record.text) ? String(record.text) : "",
+      inline,
       blobId: String(meta.localBlobID || refId || record.id || ""),
-      size: Number(meta.size || 0),
+      size,
       record
     };
   }
@@ -54,13 +59,43 @@
   }
 
   function blobIsUsable(type, size, expectedSize, magic, expectedType) {
+    const declared = checkedMime(type, expectedType);
+    if (!size) return false;
+    if (expectedSize && size !== expectedSize) return false;
+    if (!expectedSize && size <= 32) return false;
+    if (!prefixOk(declared, magic)) return false;
+    return true;
+  }
+
+  function checkedMime(type, expectedType) {
     const mime = mimeOf(type);
     const expected = mimeOf(expectedType);
-    if (!size || size <= 32) return false;
-    if (mime === "text/html" || mime === "application/json") return false;
-    if (expectedSize && size !== expectedSize) return false;
-    if ((mime === "application/pdf" || expected === "application/pdf") && magic !== "%PDF-") return false;
+    if (mime && mime !== "application/octet-stream") return mime;
+    return expected || mime;
+  }
+
+  function binaryMime(mime) {
+    const kind = mimeOf(mime);
+    return kind === "application/pdf" || kind.indexOf("image/") === 0 || kind === "application/zip" || kind === "application/x-zip-compressed" || kind.indexOf("officedocument") >= 0;
+  }
+
+  function prefixOk(mime, magic) {
+    const kind = mimeOf(mime);
+    if (!kind || kind.indexOf("text/") === 0 || kind === "application/json" || kind === "application/xml" || kind.slice(-5) === "+json" || kind.slice(-4) === "+xml") return true;
+    if (!magic) return !binaryMime(kind);
+    const b0 = magic.charCodeAt(0);
+    const b1 = magic.charCodeAt(1);
+    if (kind === "application/pdf") return magic.indexOf("%PDF-") === 0;
+    if (kind === "image/jpeg" || kind === "image/jpg") return b0 === 255 && b1 === 216;
+    if (kind === "image/png") return b0 === 137 && magic.slice(1, 4) === "PNG";
+    if (kind === "image/gif") return magic.indexOf("GIF8") === 0;
+    if (kind === "image/webp") return magic.indexOf("RIFF") === 0;
+    if (kind === "application/zip" || kind === "application/x-zip-compressed" || kind.indexOf("officedocument") >= 0) return magic.indexOf("PK") === 0;
     return true;
+  }
+
+  function isPlaceholder(text) {
+    return typeof text === "string" && (text.indexOf("[File Attachment:") === 0 || text.indexOf("[Image Attachment") === 0);
   }
 
   function blobFromDataUrl(value) {
@@ -86,6 +121,7 @@
     if (typeof Blob === "function" && value instanceof Blob) return value;
     if (typeof value === "string") {
       if (value.startsWith("data:")) return blobFromDataUrl(value);
+      if (binaryMime(mime)) return null;
       return new Blob([value], { type: mime || "text/plain" });
     }
     if (typeof value !== "object") return null;
@@ -96,7 +132,7 @@
       const decoded = blobFromDataUrl(value.base64);
       if (decoded) return decoded;
     }
-    if (typeof value.rawText === "string" && value.rawText) return new Blob([value.rawText], { type: mime || "text/plain" });
+    if (typeof value.rawText === "string" && value.rawText && !binaryMime(mime)) return new Blob([value.rawText], { type: mime || "text/plain" });
     return null;
   }
 
@@ -128,8 +164,16 @@
   }
 
   function attachmentPlaceholder(file) {
-    if (file.text && file.text.startsWith("[File Attachment:")) return file.text;
+    if (file.text && isPlaceholder(file.text)) return file.text;
+    if (mimeOf(file.mime).indexOf("image/") === 0) return "[Image Attachment: " + file.name + "]";
     return "[File Attachment: " + file.name + "]";
+  }
+
+  function fileFromPart(part, registry) {
+    if (!part || typeof part !== "object") return null;
+    if (part.type === "tm_blob_file" || part.type === "tm_image_file" || part.type === "tm_text_file") return fileRecord(part, part.id);
+    if (part.type === "tm_attachment_ref" && registry && registry[part.id]) return fileRecord(registry[part.id], part.id);
+    return null;
   }
 
   function composeMessage(message, registry) {
@@ -147,9 +191,7 @@
         return;
       }
       if (part.type === "thinking") return;
-      let file = null;
-      if (part.type === "tm_blob_file") file = fileRecord(part, part.id);
-      else if (part.type === "tm_attachment_ref" && registry && registry[part.id]) file = fileRecord(registry[part.id], part.id);
+      const file = fileFromPart(part, registry);
       if (!file) return;
       files.push(file);
       pieces.push(attachmentPlaceholder(file));
@@ -165,13 +207,8 @@
     const files = [];
     content.forEach((part) => {
       if (!part || typeof part !== "object") return;
-      if (part.type === "tm_blob_file") {
-        const file = fileRecord(part, part.id);
-        if (file) files.push(file);
-      } else if (part.type === "tm_attachment_ref" && registry && registry[part.id]) {
-        const file = fileRecord(registry[part.id], part.id);
-        if (file) files.push(file);
-      }
+      const file = fileFromPart(part, registry);
+      if (file) files.push(file);
     });
     return files;
   }
@@ -470,11 +507,11 @@
   }
 
   function downloadButton() {
-    return labeled("Download attachment") || labeled("Download file") || labeled("Save attachment");
+    return labeled("Download attachment") || labeled("Download file") || labeled("Save attachment") || labeled("Download image");
   }
 
   function closeViewer() {
-    const panel = labeled("Close attachment panel");
+    const panel = labeled("Close attachment panel") || labeled("Close image viewer");
     if (panel && typeof panel.click === "function") panel.click();
     const button = labeled("Close");
     if (button && !button.closest("#shadowContinue-panel") && typeof button.click === "function") button.click();
@@ -516,6 +553,7 @@
     const originalWebkit = webkit && webkit.createObjectURL !== URL.createObjectURL ? webkit.createObjectURL : null;
     const originalClick = HTMLAnchorElement.prototype.click;
     const originalShare = navigator.share;
+    const originalOpen = window.open;
     const note = (blob, name) => {
       if (!blob) return;
       last = blob;
@@ -535,9 +573,10 @@
     HTMLAnchorElement.prototype.click = function () {
       if (last) named.push({ name: this.download || "", blob: last });
       const href = String(this.href || "");
-      if (href.startsWith("blob:") || href.startsWith("data:")) return undefined;
+      if (href.startsWith("blob:") || href.startsWith("data:") || this.download) return undefined;
       return originalClick.call(this);
     };
+    window.open = function () { return null; };
     if (typeof originalShare === "function") {
       const wrapped = function (data) {
         const files = data && data.files;
@@ -551,7 +590,7 @@
     try {
       action();
       const started = Date.now();
-      while (Date.now() - started < 1600) {
+      while (Date.now() - started < 5000) {
         if (file && (await namedDownload(file, named) || await firstUsable(file, seen))) break;
         await new Promise((resolve) => setTimeout(resolve, 80));
       }
@@ -560,6 +599,7 @@
       URL.createObjectURL = originalCreate;
       if (originalWebkit) webkit.createObjectURL = originalWebkit;
       HTMLAnchorElement.prototype.click = originalClick;
+      window.open = originalOpen;
       if (typeof originalShare === "function") {
         try { navigator.share = originalShare; } catch (err) { /* already restored */ }
       }
@@ -570,7 +610,7 @@
     let fallback = null;
     for (const blob of blobs) {
       if (!blob) continue;
-      const magic = wantsPdf(blob, file) ? await blobMagic(blob) : "";
+      const magic = wantsHeader(blob, file) ? await blobMagic(blob) : "";
       if (!blobIsUsable(blob.type, blob.size, file.size, magic, file.mime)) continue;
       if (mimeOf(blob.type) && mimeOf(blob.type) === mimeOf(file.mime)) return blob;
       if (!fallback) fallback = blob;
@@ -578,8 +618,8 @@
     return fallback;
   }
 
-  function wantsPdf(blob, file) {
-    return mimeOf(blob && blob.type) === "application/pdf" || mimeOf(file && file.mime) === "application/pdf";
+  function wantsHeader(blob, file) {
+    return binaryMime(blob && blob.type) || binaryMime(file && file.mime);
   }
 
   async function ensureViewerOpener() {
@@ -608,13 +648,31 @@
   async function namedDownload(file, named) {
     const match = (named || []).find((item) => item && item.name === file.name && item.blob);
     if (!match) return null;
-    const magic = wantsPdf(match.blob, file) ? await blobMagic(match.blob) : "";
+    const magic = wantsHeader(match.blob, file) ? await blobMagic(match.blob) : "";
     return blobIsUsable(match.blob.type, match.blob.size, file.size, magic, file.mime) ? match.blob : null;
+  }
+
+  async function revealControl(label) {
+    const ready = labeled(label);
+    if (ready) return ready;
+    const scroller = document.querySelector(".flex-grow.overflow-y-auto");
+    if (!scroller) return null;
+    const step = Math.max(240, Math.floor(scroller.clientHeight * 0.7) || 400);
+    let top = 0;
+    for (let guard = 0; guard < 50; guard += 1) {
+      scroller.scrollTop = top;
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      const found = labeled(label);
+      if (found) return found;
+      if (top >= scroller.scrollHeight) break;
+      top += step;
+    }
+    return null;
   }
 
   async function captureByView(file) {
     let found = null;
-    const button = viewButton(file.name);
+    const button = await revealControl("View " + file.name);
     if (button) {
       const viewed = await observeBlobs(() => button.click(), file);
       found = await firstUsable(file, viewed.seen);
@@ -657,7 +715,7 @@
 
   async function usableBlob(file, blob) {
     if (!blob || typeof blob.arrayBuffer !== "function") return null;
-    const magic = wantsPdf(blob, file) ? await blobMagic(blob) : "";
+    const magic = wantsHeader(blob, file) ? await blobMagic(blob) : "";
     return blobIsUsable(blob.type, blob.size, file.size, magic, file.mime) ? blob : null;
   }
 
@@ -737,17 +795,19 @@
 
   async function withBytes(file) {
     let blob = await storedBlob(file);
-    if (!blob) {
-      blob = await captureByView(file);
-      if (blob) {
-        try { await rememberLocal(file, blob); } catch (err) { /* the send can still use this copy */ }
-      }
+    const fromStore = Boolean(blob);
+    if (!blob && file && file.inline) {
+      blob = await usableBlob(file, new Blob([file.inline], { type: file.mime || "text/plain" }));
+    }
+    if (!blob) blob = await captureByView(file);
+    if (blob && !fromStore) {
+      try { await rememberLocal(file, blob); } catch (err) { /* the send can still use this copy */ }
     }
     const data = blob ? await blobToBase64(blob) : "";
     return {
       name: file.name,
       mime: file.mime,
-      text: file.text,
+      text: file.text || attachmentPlaceholder(file),
       data_base64: data,
       bytes: blob ? blob.size : 0,
       on_query: Boolean(file.onQuery)
